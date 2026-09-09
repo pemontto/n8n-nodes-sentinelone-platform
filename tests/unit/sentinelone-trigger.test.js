@@ -1044,15 +1044,29 @@ test('ActivityFeed access requirements belong in credential docs, not a trigger 
 	assert.match(documentation, /Alert Activity > Occurred trigger requires SDL query access/);
 });
 
-test('scope fields allow accessible sites without an account selection', () => {
+test('optional scopes stay together under Options while legacy roots are hidden', () => {
 	const properties = new SentinelOnePlatformTrigger().description.properties;
-	const accounts = properties.find((property) => property.name === 'accountIds');
-	const sites = properties.find((property) => property.name === 'siteIds');
-	const groups = properties.find((property) => property.name === 'groupIds');
-	assert.equal(accounts.required, undefined);
-	assert.deepEqual(sites.typeOptions.loadOptionsDependsOn, ['accountIds']);
-	assert.equal(sites.displayOptions, undefined);
-	assert.deepEqual(groups.typeOptions.loadOptionsDependsOn, ['accountIds', 'siteIds']);
+	for (const name of ['accountIds', 'siteIds', 'groupIds'])
+		assert.equal(properties.find((p) => p.name === name).type, 'hidden');
+	for (const resource of ['alert', 'alertActivity']) {
+		const options = properties.find(
+			(p) => p.name === 'options' && p.displayOptions.show.resource.includes(resource),
+		);
+		const scope = options.options.find((p) => p.name === 'scope');
+		assert.equal(scope.type, 'fixedCollection');
+		const fields = scope.options[0].values;
+		assert.deepEqual(
+			fields.map((p) => p.name),
+			['accountIds', 'siteIds', 'groupIds'],
+		);
+		assert.deepEqual(fields[1].typeOptions.loadOptionsDependsOn, [
+			'options.scope.selection.accountIds',
+		]);
+		assert.deepEqual(fields[2].typeOptions.loadOptionsDependsOn, [
+			'options.scope.selection.accountIds',
+			'options.scope.selection.siteIds',
+		]);
+	}
 });
 
 test('trigger UI uses resource, operation, and resource-specific options', () => {
@@ -1064,7 +1078,12 @@ test('trigger UI uses resource, operation, and resource-specific options', () =>
 
 	assert.match(source, /displayName: 'Resource'[\s\S]*?name: 'resource'/);
 	assert.match(source, /resource: \['alert'\][\s\S]*?value: 'newOrUpdated'/);
-	assert.match(source, /resource: \['alertActivity'\][\s\S]*?value: 'occurred'/);
+	assert.equal(
+		node.description.properties.find(
+			(p) => p.name === 'operation' && p.displayOptions.show.resource.includes('alertActivity'),
+		).type,
+		'hidden',
+	);
 	assert.match(source, /displayName: 'Options'[\s\S]*?resource: \['alert'\]/);
 	assert.match(source, /displayName: 'Options'[\s\S]*?resource: \['alertActivity'\]/);
 	assert.doesNotMatch(source, /previewLookbackMinutes/);
@@ -1673,6 +1692,8 @@ test('activity builder exposes every shared enum and only recorded value control
 	);
 	const types = properties.find((p) => p.name === 'activityTypes');
 	assert.deepEqual(types.default, ['any']);
+	assert.equal(types.displayName, 'Trigger On');
+	assert.equal(types.description, undefined);
 	assert.deepEqual(
 		types.options.map((o) => o.value).sort(),
 		['any', '16000', '16001', '16002', '16003', '16004', '16005', '16007'].sort(),
@@ -1813,4 +1834,85 @@ test('activity trigger retains valid group selections and resolves their account
 	assert.equal(await new SentinelOnePlatformTrigger().poll.call(context), null);
 	assert.equal(queries, 1);
 	assert.ok(context.staticData.sentinelOneTrigger.configFingerprint);
+});
+
+test('Match Conditions only appears when recorded conditions exist', () => {
+	const { NodeHelpers } = require('n8n-workflow');
+	const control = new SentinelOnePlatformTrigger().description.properties.find(
+		(p) => p.name === 'conditionMatch',
+	);
+	for (const activityConditions of [{}, { conditions: [] }])
+		assert.equal(
+			NodeHelpers.displayParameter(
+				{ resource: 'alertActivity', activityConditions },
+				control,
+				null,
+				null,
+			),
+			false,
+		);
+	assert.equal(
+		NodeHelpers.displayParameter(
+			{ resource: 'alertActivity', activityConditions: { conditions: [{ field: 'status' }] } },
+			control,
+			null,
+			null,
+		),
+		true,
+	);
+});
+
+test('nested trigger scopes override hidden legacy values and keep the group guard', async () => {
+	for (const [resource, operation] of [
+		['alert', 'new'],
+		['alertActivity', 'occurred'],
+	]) {
+		const context = createNodeContext(
+			{
+				resource,
+				operation,
+				siteIds: ['legacy-site'],
+				options: { scope: { selection: { groupIds: ['new-group'] } } },
+			},
+			async () => assert.fail('Must fail before requests'),
+		);
+		await assert.rejects(
+			new SentinelOnePlatformTrigger().poll.call(context),
+			/Group selections require a site selection/,
+		);
+	}
+});
+
+test('resource switches with retained snapshot operations dispatch the hidden activity operation', async () => {
+	const { NodeHelpers } = require('n8n-workflow');
+	const node = new SentinelOnePlatformTrigger();
+	for (const savedOperation of ['new', 'newOrUpdated', 'updated']) {
+		const params = NodeHelpers.getNodeParameters(
+			node.description.properties,
+			{
+				resource: 'alertActivity',
+				operation: savedOperation,
+				options: { scope: { selection: { accountIds: ['account-1'] } } },
+			},
+			true,
+			false,
+			{ typeVersion: 1 },
+			node.description,
+		);
+		assert.equal(params.operation, savedOperation, 'n8n retains the prior resource operation');
+		let sdlRequests = 0;
+		const context = createNodeContext(
+			params,
+			async (request) => {
+				if (request.method === 'GET') return { data: [{ id: 'account-1', name: 'Account One' }] };
+				assert.match(request.url, /\/sdl\/v2\/api\/queries$/);
+				sdlRequests++;
+				return { id: 'empty-job', stepsCompleted: 1, stepsTotal: 1, data: { matches: [] } };
+			},
+			'trigger',
+		);
+		assert.equal(await node.poll.call(context), null);
+		assert.equal(sdlRequests, 1);
+		assert.ok(context.staticData.sentinelOneTrigger.configFingerprint);
+	}
 });

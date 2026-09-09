@@ -113,3 +113,55 @@ export function managementScopeFields(
 		},
 	];
 }
+
+export function legacyManagementScopeFields(
+	displayOptions?: INodeProperties['displayOptions'],
+): INodeProperties[] {
+	return ['accountIds', 'siteIds', 'groupIds'].map((name) => ({
+		displayName: name,
+		name,
+		type: 'hidden',
+		default: [],
+		...(displayOptions ? { displayOptions } : {}),
+	}));
+}
+
+export function managementScopeOption(): INodeProperties {
+	const descriptors: Record<string, Partial<INodeProperties>> = {
+		accountIds: { typeOptions: { loadOptionsMethod: 'getAccounts' } },
+		siteIds: {
+			typeOptions: {
+				loadOptionsMethod: 'getSites',
+				loadOptionsDependsOn: ['options.scope.selection.accountIds'],
+			},
+		},
+		groupIds: {
+			hint: 'Select sites before choosing groups. Leave empty to use the selected sites.',
+			typeOptions: {
+				loadOptionsMethod: 'getGroups',
+				loadOptionsDependsOn: [
+					'options.scope.selection.accountIds',
+					'options.scope.selection.siteIds',
+				],
+			},
+		},
+	};
+	const fields = managementScopeFields().map(
+		(field): INodeProperties => ({
+			...field,
+			...descriptors[field.name],
+			displayOptions: undefined,
+		}),
+	);
+
+	return {
+		displayName: 'Scope',
+		name: 'scope',
+		type: 'fixedCollection',
+		default: {},
+		placeholder: 'Select Scope',
+		description:
+			'Optional account, site and group restrictions. Empty selections use all accessible accounts.',
+		options: [{ displayName: 'Selection', name: 'selection', values: fields }],
+	};
+}

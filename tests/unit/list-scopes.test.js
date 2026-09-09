@@ -89,3 +89,93 @@ test('site and group option loaders pass the selected parents', async () => {
 	assert.equal(calls[1].qs.accountIds, 'a');
 	assert.equal(calls[1].qs.siteIds, 's');
 });
+
+test('nested scope replaces the complete legacy selection and explicit empty clears it', async () => {
+	const { readManagementScopeIds } = require('../../dist/nodes/shared/Scopes');
+	for (const scope of [
+		{},
+		{ selection: {} },
+		{ selection: { accountIds: [], siteIds: [], groupIds: [] } },
+	]) {
+		const context = fixture({
+			accountIds: ['legacy-account'],
+			siteIds: ['legacy-site'],
+			groupIds: ['legacy-group'],
+			options: { scope },
+		});
+		for (const name of ['accountIds', 'siteIds', 'groupIds'])
+			assert.deepEqual(readManagementScopeIds(context, name, 0), []);
+		assert.equal(await readListScope(context, 0), null);
+	}
+	const context = fixture(
+		{
+			accountIds: ['legacy-account'],
+			siteIds: ['legacy-site'],
+			groupIds: ['legacy-group'],
+			options: { scope: { selection: { accountIds: ['new-account'] } } },
+		},
+		async (request) => {
+			assert.ok(request.url.endsWith('/accounts'));
+			return { data: [{ id: 'new-account' }] };
+		},
+	);
+	assert.deepEqual(await readListScope(context, 0), {
+		scopeType: 'ACCOUNT',
+		scopeIds: ['new-account'],
+	});
+});
+
+test('nested scope validates malformed objects without falling back to legacy scope', async () => {
+	for (const scope of [
+		null,
+		[],
+		'invalid',
+		{ selection: null },
+		{ selection: [] },
+		{ selection: { accountIds: 'invalid' } },
+		{ selection: { accountIds: null } },
+	]) {
+		await assert.rejects(
+			readListScope(fixture({ accountIds: ['legacy-account'], options: { scope } }), 0),
+			/object|array/,
+		);
+	}
+});
+
+test('nested scope option loaders use the visible selected parents', async () => {
+	const calls = [];
+	const context = fixture(
+		{
+			accountIds: ['legacy'],
+			options: { scope: { selection: { accountIds: ['new-account'], siteIds: ['new-site'] } } },
+		},
+		async (request) => {
+			calls.push(request);
+			return request.url.endsWith('/sites') ? { data: { sites: [] } } : { data: [] };
+		},
+	);
+	context.getNodeParameter = (name, fallback) => context.getNode().parameters[name] ?? fallback;
+	await loadListScopeOptions(context, 'SITE');
+	await loadListScopeOptions(context, 'GROUP');
+	assert.equal(calls[0].qs.accountIds, 'new-account');
+	assert.equal(calls[1].qs.siteIds, 'new-site');
+});
+
+test('new Get Many scope rejects groups without sites before any request', async () => {
+	let requests = 0;
+	const context = fixture(
+		{
+			siteIds: ['legacy-site'],
+			options: { scope: { selection: { accountIds: ['new-account'], groupIds: ['new-group'] } } },
+		},
+		async () => {
+			requests++;
+			assert.fail('Invalid nested group scope must not request data');
+		},
+	);
+	await assert.rejects(
+		readListScope(context, 0),
+		/Group selections require a site selection.*Select the sites.*clear the group selections/,
+	);
+	assert.equal(requests, 0);
+});

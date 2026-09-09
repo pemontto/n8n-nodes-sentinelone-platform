@@ -13,9 +13,6 @@
 			"parameters": {
 				"resource": "alert",
 				"operation": "getAll",
-				"accountIds": [],
-				"siteIds": [],
-				"groupIds": [],
 				"returnAll": false,
 				"limit": 5,
 				"filters": {},

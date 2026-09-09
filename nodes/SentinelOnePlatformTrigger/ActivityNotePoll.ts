@@ -23,7 +23,7 @@ const PREVIEW_START_MS = Date.UTC(2020, 0, 1);
 export const ACTIVITY_STATE_LIMIT = 40_000;
 export const ALERT_QUERY = `query ActivityAlerts($first: Int!, $after: String, $scope: ScopeSelectorInput!, $filters: [FilterInput!]) {
   alerts(first: $first, after: $after, scope: $scope, viewType: ALL, filters: $filters) {
-    edges { node { id name severity status realTime { scope { account { id name } site { id name } group { id name } } } } }
+    edges { node { id externalId name severity status analystVerdict realTime { scope { account { id name } site { id name } group { id name } } } } }
     pageInfo { hasNextPage endCursor }
   }
 }`;
@@ -241,18 +241,25 @@ async function currentAlerts(
 function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEvent): IDataObject {
 	const scope = scopeOf(config, alert);
 	const item: IDataObject = {
+		alertId: event.alertId,
+		alertName: alert.name ?? null,
+		alertExternalId: alert.externalId ?? null,
 		eventType: 'alert.activity',
 		activityId: event.activityId,
 		activityTypeId: event.activityTypeId,
 		activityKind: event.activityKind,
-		alertId: event.alertId,
 		eventTimestamp: event.createdAt,
-		actor: { id: event.authorId, name: event.authorName },
-		scope: { ...scope, source: 'current' },
 		changes: event.changes,
 	};
 	if (event.noteText !== undefined) item.note = { text: event.noteText };
 	if (event.mitigation !== undefined) item.mitigation = event.mitigation;
+	Object.assign(item, {
+		currentAlertStatus: alert.status ?? null,
+		currentAlertSeverity: alert.severity ?? null,
+		currentAlertAnalystVerdict: alert.analystVerdict ?? null,
+		actor: { id: event.authorId, name: event.authorName },
+		scope: { ...scope, source: 'current' },
+	});
 	if (config.includeRawActivity) {
 		if (!event.rawActivity) throw fail('omitted the full activity record');
 		item.rawActivity = event.rawActivity;

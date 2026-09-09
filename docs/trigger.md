@@ -28,15 +28,15 @@ Missing properties, explicit null, and the literal string `UNDEFINED` remain dis
 
 Assignment conditions match supplied previous/new email values or destination IDs. A previous-email condition requires that field in the event; some events omit it. A destination email or ID condition can match without a previous value. There is no previous-ID selector. Mitigation conditions match action-type and activity-status values from the schema enums; they are value conditions, not completion monitoring.
 
-Account, Site, and Group selections restrict current scope. Empty selections include accessible records. Group selections require at least one selected Site; clearing Sites while retaining Groups fails before requests rather than broadening the query. Current parent alert status and severity filters inspect the parent at polling time, separately from recorded transitions. An old resolution can still match after the alert reopens unless a current-parent filter excludes it. Scope/name exclusions remain available alongside separate actor-name regex and exact actor-ID exclusions.
+Options > Scope groups the optional Account, Site, and Group selections that restrict current scope. Empty selections include accessible records. Group selections require at least one selected Site; clearing Sites while retaining Groups fails before requests rather than broadening the query. Current parent alert status and severity filters inspect the parent at polling time, separately from recorded transitions. An old resolution can still match after the alert reopens unless a current-parent filter excludes it. Scope/name exclusions remain available alongside separate actor-name regex and exact actor-ID exclusions.
 
 ## Output
 
-Each activity produces one item with `eventType: "alert.activity"`, `activityId`, `activityTypeId` as a string, `activityKind`, `alertId`, `eventTimestamp`, `actor`, and `changes`. Scope resolved from a parent lookup is identified as current scope. An event's `alertId` can feed Alert > Get directly without account or site selection.
+Each activity starts with `alertId`, `alertName` and `alertExternalId`, followed by `eventType: "alert.activity"`, `activityId`, `activityTypeId` as a string, `activityKind`, `eventTimestamp`, `changes` and `actor`. The default summary includes `currentAlertStatus`, `currentAlertSeverity` and `currentAlertAnalystVerdict` from the current parent lookup. These fields never stand in for recorded change endpoints. The external ID is the detection source identifier; it can differ from the unified alert ID. Missing summary fields remain null. Scope resolved from a parent lookup is identified as current scope. An event's `alertId` can feed Alert > Get directly without account or site selection.
 
 Each recognised change appears in `changes[]` as `{field, oldValue?, newValue?}`. One activity can contain several changes. An empty array means no recognised changes were supplied. A missing endpoint stays absent; an explicit null stays null. Note and mitigation details appear when supplied. Unknown types retain the generic envelope.
 
-Include Raw Activity adds `rawActivity` with the original flattened keys and exact large integer values. Include Current Alert adds `currentAlert`; it does not replace the event envelope or historical changes. Raw and normal output use the same activity selection and current V2 LOG endpoint.
+Include Raw Activity adds `rawActivity` with the original flattened keys and exact large integer values. Include Current Alert adds the full lookup object as `currentAlert`; the compact alert summary is always present. It does not replace the event envelope or historical changes. Raw and normal output use the same activity selection and current V2 LOG endpoint.
 
 ## Polling and test events
 
@@ -55,3 +55,9 @@ The trigger resource Alert Note > Created has been removed without an alias. The
 Change each affected trigger to Alert Activity > Occurred and select Note created (`16007`). Preserve credentials, Account/Site/Group selections, current-parent filters, exclusions, node labels, and workflow inactive state. Translate the old note-author exclusion to the actor-name exclusion. Translate simplified output to the generic envelope, or enable Include Raw Activity for the old raw setting. Update dependent expressions to the envelope's note details and `alertId` as needed.
 
 Discard note-only polling state during migration. The activity configuration gets a fresh fingerprint and scheduled baseline, with no historical replay. The inactive [note example](../examples/workflows/03-notes.json) uses the new resource and selection. See [testing guidance](testing.md) before using listener controls.
+
+## Scope control migration
+
+Optional scopes now appear under Options > Scope. Saved top-level scope fields remain effective when that option is absent. Adding Scope replaces the entire legacy selection; an empty Scope explicitly selects all accessible accounts. Move existing selections into `options.scope.selection` together, preserving account/site/group values and any expressions. Do not combine a newly selected account with legacy sites or groups. Existing expressions that refer directly to the old parameter paths need review before those legacy fields are removed.
+
+Alert Activity always uses Occurred internally, so its operation dropdown is hidden. The Alert resource still exposes its New, Updated and New or Updated choices. Match Conditions appears only when at least one recorded condition exists.

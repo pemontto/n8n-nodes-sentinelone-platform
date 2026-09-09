@@ -156,7 +156,6 @@ test('action node description exposes the intended v1 resources, operations, and
 		assert.deepEqual(field.displayOptions.show, {
 			resource: ['alert'],
 			operation: ['getAll'],
-			...(name === 'groupIds' ? { siteIds: [{ _cnd: { exists: true } }] } : {}),
 		});
 	}
 

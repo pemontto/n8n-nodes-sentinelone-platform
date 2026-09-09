@@ -4,7 +4,7 @@ Import the four JSON files from [examples/workflows](../examples/workflows). The
 
 ## Configure
 
-Select XDR Demo under Account Names or IDs on List demo alerts and both listener nodes before running them. Public exports leave account IDs empty. Empty read selections otherwise include all accessible accounts.
+Add Options > Scope and select XDR Demo under Account Names or IDs on List demo alerts and both listener nodes before running them. Public exports leave account IDs empty. Empty read selections otherwise include all accessible accounts.
 
 Write branches have a Configure test node with an empty alertId. Fill it with a designated disposable XDR Demo alert ID. The branch fetches that exact ID and checks `realTime.scope.account.name === 'XDR Demo'` before writing. Missing IDs, mismatched IDs, other accounts, and missing account metadata stop the branch. Do not alter the guard or connect a mutation around it.
 
@@ -42,9 +42,11 @@ Record the workflow, operation, expected and observed outcome, verificationStatu
 
 ## Development runtime
 
-Use one coordinated development server when testing several packages. Compile with `pnpm build` or `pnpm build:watch`, then request a restart through that server's launcher after other tests finish. Do not use `n8n-node dev`, `--external-n8n`, or this package's `pnpm dev` script against the shared instance. They register nodes through the CUSTOM loader; n8n 2.38.1 hot reload can lose other local node and credential registrations. Keep hot reload disabled for that setup.
+For normal contributor development, run `pnpm dev` from this package. It invokes the official `n8n-node dev` workflow, starts a development instance and watches the package for changes.
 
-Use package-qualified types for new workflows: `n8n-nodes-sentinelone-platform.sentinelOnePlatform` and `n8n-nodes-sentinelone-platform.sentinelOnePlatformTrigger`. Existing CUSTOM registrations may remain for saved-workflow compatibility. Do not replace existing workflow types or credentials as part of a server restart.
+The maintainer's shared multi-package workspace uses a different setup: one instance with all locally developed packages registered through the community-package loader. Only in that workspace, compile with `pnpm build` or `pnpm build:watch` and coordinate a restart through the shared launcher after other tests finish. Do not run `pnpm dev`, `n8n-node dev` or `--external-n8n` against that instance. Hot reload is disabled there because n8n 2.38.1 CUSTOM reloads can lose other local registrations. These restrictions do not replace the normal contributor workflow.
+
+In that shared workspace, use package-qualified types for new workflows: `n8n-nodes-sentinelone-platform.sentinelOnePlatform` and `n8n-nodes-sentinelone-platform.sentinelOnePlatformTrigger`. Existing CUSTOM registrations may remain for saved-workflow compatibility. Do not replace existing workflow types or credentials as part of a server restart.
 
 Local symlinks loaded through the community-package loader verify registration and editor behaviour. They do not prove that the published files and dependencies work alone. Before release, install the packed tarball into an isolated n8n instance without access to the source tree.
 

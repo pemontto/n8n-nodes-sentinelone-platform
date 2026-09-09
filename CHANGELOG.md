@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased UI and output
+
+- Include alert name, source ID and explicitly current status, severity and verdict in activity output by default.
+- Hide the single activity operation and show Match Conditions only when conditions exist.
+- Group optional alert scopes under Options > Scope while preserving legacy saved selections.
+
 ## Unreleased fixes
 
 - Retry unavailable activity parents within the overlap window, then skip with a sanitised warning.

@@ -1,13 +1,14 @@
 import {
 	additionalAlertFields,
 	analystVerdictOptions,
-	managementScopeFields,
+	legacyManagementScopeFields,
+	managementScopeOption,
 	severityOptions,
 	statusOptions,
 } from '../shared/Descriptions';
 import {
 	loadScopeOptions,
-	scopeIds,
+	readManagementScopeIds,
 	discoverVisibleScopes,
 	isScopePermissionError,
 	type ScopeDiscoveryFilters,
@@ -49,7 +50,7 @@ import { responseStatus, isRetryableReadError, retryAfterMs } from '../shared/tr
 
 const activityFields: INodeProperties[] = [
 	{
-		displayName: 'Activity Types',
+		displayName: 'Trigger On',
 		name: 'activityTypes',
 		type: 'multiOptions',
 		default: ['any'],
@@ -68,17 +69,21 @@ const activityFields: INodeProperties[] = [
 			{ name: 'Severity Changed', value: '16003' },
 			{ name: 'Status Changed', value: '16001' },
 		],
-		description: 'Types to include. Any Alert Activity overrides individual selections.',
 	},
 	{
 		displayName: 'Match Conditions',
 		name: 'conditionMatch',
 		type: 'options',
 		default: 'any',
-		displayOptions: { show: { resource: ['alertActivity'] } },
+		displayOptions: {
+			show: {
+				resource: ['alertActivity'],
+				'activityConditions.conditions': [{ _cnd: { exists: true } }],
+			},
+		},
 		options: [
-			{ name: 'Match Any', value: 'any' },
 			{ name: 'Match All', value: 'all' },
+			{ name: 'Match Any', value: 'any' },
 		],
 		description:
 			'Evaluate all conditions against one activity. Empty conditions match every selected activity type.',
@@ -197,8 +202,11 @@ function normalizeBaseUrl(value: unknown): string {
 		.replace(/\/+$/, '');
 }
 
-function readStringArray(context: IPollFunctions | ILoadOptionsFunctions, name: string): string[] {
-	return scopeIds(context.getNodeParameter(name, []));
+function readStringArray(
+	context: IPollFunctions | ILoadOptionsFunctions,
+	name: 'accountIds' | 'siteIds' | 'groupIds',
+): string[] {
+	return readManagementScopeIds(context, name);
 }
 
 function credentialIdentity(context: IPollFunctions): IDataObject {
@@ -374,22 +382,12 @@ export class SentinelOnePlatformTrigger implements INodeType {
 			{
 				displayName: 'Operation',
 				name: 'operation',
-				type: 'options',
-				noDataExpression: true,
+				type: 'hidden',
 				default: 'occurred',
 				displayOptions: { show: { resource: ['alertActivity'] } },
-				options: [
-					{
-						name: 'Occurred',
-						value: 'occurred',
-						description:
-							'Emit each matching alert activity once within the checkpoint and overlap window',
-						action: 'Trigger on alert activity',
-					},
-				],
 			},
 			...activityFields,
-			...managementScopeFields(),
+			...legacyManagementScopeFields(),
 			{
 				displayName: 'Options',
 				name: 'options',
@@ -398,6 +396,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				default: {},
 				displayOptions: { show: { resource: ['alert'] } },
 				options: [
+					managementScopeOption(),
 					additionalAlertFields('list'),
 					{
 						displayName: 'Advanced Filters',
@@ -484,6 +483,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				default: {},
 				displayOptions: { show: { resource: ['alertActivity'] } },
 				options: [
+					managementScopeOption(),
 					{
 						displayName: 'Alert Name',
 						name: 'alertName',
@@ -568,7 +568,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						type: 'boolean',
 						default: false,
 						description:
-							'Whether to add the current parent alert alongside the activity envelope. Current values do not replace recorded changes.',
+							'Whether to add the raw current parent alert lookup object. Current parent summary fields are always included; recorded changes remain unchanged.',
 					},
 					{
 						displayName: 'Include Raw Activity',
@@ -632,11 +632,16 @@ export class SentinelOnePlatformTrigger implements INodeType {
 			try {
 				const baseUrl = normalizeBaseUrl(credentials.baseUrl);
 				const resource = this.getNodeParameter('resource') as 'alert' | 'alertActivity';
-				const operation = this.getNodeParameter('operation') as
-					| 'occurred'
-					| 'new'
-					| 'newOrUpdated'
-					| 'updated';
+				const savedOperation = this.getNodeParameter(
+					'operation',
+					resource === 'alertActivity' ? 'occurred' : 'new',
+				) as 'occurred' | 'new' | 'newOrUpdated' | 'updated';
+				// n8n retains the old operation when switching resources to a hidden operation.
+				const operation =
+					resource === 'alertActivity' &&
+					['new', 'newOrUpdated', 'updated'].includes(savedOperation)
+						? 'occurred'
+						: savedOperation;
 				if (
 					(resource !== 'alert' && resource !== 'alertActivity') ||
 					(resource === 'alertActivity' && operation !== 'occurred') ||

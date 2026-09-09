@@ -27,13 +27,15 @@ Add **SentinelOne Platform Trigger** as the first node in a workflow and choose 
 | Alert          | New, Updated, New or Updated |
 | Alert Activity | Occurred                     |
 
-The trigger polls on the schedule you configure and keeps checkpoint and deduplication state. Optional Account, Site, and Group selections narrow the records it checks; empty selections include accessible records. A poll with no qualifying events produces no items.
+The trigger polls on the schedule you configure and keeps checkpoint and deduplication state. Optional Account, Site, and Group selections under Options > Scope narrow the records it checks; empty selections include accessible records. A poll with no qualifying events produces no items.
 
 See [trigger configuration](docs/trigger.md) for activity conditions, current-parent filters, delivery limits, and migration guidance.
 
 Alert Activity supports alert creation, status/verdict/severity/assignee changes, mitigation activity, and note creation. It also accepts unknown alert-linked activity types. The condition builder matches recorded values within one activity. Optional raw activity and current alert fields add to a stable event envelope.
 
 Breaking change: Alert Activity > Occurred replaces the trigger's Alert Note > Created resource without an alias. To keep note-only delivery, select Note created (`16007`) and start with fresh trigger state. Alert Note actions and Alert snapshot triggers are unchanged. See [migration steps](docs/trigger.md#breaking-migration-from-alert-note).
+
+Activity output starts with the alert ID, name and source-provided external ID. Current status, severity and analyst verdict are included by default and clearly separated from recorded changes.
 
 ## Documentation
 
@@ -47,6 +49,6 @@ Breaking change: Alert Activity > Occurred replaces the trigger's Alert Note > C
 
 ## Development
 
-Use `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm test`, and `pnpm lint`. For a shared development server, use `pnpm build:watch` and coordinate its restart after compilation; do not run `pnpm dev`. See [development runtime checks](docs/testing.md#development-runtime). This foundation targets 0.1.0; live acceptance testing and npm publication are separate steps. New node and credential identifiers do not automatically migrate existing workflows.
+Use `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm test`, and `pnpm lint`. Run `pnpm dev` for the normal package-local n8n development process. See [development runtime checks](docs/testing.md#development-runtime) for release checks and the maintainer workspace exception. This foundation targets 0.1.0; live acceptance testing and npm publication are separate steps. New node and credential identifiers do not automatically migrate existing workflows.
 
 [Source and issues](https://github.com/pemontto/n8n-nodes-sentinelone-platform). MIT licence; see LICENSE.

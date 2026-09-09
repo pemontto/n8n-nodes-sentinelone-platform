@@ -1,6 +1,7 @@
 import type {
 	IDataObject,
 	IExecuteFunctions,
+	IPollFunctions,
 	INode,
 	IHttpRequestOptions,
 	ILoadOptionsFunctions,
@@ -300,13 +301,39 @@ async function options(
 	);
 }
 
+export function readManagementScopeIds(
+	context: ILoadOptionsFunctions | IPollFunctions | IExecuteFunctions,
+	name: 'accountIds' | 'siteIds' | 'groupIds',
+	itemIndex?: number,
+): string[] {
+	const get = (key: string, fallback: IDataObject | string[]) =>
+		itemIndex === undefined
+			? (context as ILoadOptionsFunctions).getNodeParameter(key, fallback)
+			: (context as IExecuteFunctions).getNodeParameter(key, itemIndex, fallback);
+	const configuration = get('options', {});
+	if (!configuration || typeof configuration !== 'object' || Array.isArray(configuration))
+		throw new Error('Options must be an object.');
+	if (Object.prototype.hasOwnProperty.call(configuration, 'scope')) {
+		const scope = (configuration as IDataObject).scope;
+		if (!scope || typeof scope !== 'object' || Array.isArray(scope))
+			throw new Error('Scope must be an object.');
+		const selection = (scope as IDataObject).selection;
+		if (selection === undefined) return [];
+		if (!selection || typeof selection !== 'object' || Array.isArray(selection))
+			throw new Error('Scope selection must be an object.');
+		const value = (selection as IDataObject)[name];
+		return scopeIds(value === undefined ? [] : value);
+	}
+	return scopeIds(get(name, []));
+}
+
 export async function loadListScopeOptions(
 	context: ILoadOptionsFunctions,
 	scopeType: ScopeType,
 ): Promise<INodePropertyOptions[]> {
 	try {
-		const accountIds = scopeIds(context.getNodeParameter('accountIds', []));
-		const siteIds = scopeIds(context.getNodeParameter('siteIds', []));
+		const accountIds = readManagementScopeIds(context, 'accountIds');
+		const siteIds = readManagementScopeIds(context, 'siteIds');
 		if (scopeType === 'GROUP' && siteIds.length === 0) return [];
 		return await options(
 			context,
@@ -328,11 +355,17 @@ export async function readListScope(
 	itemIndex: number,
 ): Promise<ListScope | null> {
 	try {
-		const accountIds = scopeIds(context.getNodeParameter('accountIds', itemIndex, []));
-		const siteIds = scopeIds(context.getNodeParameter('siteIds', itemIndex, []));
-		const groupIds = siteIds.length
-			? scopeIds(context.getNodeParameter('groupIds', itemIndex, []))
-			: [];
+		const accountIds = readManagementScopeIds(context, 'accountIds', itemIndex);
+		const siteIds = readManagementScopeIds(context, 'siteIds', itemIndex);
+		const configuration = context.getNodeParameter('options', itemIndex, {}) as IDataObject;
+		const hasNewScope = Object.prototype.hasOwnProperty.call(configuration, 'scope');
+		const groupIds =
+			siteIds.length || hasNewScope ? readManagementScopeIds(context, 'groupIds', itemIndex) : [];
+		if (hasNewScope && groupIds.length > 0 && siteIds.length === 0) {
+			throw new Error(
+				'Group selections require a site selection. Select the sites for these groups, or clear the group selections before executing.',
+			);
+		}
 		for (const [scopeType, selected, filters] of [
 			['ACCOUNT', accountIds, { accountIds }],
 			['SITE', siteIds, { accountIds, siteIds }],

@@ -108,9 +108,10 @@ test('note listener migrates to note-only Alert Activity and snapshot listener s
 	assert.equal(note.parameters.operation, 'occurred');
 	assert.deepEqual(note.parameters.activityTypes, ['16007']);
 	assert.equal(note.name, 'Listen for demo notes');
-	assert.deepEqual(note.parameters.accountIds, []);
-	assert.deepEqual(note.parameters.siteIds, []);
-	assert.deepEqual(note.parameters.groupIds, []);
+	for (const key of ['accountIds', 'siteIds', 'groupIds']) {
+		assert.equal(note.parameters[key], undefined);
+	}
+	assert.equal(note.parameters.options.scope, undefined);
 	const snapshot = listeners.find((n) => n.parameters.resource === 'alert');
 	assert.equal(snapshot.parameters.operation, 'newOrUpdated');
 	assert.equal(snapshot.parameters.activityTypes, undefined);

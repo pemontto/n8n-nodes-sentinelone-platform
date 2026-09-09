@@ -143,6 +143,7 @@ test('direct SDL emits exact text with activity ID and never fabricates note ide
 	const result = await pollAlertActivities(request(), c, state(c), 'scheduled', NOW);
 	const item = result.items[0];
 	assert.equal(item.note.text, 'Exact SDL note text');
+	assert.ok(Object.keys(item).indexOf('note') < Object.keys(item).indexOf('scope'));
 	assert.equal(item.activityId, 'activity');
 	assert.equal(item.noteId, undefined);
 	assert.equal(item.actor.name, null);
@@ -498,6 +499,7 @@ test('historical transition matches before optional current alert enrichment', a
 		r.url.includes('/sdl/') ? source : page([{ ...alert(), status: 'IN_PROGRESS' }]);
 	const result = await pollAlertActivities(read, c, state(c), 'scheduled', NOW);
 	assert.equal(result.items[0].currentAlert.status, 'IN_PROGRESS');
+	assert.equal(result.items[0].currentAlertStatus, 'IN_PROGRESS');
 	assert.deepEqual(result.items[0].changes, [
 		{ field: 'status', oldValue: 'NEW', newValue: 'RESOLVED' },
 	]);
@@ -813,4 +815,65 @@ test('repeated budgeted prefixes shrink an outage backlog while wall time advanc
 	}
 	assert.equal(previous.checkpointMs, wallClock);
 	assert.equal(deliveries, 1);
+});
+
+test('activity output leads with alert identity and includes current context without extra lookups', async () => {
+	for (const includeRawActivity of [false, true]) {
+		const c = cfg({ includeRawActivity });
+		let lookups = 0;
+		const parent = {
+			...alert(),
+			externalId: '90071992547409930003',
+			analystVerdict: 'FALSE_POSITIVE_BENIGN',
+		};
+		const read = async (r) => {
+			if (r.url.includes('/sdl/')) return logFeed(feed());
+			lookups++;
+			assert.match(r.body.query, /\bexternalId\b/);
+			assert.match(r.body.query, /\banalystVerdict\b/);
+			return page([parent]);
+		};
+		const result = await pollAlertActivities(read, c, state(c), 'scheduled', NOW);
+		const item = result.items[0];
+		assert.deepEqual(Object.keys(item).slice(0, 3), ['alertId', 'alertName', 'alertExternalId']);
+		assert.equal(item.alertId, 'old-alert');
+		assert.equal(item.alertName, 'Old alert');
+		assert.equal(item.alertExternalId, '90071992547409930003');
+		assert.equal(item.currentAlertStatus, 'NEW');
+		assert.equal(item.currentAlertSeverity, 'HIGH');
+		assert.equal(item.currentAlertAnalystVerdict, 'FALSE_POSITIVE_BENIGN');
+		assert.equal(item.currentAlert, undefined);
+		assert.equal(lookups, 1);
+	}
+});
+
+test('missing current alert context stays null and never borrows historical activity values', async () => {
+	const c = cfg({ activityConditions: [{ field: 'status', to: ['RESOLVED'] }] });
+	const source = logFeed(feed());
+	Object.assign(source.data.matches[0].values, {
+		activity_type: '16001',
+		'data.payload.changes.old_status': 'NEW',
+		'data.payload.changes.new_status': 'RESOLVED',
+	});
+	const parent = alert();
+	for (const key of ['name', 'status', 'severity', 'externalId', 'analystVerdict'])
+		delete parent[key];
+	const result = await pollAlertActivities(
+		async (r) => (r.url.includes('/sdl/') ? source : page([parent])),
+		c,
+		state(c),
+		'scheduled',
+		NOW,
+	);
+	const item = result.items[0];
+	for (const key of [
+		'alertName',
+		'alertExternalId',
+		'currentAlertStatus',
+		'currentAlertSeverity',
+		'currentAlertAnalystVerdict',
+	])
+		assert.equal(item[key], null);
+	assert.equal(item.alertId, 'old-alert');
+	assert.deepEqual(item.changes, [{ field: 'status', oldValue: 'NEW', newValue: 'RESOLVED' }]);
 });
