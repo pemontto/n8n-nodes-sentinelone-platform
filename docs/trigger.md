@@ -8,4 +8,6 @@ Parent Alert Severity and Parent Alert Status apply to a note's parent at pollin
 
 A note event's `alertId` can feed Alert > Get directly without account or site scope. Trigger output retains event metadata.
 
+Fetch Test Event searches recent note activity first, then older windows if no notes match. It returns up to 10 notes from the first matching window and stops, even if only one matches. Scheduled polling still returns all qualifying new events.
+
 Use [inactive testing workflows](testing.md) to check delivery and deduplication. Select the demo account before listening. Keep the listener running while making a designated test change. A poll without new qualifying events produces no items.

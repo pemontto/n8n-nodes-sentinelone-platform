@@ -1656,8 +1656,9 @@ test('the actual note node dispatches through SDL and returns SDL note text with
 	assert.equal(result[0][0].json.activityId, 'event');
 	assert.equal(result[0][0].json.noteText, 'Content from SDL');
 	assert.equal(manual.staticData.sentinelOneTrigger, undefined);
+	assert.equal(sdlCalls, 1);
 	const scheduled = createNodeContext(params, request, 'trigger');
 	assert.equal(await node.poll.call(scheduled), null);
 	assert.match(scheduled.staticData.sentinelOneTrigger.configFingerprint, /:sdl-notes-v2$/);
-	assert.ok(sdlCalls > 2);
+	assert.equal(sdlCalls, 2);
 });

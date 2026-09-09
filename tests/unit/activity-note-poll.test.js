@@ -246,6 +246,25 @@ test('manual preview returns newest ten direct events and ignores corrupt schedu
 	assert.equal(result.nextState, undefined);
 });
 
+test('manual preview stops searching older windows after its first matching note', async () => {
+	let queries = 0;
+	const result = await pollActivityNotes(
+		async (r) => {
+			if (!r.url.includes('/sdl/')) return page([alert()]);
+			queries++;
+			assert.equal(queries, 1, 'must not search another window after finding a note');
+			return feed();
+		},
+		cfg(),
+		{},
+		'manual',
+		NOW,
+	);
+	assert.equal(queries, 1);
+	assert.equal(result.items.length, 1);
+	assert.equal(result.nextState, undefined);
+});
+
 test('activity retention drops only timestamps older than next overlap', async () => {
 	const c = cfg(),
 		previous = state(c, {
@@ -324,7 +343,7 @@ test('manual SDL preview finds old notes and keeps scope nested', async () => {
 	assert.equal(result.nextState, undefined);
 });
 
-test('manual SDL preview visits newest split first and stops after ten eligible notes', async () => {
+test('manual SDL preview visits newest split first and returns up to ten eligible notes', async () => {
 	const windows = [];
 	const result = await pollActivityNotes(
 		async (r) => {
@@ -374,7 +393,7 @@ test('manual preview continues into older windows after newer notes fail filters
 		'manual',
 		NOW,
 	);
-	assert.ok(queries >= 3);
+	assert.equal(queries, 3);
 	assert.deepEqual(
 		result.items.map((x) => x.activityId),
 		['included'],

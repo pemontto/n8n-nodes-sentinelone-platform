@@ -320,7 +320,7 @@ export async function pollActivityNotes(
 				);
 				for (const event of eligible.slice(0, 10 - preview.length))
 					preview.push(output(config, lookup.alerts.get(event.alertId)!, event));
-				return preview.length >= 10;
+				return preview.length > 0;
 			},
 			!config.simplifyOutput,
 		);
