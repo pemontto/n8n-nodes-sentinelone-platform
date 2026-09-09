@@ -778,7 +778,11 @@ test('SDL failures preserve safe HTTP categories at launch and polling', async (
 			[401, /authentication/],
 			[403, /permission/],
 			[429, /rate limit/],
-			[503, /service unavailable/],
+			[500, /server error \(HTTP 500\)/],
+			[501, /server error \(HTTP 501\)/],
+			[503, /server error \(HTTP 503\)/],
+			[422, /request failed \(HTTP 422\)/],
+			[undefined, /no HTTP status was available/],
 			[400, /query configuration/],
 		]) {
 			const calls = [];

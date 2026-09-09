@@ -92,18 +92,29 @@ function complete(payload: IDataObject): boolean {
 
 function requestFailure(stage: 'launch' | 'polling', error: unknown): Error {
 	const status = responseStatus(error);
-	const reason =
-		status === 401
-			? 'authentication failed; check the credential'
-			: status === 403
-				? 'permission denied; check SDL query access'
-				: status === 429
-					? 'rate limit reached; retry after the service delay'
-					: status !== null && status >= 500
-						? `service unavailable (HTTP ${status}); retry later`
-						: status !== null
-							? `request rejected (HTTP ${status}); check the query configuration`
-							: 'network or service unavailable; check connectivity';
+	let reason: string;
+	switch (status) {
+		case 400:
+			reason = 'bad request (HTTP 400); check the query configuration';
+			break;
+		case 401:
+			reason = 'authentication failed; check the credential';
+			break;
+		case 403:
+			reason = 'permission denied; check SDL query access';
+			break;
+		case 429:
+			reason = 'rate limit reached; retry after the service delay';
+			break;
+		default:
+			if (status === null) {
+				reason = 'no HTTP status was available';
+			} else if (status >= 500) {
+				reason = `server error (HTTP ${status})`;
+			} else {
+				reason = `request failed (HTTP ${status})`;
+			}
+	}
 	return failure(`SDL query ${stage} failed: ${reason}`);
 }
 
