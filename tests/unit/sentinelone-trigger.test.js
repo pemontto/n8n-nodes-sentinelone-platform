@@ -1034,12 +1034,14 @@ test('seen alert and version state remains within documented limits', async () =
 	assert.equal(result.nextState.seenAlertVersions.length, MAX_SEEN_ALERT_VERSIONS);
 });
 
-test('trigger UI states ActivityFeed discovery requirements', () => {
-	const source = readFileSync(
-		join(packageRoot, 'nodes/SentinelOnePlatformTrigger/SentinelOnePlatformTrigger.node.ts'),
-		'utf8',
+test('ActivityFeed access requirements belong in credential docs, not a trigger banner', () => {
+	const properties = new SentinelOnePlatformTrigger().description.properties;
+	assert.equal(
+		properties.some((property) => property.name === 'noteActivityFeedNotice'),
+		false,
 	);
-	assert.match(source, /Parent alert updates are not required\./);
+	const documentation = readFileSync(join(packageRoot, 'docs/credentials.md'), 'utf8');
+	assert.match(documentation, /Alert Note > Created trigger requires SDL query access/);
 });
 
 test('scope fields allow accessible sites without an account selection', () => {

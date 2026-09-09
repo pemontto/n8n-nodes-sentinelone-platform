@@ -236,14 +236,6 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					},
 				],
 			},
-			{
-				displayName:
-					'New notes are discovered through SDL ActivityFeed. Parent alert updates are not required. The credential needs SDL query access.',
-				name: 'noteActivityFeedNotice',
-				type: 'notice',
-				default: '',
-				displayOptions: { show: { resource: ['alertNote'] } },
-			},
 			...managementScopeFields(),
 			{
 				displayName: 'Options',
