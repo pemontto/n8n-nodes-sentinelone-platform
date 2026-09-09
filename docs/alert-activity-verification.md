@@ -29,3 +29,5 @@ Both findings were fixed and independently re-reviewed. SDL failures now retain 
 ## Delivery limits
 
 Delivery is once per activity ID within the bounded checkpoint/overlap model. It does not monitor later revisions or mitigation completion and does not guarantee exactly-once downstream processing. Events outside the overlap or source retention may be missed. Incomplete source data, unresolved current alert scope and exhausted limits fail without advancing state. Manual search retains the January 2020 lower boundary and returns at most ten newest matches from its first nonempty matching window; a finite budget can prevent completing that search.
+
+The subsequent shared-server setup uses community-package registration with hot reload disabled. A separate n8n 2.38.1 host probe exposed activation and concurrent-cursor persistence failures. The successful editor previews above do not resolve those scheduled-runtime acceptance gaps. See [development runtime checks](testing.md#development-runtime). No shared scheduler configuration or customer workflow was changed for this follow-up.

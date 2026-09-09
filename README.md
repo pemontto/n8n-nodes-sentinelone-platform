@@ -47,6 +47,6 @@ Breaking change: Alert Activity > Occurred replaces the trigger's Alert Note > C
 
 ## Development
 
-Use `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm test`, `pnpm lint`, and `pnpm dev`. This foundation targets 0.1.0; live acceptance testing and npm publication are separate steps. New node and credential identifiers do not automatically migrate existing workflows.
+Use `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm test`, and `pnpm lint`. For a shared development server, use `pnpm build:watch` and coordinate its restart after compilation; do not run `pnpm dev`. See [development runtime checks](docs/testing.md#development-runtime). This foundation targets 0.1.0; live acceptance testing and npm publication are separate steps. New node and credential identifiers do not automatically migrate existing workflows.
 
 [Source and issues](https://github.com/pemontto/n8n-nodes-sentinelone-platform). MIT licence; see LICENSE.

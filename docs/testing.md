@@ -39,3 +39,13 @@ Open `04-alert-changes.json`, select XDR Demo, and listen for New or Updated eve
 ## Record results
 
 Record the workflow, operation, expected and observed outcome, verificationStatus, and sanitized errors. Settings > Debug provides redacted request diagnostics in server logs. Do not commit execution data, real identifiers, credential references, or logs. User testing precedes a separate publication step.
+
+## Development runtime
+
+Use one coordinated development server when testing several packages. Compile with `pnpm build` or `pnpm build:watch`, then request a restart through that server's launcher after other tests finish. Do not use `n8n-node dev`, `--external-n8n`, or this package's `pnpm dev` script against the shared instance. They register nodes through the CUSTOM loader; n8n 2.38.1 hot reload can lose other local node and credential registrations. Keep hot reload disabled for that setup.
+
+Use package-qualified types for new workflows: `n8n-nodes-sentinelone-platform.sentinelOnePlatform` and `n8n-nodes-sentinelone-platform.sentinelOnePlatformTrigger`. Existing CUSTOM registrations may remain for saved-workflow compatibility. Do not replace existing workflow types or credentials as part of a server restart.
+
+Local symlinks loaded through the community-package loader verify registration and editor behaviour. They do not prove that the published files and dependencies work alone. Before release, install the packed tarball into an isolated n8n instance without access to the source tree.
+
+Scheduled checkpoint persistence also needs host-level acceptance. A separate isolated n8n 2.38.1 polling-engine probe found that activation with a null result discarded its initial cursor and concurrent scheduled tasks could overwrite cursor snapshots, even with durable polling flags enabled. Those observations are not a completed SentinelOne scheduled-runtime test. The package's in-process overlap guard does not establish cross-process cursor safety. Verify activation-to-first-tick behaviour, empty polls, downstream failure, restart recovery and overlapping jobs in an isolated instance before accepting scheduled delivery on a particular runtime. Do not change a shared server's scheduler flags or activate customer workflows for this test.
