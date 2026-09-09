@@ -4,7 +4,7 @@ Verified on 2026-09-09 before delivery. All live checks were read-only. The note
 
 ## Automated checks
 
-The full build and test suite passed all 240 tests. Official node lint, the privacy scanner and the package-content check passed. Formatting passed for tracked files and the new implementation, tests and research documents. No package was published.
+The full build and test suite passed all 242 tests. Official node lint, the privacy scanner and the package-content check passed. Formatting passed for tracked files and the new implementation, tests and research documents. No package was published.
 
 Coverage includes all seven activity categories, unknown types, every shared status/severity/verdict enum and mitigation schema enum, From/To and any/all composition, missing/null/UNDEFINED values, equal endpoints, partial assignment, multiple changes, current-alert reopening, exact actor exclusions, baseline/configuration changes, overlap and late arrivals, unavailable alerts, incomplete scope, query saturation and budget exhaustion, and normal/raw parity. Duplicate tests cover all input orderings of a newer record and conflicting older records with the same ID and timestamp. Snapshot fingerprints retain their previous values.
 
@@ -19,6 +19,12 @@ The actual editor exposed all seven selections and the repeatable condition buil
 The original local test workflow was re-read and migrated to Alert Activity > Occurred, filtered to Note Created (`16007`). Its credential, label, empty scope selections, options and inactive state were preserved. A manual trigger-only preview succeeded with 10 items containing the generic envelope, note details and `scope.source="current"`. No other node ran. The README screenshot shows that canvas without record contents.
 
 The migrated trigger uses a new configuration fingerprint. Its first scheduled poll establishes a fresh baseline rather than reusing note-only state or replaying history. The workflow remains inactive; activation was not part of verification.
+
+## Follow-up reviews
+
+Fresh standards, specification and critic reviews examined the published implementation. The specification review found no deviations. The standards review found that SDL launch/poll errors discarded actionable HTTP categories. The critic found that historical preview forgot newer activity revisions between windows and could return an older matching revision.
+
+Both findings were fixed and independently re-reviewed. SDL failures now retain sanitised authentication, permission, rate-limit, service and configuration categories. Preview retains newest-seen activity timestamps across historical windows and saturation splits. The two new regressions failed against the earlier build and passed after the fixes; the full suite passed 242 tests. The follow-up compiled build returned identical normal/raw selections for 109 activities, and its editor preview returned 10 note-created items with only the trigger running. The workflow remained inactive. Optional catalog consolidation and naming cleanup remain deferred.
 
 ## Delivery limits
 

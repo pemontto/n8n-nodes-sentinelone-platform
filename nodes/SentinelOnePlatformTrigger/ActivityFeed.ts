@@ -1,5 +1,6 @@
 import { sleep as workflowSleep, type IDataObject } from 'n8n-workflow';
 import type { AuthenticatedRequest } from './SentinelOneTriggerHelpers';
+import { responseStatus } from '../shared/transport/retry';
 
 export const ACTIVITY_FEED_LIMIT = 1000;
 export const ACTIVITY_FEED_INLINE_BYTES = 5 * 1024 * 1024;
@@ -89,17 +90,21 @@ function complete(payload: IDataObject): boolean {
 	);
 }
 
-function retryable(error: unknown): boolean {
-	const value = record(error);
-	const response = record(value?.response);
-	const status = Number(
-		value?.statusCode ??
-			value?.httpCode ??
-			value?.status ??
-			response?.status ??
-			response?.statusCode,
-	);
-	return status === 404 || status === 429;
+function requestFailure(stage: 'launch' | 'polling', error: unknown): Error {
+	const status = responseStatus(error);
+	const reason =
+		status === 401
+			? 'authentication failed; check the credential'
+			: status === 403
+				? 'permission denied; check SDL query access'
+				: status === 429
+					? 'rate limit reached; retry after the service delay'
+					: status !== null && status >= 500
+						? `service unavailable (HTTP ${status}); retry later`
+						: status !== null
+							? `request rejected (HTTP ${status}); check the query configuration`
+							: 'network or service unavailable; check connectivity';
+	return failure(`SDL query ${stage} failed: ${reason}`);
 }
 
 function parseLogJson(text: string): unknown {
@@ -288,6 +293,7 @@ export async function readActivityFeed(
 	let queries = 0;
 	const collected = new Map<string, ActivityFeedEvent>();
 	const observedPayloads = new Map<string, string>();
+	const newestTimestamps = new Map<string, bigint>();
 
 	async function queryWindow(start: number, end: number): Promise<ActivityFeedEvent[] | null> {
 		if (++queries > Math.min(maxQueries, 128) || now() >= deadline)
@@ -296,7 +302,8 @@ export async function readActivityFeed(
 		let id: string | undefined;
 		let accepted = false;
 		let routingTag: string | undefined;
-		const unwrap = (response: unknown): IDataObject | undefined => {
+		let lastPollStatus: number | null = null;
+		const captureRouting = (response: unknown): void => {
 			const wrapper = record(response);
 			const headers = record(wrapper?.headers);
 			const routingEntry = Object.entries(headers ?? {}).find(
@@ -308,6 +315,10 @@ export async function readActivityFeed(
 					throw failure('returned an invalid routing header');
 				routingTag = tag;
 			}
+		};
+		const unwrap = (response: unknown): IDataObject | undefined => {
+			captureRouting(response);
+			const wrapper = record(response);
 			const body =
 				wrapper && Object.prototype.hasOwnProperty.call(wrapper, 'body') ? wrapper.body : response;
 			const payload = typeof body === 'string' ? parseLogJson(body) : body;
@@ -318,7 +329,10 @@ export async function readActivityFeed(
 
 		const remaining = () => {
 			const milliseconds = expires - now();
-			if (milliseconds <= 0) throw failure('exceeded the query deadline');
+			if (milliseconds <= 0) {
+				if (lastPollStatus === 429) throw requestFailure('polling', { statusCode: 429 });
+				throw failure('exceeded the query deadline');
+			}
 			return Math.max(1, Math.min(milliseconds, 30_000));
 		};
 		try {
@@ -346,8 +360,8 @@ export async function readActivityFeed(
 					encoding: 'text',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify(queryBody),
-				}).catch(() => {
-					throw failure('SDL query launch failed');
+				}).catch((error: unknown) => {
+					throw requestFailure('launch', error);
 				}),
 			);
 			if (typeof payload?.id !== 'string' || !payload.id.trim())
@@ -392,10 +406,12 @@ export async function readActivityFeed(
 				);
 				if (result.error !== undefined) {
 					const errorResponse = record(record(result.error)?.response);
-					if (errorResponse?.headers) unwrap(errorResponse);
-					if (retryable(result.error)) continue;
-					throw failure('query polling failed');
+					if (errorResponse?.headers) captureRouting(errorResponse);
+					lastPollStatus = responseStatus(result.error);
+					if (lastPollStatus === 404 || lastPollStatus === 429) continue;
+					throw requestFailure('polling', result.error);
 				}
+				lastPollStatus = null;
 				payload = unwrap(result.value);
 			}
 		} finally {
@@ -446,12 +462,9 @@ export async function readActivityFeed(
 			if (observed !== undefined && observed !== payload)
 				throw failure('returned conflicting duplicate activity IDs at the same source timestamp');
 			observedPayloads.set(identity, payload);
-			const previous = collected.get(event.activityId);
-			if (previous) {
-				const previousTimestamp = BigInt(previous.timestampNs);
-				if (timestamp < previousTimestamp) continue;
-				if (timestamp === previousTimestamp) continue;
-			}
+			const previousTimestamp = newestTimestamps.get(event.activityId);
+			if (previousTimestamp !== undefined && timestamp <= previousTimestamp) continue;
+			newestTimestamps.set(event.activityId, timestamp);
 			collected.set(event.activityId, event);
 			windowEvents.set(event.activityId, event);
 		}

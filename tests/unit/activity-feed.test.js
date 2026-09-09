@@ -771,3 +771,93 @@ test('ActivityFeed rejects conflicting older duplicate payloads in every input o
 		await assert.rejects(() => readFull(async () => logResponse(matches)), /conflicting duplicate/);
 	}
 });
+
+test('SDL failures preserve safe HTTP categories at launch and polling', async () => {
+	for (const stage of ['launch', 'polling']) {
+		for (const [statusCode, category] of [
+			[401, /authentication/],
+			[403, /permission/],
+			[429, /rate limit/],
+			[503, /service unavailable/],
+			[400, /query configuration/],
+		]) {
+			const calls = [];
+			await assert.rejects(
+				() =>
+					readFull(
+						async (request) => {
+							calls.push(request.method);
+							if (request.method === 'POST' && stage === 'polling') return { id: 'raw-query' };
+							if (request.method === 'DELETE') return {};
+							throw {
+								statusCode,
+								message: 'SECRET tenant details',
+								response: {
+									headers: { 'x-dataset-query-forward-tag': 'safe-route' },
+									body: 'SECRET non-JSON error body',
+								},
+							};
+						},
+						START,
+						START + 1,
+						clock(),
+					),
+				(error) => {
+					assert.match(error.message, new RegExp(stage));
+					assert.match(error.message, category);
+					assert.doesNotMatch(error.message, /SECRET|tenant details|non-JSON/);
+					assert.match(error.message, /state was not advanced/);
+					return true;
+				},
+			);
+			if (stage === 'polling') assert.equal(calls.at(-1), 'DELETE');
+		}
+	}
+});
+
+test('preview retains newest activity identity across historical and split windows', async () => {
+	for (const split of [false, true]) {
+		const end = START + 86400000 * 2;
+		const newest = logMatch('revised', end - 1000);
+		newest.values.activity_type = '16005';
+		newest.values['data.payload.mitigation_action_status'] = 'SUCCESS';
+		const older = logMatch('revised', split ? end - 86400000 + 1000 : START + 1000);
+		older.values.activity_type = '16005';
+		older.values['data.payload.mitigation_action_status'] = 'RUNNING';
+		const matches = [];
+		let queries = 0;
+		await readActivityFeed(
+			async (request) => {
+				queries++;
+				const body = JSON.parse(request.body);
+				const from = Date.parse(body.startTime),
+					to = Date.parse(body.endTime);
+				if (split && queries === 1) return logResponse(Array.from({ length: 1000 }, () => newest));
+				return logResponse(
+					[newest, older].filter(
+						(event) =>
+							BigInt(event.timestamp) >= BigInt(from) * 1000000n &&
+							BigInt(event.timestamp) < BigInt(to) * 1000000n,
+					),
+				);
+			},
+			BASE,
+			START,
+			end,
+			[],
+			{},
+			async (events) => {
+				matches.push(...events.filter((event) => event.mitigation?.activityStatus === 'RUNNING'));
+				return matches.length > 0;
+			},
+		);
+		assert.deepEqual(
+			matches,
+			[],
+			split
+				? 'split preview must ignore an older revision'
+				: 'historical preview must ignore an older revision',
+		);
+		assert.ok(queries >= 2);
+	}
+});
