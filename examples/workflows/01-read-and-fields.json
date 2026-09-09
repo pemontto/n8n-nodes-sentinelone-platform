@@ -1,0 +1,99 @@
+{
+	"name": "Platform test 1 - Read and fields",
+	"nodes": [
+		{
+			"parameters": {},
+			"id": "00000000-0000-4000-8000-000000000001",
+			"name": "Start test",
+			"type": "n8n-nodes-base.manualTrigger",
+			"typeVersion": 1,
+			"position": [0, 0]
+		},
+		{
+			"parameters": {
+				"resource": "alert",
+				"operation": "getAll",
+				"accountIds": [],
+				"siteIds": [],
+				"groupIds": [],
+				"returnAll": false,
+				"limit": 5,
+				"filters": {},
+				"options": {}
+			},
+			"id": "00000000-0000-4000-8000-000000000002",
+			"name": "List demo alerts",
+			"type": "n8n-nodes-sentinelone-platform.sentinelOnePlatform",
+			"typeVersion": 1,
+			"position": [220, 0]
+		},
+		{
+			"parameters": {
+				"resource": "alert",
+				"operation": "get",
+				"alertId": "={{ $json.id }}",
+				"options": {}
+			},
+			"id": "00000000-0000-4000-8000-000000000003",
+			"name": "Get common fields",
+			"type": "n8n-nodes-sentinelone-platform.sentinelOnePlatform",
+			"typeVersion": 1,
+			"position": [440, 0]
+		},
+		{
+			"parameters": {
+				"resource": "alert",
+				"operation": "get",
+				"alertId": "={{ $json.id }}",
+				"options": {
+					"additionalAlertFields": ["rawData"]
+				}
+			},
+			"id": "00000000-0000-4000-8000-000000000004",
+			"name": "Get optional fields",
+			"type": "n8n-nodes-sentinelone-platform.sentinelOnePlatform",
+			"typeVersion": 1,
+			"position": [660, 0]
+		}
+	],
+	"connections": {
+		"Start test": {
+			"main": [
+				[
+					{
+						"node": "List demo alerts",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"List demo alerts": {
+			"main": [
+				[
+					{
+						"node": "Get common fields",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Get common fields": {
+			"main": [
+				[
+					{
+						"node": "Get optional fields",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		}
+	},
+	"active": false,
+	"settings": {
+		"executionOrder": "v1"
+	},
+	"pinData": {}
+}

@@ -1,0 +1,12 @@
+dist
+node_modules
+.agents/
+.vscode/
+CLAUDE.md
+*.tgz
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+coverage/
+.DS_Store

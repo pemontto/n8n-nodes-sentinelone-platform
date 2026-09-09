@@ -1,0 +1,68 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - '*.*.*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate release tag
+        id: version
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync, appendFileSync } from 'node:fs';
+          const { name, version } = JSON.parse(readFileSync('package.json', 'utf8'));
+          if (name !== 'n8n-nodes-sentinelone-platform' || !/^\d+\.\d+\.\d+$/.test(version) || process.env.GITHUB_REF_NAME !== version) {
+            throw new Error('The tag must exactly match the stable platform package version.');
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
+          NODE
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: pnpm
+          registry-url: https://registry.npmjs.org/
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Check formatting
+        run: pnpm run format:check
+
+      - name: Build and test contracts
+        run: pnpm test
+
+      - name: Check source privacy
+        run: pnpm run privacy:check
+
+      - name: Pack and check the exact release artifact
+        run: node scripts/package-check.mjs --output "$RUNNER_TEMP/sentinelone-package"
+
+      # Configure npm trusted publishing for this repository and publish.yml,
+      # or supply this repository's NPM_TOKEN. Existing repository secrets are not transferred.
+      - name: Publish checked tarball with provenance
+        run: npm publish "$RUNNER_TEMP/sentinelone-package/n8n-nodes-sentinelone-platform-$PACKAGE_VERSION.tgz" --ignore-scripts --provenance --access public
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

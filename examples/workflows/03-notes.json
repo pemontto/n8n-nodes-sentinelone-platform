@@ -1,0 +1,157 @@
+{
+	"name": "Platform test 3 - Note creation and detection",
+	"nodes": [
+		{
+			"parameters": {},
+			"id": "00000000-0000-4000-8000-000000000012",
+			"name": "Start test",
+			"type": "n8n-nodes-base.manualTrigger",
+			"typeVersion": 1,
+			"position": [0, 0]
+		},
+		{
+			"parameters": {
+				"mode": "runOnceForEachItem",
+				"jsCode": "return { json: { alertId: '', expectedAccountName: 'XDR Demo' } };"
+			},
+			"id": "00000000-0000-4000-8000-000000000013",
+			"name": "Configure test",
+			"type": "n8n-nodes-base.code",
+			"typeVersion": 2,
+			"position": [220, 0]
+		},
+		{
+			"parameters": {
+				"mode": "runOnceForEachItem",
+				"jsCode": "const config = $json;\nif (typeof config.alertId !== 'string' || !config.alertId.trim()) throw new Error('Set an explicit disposable XDR Demo alert ID in Configure test.');\nif (config.expectedAccountName !== 'XDR Demo') throw new Error('The expected account must remain XDR Demo.');\nreturn { json: { ...config, alertId: config.alertId.trim() } };"
+			},
+			"id": "00000000-0000-4000-8000-000000000014",
+			"name": "Require explicit alert ID",
+			"type": "n8n-nodes-base.code",
+			"typeVersion": 2,
+			"position": [440, 0]
+		},
+		{
+			"parameters": {
+				"resource": "alert",
+				"operation": "get",
+				"alertId": "={{ $json.alertId }}",
+				"options": {}
+			},
+			"id": "00000000-0000-4000-8000-000000000015",
+			"name": "Get designated alert",
+			"type": "n8n-nodes-sentinelone-platform.sentinelOnePlatform",
+			"typeVersion": 1,
+			"position": [660, 0]
+		},
+		{
+			"parameters": {
+				"mode": "runOnceForEachItem",
+				"jsCode": "const config = $('Require explicit alert ID').item.json;\nconst alert = $json;\nif (alert.id !== config.alertId) throw new Error('Fetched alert ID does not match the explicit test ID.');\nif (alert.realTime?.scope?.account?.name !== 'XDR Demo') throw new Error('Write blocked: the fetched alert is not in XDR Demo or account metadata is missing.');\nreturn { json: { alertId: alert.id, original: { status: alert.status, analystVerdict: alert.analystVerdict, ticketId: alert.ticketId }, updates: config.updates } };"
+			},
+			"id": "00000000-0000-4000-8000-000000000016",
+			"name": "Guard demo account",
+			"type": "n8n-nodes-base.code",
+			"typeVersion": 2,
+			"position": [880, 0]
+		},
+		{
+			"parameters": {
+				"resource": "alertNote",
+				"operation": "create",
+				"alertId": "={{ $json.alertId }}",
+				"text": "={{ 'platform acceptance test ' + $now.toISO() }}",
+				"contentType": "PLAIN_TEXT"
+			},
+			"id": "00000000-0000-4000-8000-000000000017",
+			"name": "Create demo note",
+			"type": "n8n-nodes-sentinelone-platform.sentinelOnePlatform",
+			"typeVersion": 1,
+			"position": [1100, 0]
+		},
+		{
+			"parameters": {
+				"pollTimes": {
+					"item": [
+						{
+							"mode": "everyMinute"
+						}
+					]
+				},
+				"resource": "alertNote",
+				"operation": "created",
+				"accountIds": [],
+				"siteIds": [],
+				"groupIds": [],
+				"options": {}
+			},
+			"id": "00000000-0000-4000-8000-000000000018",
+			"name": "Listen for demo notes",
+			"type": "n8n-nodes-sentinelone-platform.sentinelOnePlatformTrigger",
+			"typeVersion": 1,
+			"position": [0, 260]
+		}
+	],
+	"connections": {
+		"Start test": {
+			"main": [
+				[
+					{
+						"node": "Configure test",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Configure test": {
+			"main": [
+				[
+					{
+						"node": "Require explicit alert ID",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Require explicit alert ID": {
+			"main": [
+				[
+					{
+						"node": "Get designated alert",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Get designated alert": {
+			"main": [
+				[
+					{
+						"node": "Guard demo account",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		},
+		"Guard demo account": {
+			"main": [
+				[
+					{
+						"node": "Create demo note",
+						"type": "main",
+						"index": 0
+					}
+				]
+			]
+		}
+	},
+	"active": false,
+	"settings": {
+		"executionOrder": "v1"
+	},
+	"pinData": {}
+}

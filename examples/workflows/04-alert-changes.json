@@ -1,0 +1,33 @@
+{
+	"name": "Platform test 4 - Alert changes",
+	"nodes": [
+		{
+			"parameters": {
+				"pollTimes": {
+					"item": [
+						{
+							"mode": "everyMinute"
+						}
+					]
+				},
+				"resource": "alert",
+				"operation": "newOrUpdated",
+				"accountIds": [],
+				"siteIds": [],
+				"groupIds": [],
+				"options": {}
+			},
+			"id": "00000000-0000-4000-8000-000000000019",
+			"name": "Listen for demo alert changes",
+			"type": "n8n-nodes-sentinelone-platform.sentinelOnePlatformTrigger",
+			"typeVersion": 1,
+			"position": [0, 0]
+		}
+	],
+	"connections": {},
+	"active": false,
+	"settings": {
+		"executionOrder": "v1"
+	},
+	"pinData": {}
+}

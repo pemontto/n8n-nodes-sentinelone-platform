@@ -1,0 +1,18 @@
+{
+	"node": "n8n-nodes-sentinelone-platform.sentinelOnePlatformTrigger",
+	"nodeVersion": "1.0",
+	"codexVersion": "1.0",
+	"categories": ["Security"],
+	"resources": {
+		"credentialDocumentation": [
+			{
+				"url": "https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/credentials.md"
+			}
+		],
+		"primaryDocumentation": [
+			{
+				"url": "https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md"
+			}
+		]
+	}
+}

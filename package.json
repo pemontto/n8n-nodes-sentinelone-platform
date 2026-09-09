@@ -1,0 +1,67 @@
+{
+	"name": "n8n-nodes-sentinelone-platform",
+	"version": "0.1.0",
+	"description": "n8n community nodes for SentinelOne alerts and SDL",
+	"license": "MIT",
+	"homepage": "https://github.com/pemontto/n8n-nodes-sentinelone-platform#readme",
+	"keywords": [
+		"n8n-community-node-package",
+		"n8n",
+		"sentinelone",
+		"security",
+		"sdl",
+		"trigger"
+	],
+	"author": {
+		"name": "pemontto",
+		"email": "pemontto@users.noreply.github.com"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/pemontto/n8n-nodes-sentinelone-platform.git"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"scripts": {
+		"build": "node scripts/clean-build.mjs && n8n-node build",
+		"build:watch": "tsc --watch",
+		"dev": "n8n-node dev",
+		"lint": "n8n-node lint",
+		"lint:fix": "n8n-node lint --fix",
+		"format:check": "prettier --check nodes credentials tests scripts README.md CHANGELOG.md docs examples",
+		"privacy:check": "node scripts/privacy-check.mjs",
+		"package:check": "node scripts/package-check.mjs",
+		"test": "pnpm run build && node --test tests/**/*.test.js",
+		"release": "n8n-node release",
+		"prepublishOnly": "n8n-node prerelease"
+	},
+	"files": [
+		"dist/nodes",
+		"dist/credentials",
+		"CHANGELOG.md"
+	],
+	"n8n": {
+		"n8nNodesApiVersion": 1,
+		"strict": true,
+		"credentials": [
+			"dist/credentials/SentinelOnePlatformApi.credentials.js"
+		],
+		"nodes": [
+			"dist/nodes/SentinelOnePlatform/SentinelOnePlatform.node.js",
+			"dist/nodes/SentinelOnePlatformTrigger/SentinelOnePlatformTrigger.node.js"
+		]
+	},
+	"devDependencies": {
+		"@n8n/node-cli": "^0.46.4",
+		"eslint": "9.32.0",
+		"graphql": "16.14.2",
+		"prettier": "3.6.2",
+		"release-it": "^19.0.4",
+		"typescript": "5.9.2"
+	},
+	"peerDependencies": {
+		"n8n-workflow": "*"
+	},
+	"packageManager": "pnpm@10.28.2+sha512.41872f037ad22f7348e3b1debbaf7e867cfd448f2726d9cf74c08f19507c31d2c8e7a11525b983febc2df640b5438dee6023ebb1f84ed43cc2d654d2bc326264"
+}
