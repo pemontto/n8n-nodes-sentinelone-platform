@@ -536,3 +536,281 @@ test('name-filter lookup with unresolved selected scope fails without advance', 
 	);
 	assert.deepEqual(previous, before);
 });
+
+test('unavailable parents retry through the overlap boundary, then drop and warn without identifiers', async () => {
+	const warnings = [];
+	const c = cfg({ warnLog: (message, details) => warnings.push({ message, details }) });
+	const timestamp = NOW - 300000;
+	const previous = state(c, { activityActivationMs: NOW - 600000 });
+	const read = request({
+		feed: feed([['private-activity', timestamp, 'private-note']]),
+		alerts: [],
+	});
+	const before = structuredClone(previous);
+	await assert.rejects(
+		() => pollAlertActivities(read, c, previous, 'scheduled', NOW),
+		/recent activity/,
+	);
+	assert.deepEqual(previous, before);
+	assert.deepEqual(warnings, []);
+	const result = await pollAlertActivities(read, c, previous, 'scheduled', NOW + 1);
+	assert.deepEqual(result.items, []);
+	assert.equal(result.nextState.checkpointMs, NOW + 1);
+	assert.deepEqual(warnings[0].details, { droppedActivityCount: 1 });
+	assert.doesNotMatch(JSON.stringify(warnings), /private-activity|private-note|old-alert/);
+});
+test('expired unavailable parents do not block eligible activities and throwing loggers do not pin state', async () => {
+	const c = cfg({
+		warnLog: () => {
+			throw new Error('logger unavailable');
+		},
+	});
+	const source = logFeed(
+		feed([
+			['expired', NOW - 301000, 'drop'],
+			['eligible', NOW - 500, 'keep'],
+		]),
+	);
+	source.data.matches[0].values['data.alert.id'] = 'unavailable';
+	const result = await pollAlertActivities(
+		async (r) => (r.url.includes('/sdl/') ? source : page([alert()])),
+		c,
+		state(c, { activityActivationMs: NOW - 600000 }),
+		'scheduled',
+		NOW,
+	);
+	assert.deepEqual(
+		result.items.map((item) => item.activityId),
+		['eligible'],
+	);
+	assert.equal(result.nextState.checkpointMs, NOW);
+});
+test('one recent unavailable parent prevents advance and expiry warnings for the whole poll', async () => {
+	const warnings = [];
+	const c = cfg({ warnLog: (...args) => warnings.push(args) });
+	await assert.rejects(
+		() =>
+			pollAlertActivities(
+				request({
+					feed: feed([
+						['old', NOW - 301000, 'old'],
+						['recent', NOW - 500, 'recent'],
+					]),
+					alerts: [],
+				}),
+				c,
+				state(c, { activityActivationMs: NOW - 600000 }),
+				'scheduled',
+				NOW,
+			),
+		/recent activity/,
+	);
+	assert.deepEqual(warnings, []);
+});
+test('old activities still fail on malformed current scope and authentication or incomplete lookup', async () => {
+	const c = cfg({ scopeType: 'SITE', scopeIds: ['site'], activityAccountIds: ['a'] });
+	const old = logFeed(feed([['old', NOW - 301000, 'old']]));
+	const malformed = alert();
+	malformed.realTime.scope.site = null;
+	for (const lookup of [
+		() => page([malformed]),
+		() => Promise.reject({ statusCode: 403, message: 'secret' }),
+		() => ({ data: { alerts: { edges: [] } } }),
+	]) {
+		const previous = state(c, { activityActivationMs: NOW - 600000 }),
+			before = structuredClone(previous);
+		await assert.rejects(() =>
+			pollAlertActivities(
+				async (r) => (r.url.includes('/sdl/') ? old : lookup()),
+				c,
+				previous,
+				'scheduled',
+				NOW,
+			),
+		);
+		assert.deepEqual(previous, before);
+	}
+});
+test('manual preview skips expired unavailable parents and finds the first eligible older window', async () => {
+	const warnings = [];
+	const c = cfg({ warnLog: (message, details) => warnings.push({ message, details }) });
+	let queries = 0;
+	const result = await pollAlertActivities(
+		async (r) => {
+			if (r.url.includes('/sdl/')) {
+				const source = logFeed(
+					feed([
+						[++queries === 1 ? 'missing' : 'eligible', NOW - queries * 86400000 + 1000, 'note'],
+					]),
+				);
+				if (queries === 1) source.data.matches[0].values['data.alert.id'] = 'unavailable';
+				return source;
+			}
+			return page(queries === 1 ? [] : [alert()]);
+		},
+		c,
+		{},
+		'manual',
+		NOW,
+	);
+	assert.equal(queries, 2);
+	assert.deepEqual(
+		result.items.map((item) => item.activityId),
+		['eligible'],
+	);
+	assert.equal(result.nextState, undefined);
+	assert.deepEqual(warnings[0].details, { droppedActivityCount: 1 });
+});
+test('sparse outage catch-up reaches the advancing wall clock at supported polling cadences', async () => {
+	for (const cadence of [300000, 600000, 3600000, 86400000, 604800000]) {
+		const c = cfg();
+		let wallClock = NOW;
+		let previous = state(c, {
+			checkpointMs: NOW - 2 * cadence,
+			activityActivationMs: NOW - 3 * cadence,
+		});
+		for (let invocation = 0; invocation < 3; invocation++) {
+			let queries = 0;
+			const result = await pollAlertActivities(
+				async (r) => {
+					assert.ok(r.url.includes('/sdl/'));
+					queries++;
+					return logFeed(feed([]));
+				},
+				c,
+				previous,
+				'scheduled',
+				wallClock,
+			);
+			assert.equal(
+				result.nextState.checkpointMs,
+				wallClock,
+				`cadence ${cadence} invocation ${invocation}`,
+			);
+			assert.ok(queries <= 16, 'sparse ranges grow instead of using fixed five-minute windows');
+			previous = result.nextState;
+			wallClock += cadence;
+		}
+	}
+});
+test('exhausted shared query budget commits only the completed chronological prefix', async () => {
+	const c = cfg();
+	const checkpoint = NOW - 3600000;
+	const windows = [];
+	const previous = state(c, { checkpointMs: checkpoint, activityActivationMs: checkpoint - 1000 });
+	const read = async (r) => {
+		if (!r.url.includes('/sdl/')) return page([alert()]);
+		const body = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
+		const start = Date.parse(body.startTime),
+			end = Date.parse(body.endTime);
+		windows.push([start, end]);
+		return logFeed(feed([['prefix-' + windows.length, end - 1, 'eligible']]));
+	};
+	const result = await pollAlertActivities(read, c, previous, 'scheduled', NOW, { maxQueries: 2 });
+	assert.equal(windows.length, 2, 'all slices share one query budget');
+	assert.equal(windows[1][0], windows[0][1]);
+	assert.equal(result.nextState.checkpointMs, windows[1][1]);
+	assert.ok(result.nextState.checkpointMs > checkpoint && result.nextState.checkpointMs < NOW);
+	assert.equal(result.items.at(-1).activityId, 'prefix-2');
+	assert.equal(result.nextState.seenActivityTimestamps['prefix-2'], ns(windows[1][1] - 1));
+});
+test('an incomplete first slice fails without advancing the saved checkpoint', async () => {
+	const c = cfg();
+	const previous = state(c, { checkpointMs: NOW - 3600000, activityActivationMs: NOW - 7200000 });
+	const before = structuredClone(previous);
+	await assert.rejects(
+		() =>
+			pollAlertActivities(
+				async (r) => {
+					const body = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
+					const start = Date.parse(body.startTime);
+					return logFeed(
+						feed(Array.from({ length: 1000 }, (_, i) => ['saturated-' + i, start + i, 'note'])),
+					);
+				},
+				c,
+				previous,
+				'scheduled',
+				NOW,
+				{ maxQueries: 1 },
+			),
+		/budget|complete|progress/,
+	);
+	assert.deepEqual(previous, before);
+});
+test('backlog prefix drops expired missing activity using wall clock age and retains slice overlap identities', async () => {
+	const checkpoint = NOW - 3600000;
+	const eventTime = checkpoint + 1000;
+	const warnings = [];
+	const c = cfg({ warnLog: (message, details) => warnings.push({ message, details }) });
+	const result = await pollAlertActivities(
+		request({ feed: feed([['missing', eventTime, 'expired']]), alerts: [] }),
+		c,
+		state(c, { checkpointMs: checkpoint, activityActivationMs: checkpoint - 1000 }),
+		'scheduled',
+		NOW,
+		{ maxQueries: 1 },
+	);
+	assert.equal(result.nextState.checkpointMs, checkpoint + 300000);
+	assert.equal(result.nextState.seenActivityTimestamps.missing, ns(eventTime));
+	assert.equal(warnings.length, 1);
+});
+test('failed backlog slice keeps checkpoint and activation or changed config still baselines at now', async () => {
+	const c = cfg();
+	const previous = state(c, { checkpointMs: NOW - 3600000, activityActivationMs: NOW - 7200000 });
+	const before = structuredClone(previous);
+	await assert.rejects(() =>
+		pollAlertActivities(
+			async () => {
+				throw new Error('unavailable');
+			},
+			c,
+			previous,
+			'scheduled',
+			NOW,
+		),
+	);
+	assert.deepEqual(previous, before);
+	const changed = cfg({ activityTypeIds: ['16007'] });
+	const baseline = await pollAlertActivities(request(), changed, previous, 'scheduled', NOW);
+	assert.equal(baseline.nextState.checkpointMs, NOW);
+	assert.equal(baseline.nextState.activityActivationMs, NOW);
+	assert.deepEqual(baseline.items, []);
+});
+
+test('repeated budgeted prefixes shrink an outage backlog while wall time advances and do not redeliver overlap', async () => {
+	const c = cfg();
+	const initial = NOW - 3600000;
+	let wallClock = NOW;
+	let previous = state(c, { checkpointMs: initial, activityActivationMs: initial - 1000 });
+	const activityTime = initial + 300000 - 1;
+	let deliveries = 0;
+	for (let invocation = 0; invocation < 12; invocation++) {
+		const beforeLag = wallClock - previous.checkpointMs;
+		const result = await pollAlertActivities(
+			async (r) => {
+				if (!r.url.includes('/sdl/')) return page([alert()]);
+				const body = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
+				const start = Date.parse(body.startTime),
+					end = Date.parse(body.endTime);
+				return logFeed(
+					feed(
+						activityTime >= start && activityTime < end ? [['once', activityTime, 'overlap']] : [],
+					),
+				);
+			},
+			c,
+			previous,
+			'scheduled',
+			wallClock,
+			{ maxQueries: 2 },
+		);
+		deliveries += result.items.length;
+		assert.ok(wallClock - result.nextState.checkpointMs < beforeLag);
+		previous = result.nextState;
+		if (previous.checkpointMs === wallClock) break;
+		wallClock += 600000;
+	}
+	assert.equal(previous.checkpointMs, wallClock);
+	assert.equal(deliveries, 1);
+});

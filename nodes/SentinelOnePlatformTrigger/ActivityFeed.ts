@@ -264,6 +264,46 @@ function canonical(value: unknown): string {
 	return JSON.stringify(value) ?? 'undefined';
 }
 
+export interface ActivityFeedPrefixOptions {
+	baseUrl: string;
+	startMs: number;
+	endMs: number;
+	checkpointMs: number;
+	accountIds?: string[];
+	timing?: ActivityFeedTiming;
+	activityTypeIds?: string[];
+	maxEvents?: number;
+}
+
+export interface ActivityFeedPrefix {
+	events: ActivityFeedEvent[];
+	completedThroughMs: number;
+}
+
+class ActivityFeedBudgetError extends Error {
+	constructor(message: string) {
+		super(`SentinelOne ActivityFeed ${message}; state was not advanced.`);
+	}
+}
+
+export async function readActivityFeedPrefix(
+	request: AuthenticatedRequest,
+	options: ActivityFeedPrefixOptions,
+): Promise<ActivityFeedPrefix> {
+	return readActivityFeedRun(
+		request,
+		options.baseUrl,
+		options.startMs,
+		options.endMs,
+		options.accountIds,
+		options.timing,
+		undefined,
+		false,
+		options.activityTypeIds,
+		{ checkpointMs: options.checkpointMs, maxEvents: options.maxEvents ?? 40000 },
+	);
+}
+
 export async function readActivityFeed(
 	request: AuthenticatedRequest,
 	baseUrl: string,
@@ -275,6 +315,33 @@ export async function readActivityFeed(
 	fullOutput = false,
 	activityTypeIds?: string[],
 ): Promise<ActivityFeedEvent[]> {
+	return (
+		await readActivityFeedRun(
+			request,
+			baseUrl,
+			startMs,
+			endMs,
+			accountIds,
+			timing,
+			previewWindow,
+			fullOutput,
+			activityTypeIds,
+		)
+	).events;
+}
+
+async function readActivityFeedRun(
+	request: AuthenticatedRequest,
+	baseUrl: string,
+	startMs: number,
+	endMs: number,
+	accountIds: string[] = [],
+	timing: ActivityFeedTiming = {},
+	previewWindow?: (events: ActivityFeedEvent[]) => Promise<boolean>,
+	fullOutput = false,
+	activityTypeIds?: string[],
+	prefix?: { checkpointMs: number; maxEvents: number },
+): Promise<ActivityFeedPrefix> {
 	if (
 		typeof fullOutput !== 'boolean' ||
 		!Number.isSafeInteger(startMs) ||
@@ -287,6 +354,16 @@ export async function readActivityFeed(
 			(!activityTypeIds.length || activityTypeIds.some((id) => !/^\d+$/.test(id))))
 	)
 		throw failure('requires a valid half-open time window, account IDs and activity selection');
+	if (
+		prefix &&
+		(!Number.isSafeInteger(prefix.checkpointMs) ||
+			prefix.checkpointMs < startMs ||
+			prefix.checkpointMs >= endMs ||
+			!Number.isSafeInteger(prefix.maxEvents) ||
+			prefix.maxEvents < 1)
+	)
+		throw failure('requires a valid prefix checkpoint and event limit');
+	let completedThroughMs = startMs;
 	const now = timing.now ?? Date.now;
 	const sleep = timing.sleep ?? workflowSleep;
 	const deadlineMs = timing.deadlineMs ?? 300_000;
@@ -308,7 +385,7 @@ export async function readActivityFeed(
 
 	async function queryWindow(start: number, end: number): Promise<ActivityFeedEvent[] | null> {
 		if (++queries > Math.min(maxQueries, 128) || now() >= deadline)
-			throw failure('exceeded the query budget or deadline');
+			throw new ActivityFeedBudgetError('exceeded the query budget or deadline');
 		const expires = Math.min(deadline, now() + Math.min(lifecycleMs, 100_000));
 		let id: string | undefined;
 		let accepted = false;
@@ -342,7 +419,7 @@ export async function readActivityFeed(
 			const milliseconds = expires - now();
 			if (milliseconds <= 0) {
 				if (lastPollStatus === 429) throw requestFailure('polling', { statusCode: 429 });
-				throw failure('exceeded the query deadline');
+				throw new ActivityFeedBudgetError('exceeded the query deadline');
 			}
 			return Math.max(1, Math.min(milliseconds, 30_000));
 		};
@@ -379,11 +456,28 @@ export async function readActivityFeed(
 				throw failure('create response omitted its query ID');
 			id = payload.id;
 			while (true) {
-				remaining();
 				if (!payload) throw failure('returned an invalid query response');
+				if (prefix) {
+					for (const key of ['stepsCompleted', 'stepsTotal']) {
+						const value = payload[key];
+						if (
+							value !== undefined &&
+							(typeof value !== 'number' || !Number.isFinite(value) || value < 0)
+						)
+							throw failure('returned invalid query completion counters');
+					}
+					if (
+						typeof payload.stepsCompleted === 'number' &&
+						typeof payload.stepsTotal === 'number' &&
+						payload.stepsCompleted >= payload.stepsTotal &&
+						!record(payload.data)
+					)
+						throw failure('returned invalid completed query data');
+				}
 				if (payload.id !== undefined && payload.id !== id)
 					throw failure('returned a mismatched query ID');
 				validateQuality(payload);
+				remaining();
 				let externalResult = false;
 				for (const part of [payload, record(payload.data)]) {
 					const url = part?.fullResultUrl;
@@ -473,19 +567,52 @@ export async function readActivityFeed(
 			if (observed !== undefined && observed !== payload)
 				throw failure('returned conflicting duplicate activity IDs at the same source timestamp');
 			observedPayloads.set(identity, payload);
-			const previousTimestamp = newestTimestamps.get(event.activityId);
+			const pending = windowEvents.get(event.activityId);
+			const previousTimestamp = pending
+				? BigInt(pending.timestampNs)
+				: newestTimestamps.get(event.activityId);
 			if (previousTimestamp !== undefined && timestamp <= previousTimestamp) continue;
-			newestTimestamps.set(event.activityId, timestamp);
-			collected.set(event.activityId, event);
 			windowEvents.set(event.activityId, event);
 		}
 		const acceptedRows = [...windowEvents.values()];
+		if (
+			prefix &&
+			collected.size + acceptedRows.filter((event) => !collected.has(event.activityId)).length >
+				Math.min(prefix.maxEvents, 40000)
+		)
+			throw new ActivityFeedBudgetError('exceeded the activity event budget');
+		for (const event of acceptedRows) {
+			newestTimestamps.set(event.activityId, BigInt(event.timestampNs));
+			collected.set(event.activityId, event);
+		}
+		completedThroughMs = end;
 		if (previewWindow) {
 			previewComplete = await previewWindow(acceptedRows);
 			collected.clear();
 		}
 	}
-	if (previewWindow) {
+	if (prefix) {
+		let start = startMs;
+		let end = Math.min(endMs, prefix.checkpointMs + 300000);
+		let width = 300000;
+		try {
+			while (start < endMs) {
+				await visit(start, end);
+				start = end;
+				width = Math.min(width * 2, endMs - start);
+				end = start + width;
+			}
+		} catch (error) {
+			if (
+				!(error instanceof ActivityFeedBudgetError) ||
+				completedThroughMs <= prefix.checkpointMs
+			) {
+				// The trigger boundary wraps these sanitized reader failures with its node context.
+				// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+				throw error;
+			}
+		}
+	} else if (previewWindow) {
 		let end = endMs;
 		let width = 86400000;
 		while (end > startMs && !previewComplete) {
@@ -497,9 +624,10 @@ export async function readActivityFeed(
 	} else {
 		await visit(startMs, endMs);
 	}
-	return [...collected.values()].sort((left, right) => {
+	const events = [...collected.values()].sort((left, right) => {
 		const a = BigInt(left.timestampNs),
 			b = BigInt(right.timestampNs);
 		return a < b ? -1 : a > b ? 1 : left.activityId.localeCompare(right.activityId);
 	});
+	return { events, completedThroughMs };
 }

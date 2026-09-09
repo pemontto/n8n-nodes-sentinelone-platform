@@ -865,3 +865,194 @@ test('preview retains newest activity identity across historical and split windo
 		assert.ok(queries >= 2);
 	}
 });
+
+const {
+	readActivityFeedPrefix,
+} = require('../../dist/nodes/SentinelOnePlatformTrigger/ActivityFeed.js');
+const prefixOptions = (extra = {}) => ({
+	baseUrl: BASE,
+	startMs: START,
+	checkpointMs: START,
+	endMs: START + 86400000,
+	...extra,
+});
+
+test('ActivityFeed prefix grows chronological sparse windows and includes overlap plus new time', async () => {
+	const windows = [];
+	const result = await readActivityFeedPrefix(
+		async (request) => {
+			const body = JSON.parse(request.body);
+			windows.push([Date.parse(body.startTime), Date.parse(body.endTime)]);
+			return logResponse([]);
+		},
+		prefixOptions({ startMs: START - 300000, endMs: START + 7 * 86400000 }),
+	);
+	assert.deepEqual(windows.slice(0, 3), [
+		[START - 300000, START + 300000],
+		[START + 300000, START + 900000],
+		[START + 900000, START + 2100000],
+	]);
+	assert.equal(result.completedThroughMs, START + 7 * 86400000);
+	assert.ok(windows.length < 15);
+	assert.deepEqual(result.events, []);
+});
+
+test('ActivityFeed prefix returns only completed windows on the shared query budget', async () => {
+	const result = await readActivityFeedPrefix(
+		async (request) => {
+			const body = JSON.parse(request.body);
+			return logResponse([logMatch(body.startTime, Date.parse(body.startTime))]);
+		},
+		prefixOptions({ timing: { maxQueries: 2 } }),
+	);
+	assert.equal(result.completedThroughMs, START + 900000);
+	assert.equal(result.events.length, 2);
+});
+
+test('ActivityFeed prefix keeps completed saturated subdivisions and rejects no forward progress', async () => {
+	const request = async (input) => {
+		const body = JSON.parse(input.body);
+		const start = Date.parse(body.startTime),
+			end = Date.parse(body.endTime);
+		return logResponse(
+			end - start > 150000
+				? Array.from({ length: 1000 }, (_, i) => logMatch(String(i), start))
+				: [logMatch(String(start), start)],
+		);
+	};
+	const result = await readActivityFeedPrefix(
+		request,
+		prefixOptions({ timing: { maxQueries: 2 } }),
+	);
+	assert.equal(result.completedThroughMs, START + 150000);
+	assert.equal(result.events.length, 1);
+	await assert.rejects(
+		() => readActivityFeedPrefix(request, prefixOptions({ timing: { maxQueries: 1 } })),
+		/query budget/,
+	);
+});
+
+test('ActivityFeed prefix stops before a whole leaf exceeds the event budget', async () => {
+	const request = async (input) => {
+		const start = Date.parse(JSON.parse(input.body).startTime);
+		return logResponse(
+			start === START
+				? [logMatch('first', start)]
+				: [logMatch('second', start), logMatch('third', start)],
+		);
+	};
+	const result = await readActivityFeedPrefix(request, prefixOptions({ maxEvents: 2 }));
+	assert.equal(result.completedThroughMs, START + 300000);
+	assert.deepEqual(
+		result.events.map((event) => event.activityId),
+		['first'],
+	);
+	await assert.rejects(
+		() =>
+			readActivityFeedPrefix(
+				async () => logResponse([logMatch('one'), logMatch('two')]),
+				prefixOptions({ maxEvents: 1 }),
+			),
+		/event budget/,
+	);
+});
+
+test('ActivityFeed prefix shares the deadline and accepts prior progress on lifecycle exhaustion', async () => {
+	let launched = 0,
+		cancelled = false;
+	const result = await readActivityFeedPrefix(
+		async (request) => {
+			if (request.method === 'DELETE') {
+				cancelled = true;
+				return {};
+			}
+			if (request.method === 'POST' && ++launched === 1) return logResponse([logMatch()]);
+			return { id: 'pending-query', stepsCompleted: 0, stepsTotal: 1 };
+		},
+		prefixOptions({ timing: clock() }),
+	);
+	assert.equal(result.completedThroughMs, START + 300000);
+	assert.equal(cancelled, true);
+	assert.equal(result.events.length, 1);
+});
+
+test('ActivityFeed prefix still fails on partial results, transport errors and duplicate conflicts after progress', async () => {
+	for (const failure of ['partial', 'transport', 'conflict']) {
+		let launches = 0;
+		await assert.rejects(
+			() =>
+				readActivityFeedPrefix(async (request) => {
+					if (request.method === 'DELETE') return {};
+					if (++launches === 1) return logResponse([logMatch()]);
+					if (failure === 'partial') return { ...logResponse([]), warnings: ['incomplete'] };
+					if (failure === 'transport') throw new Error('private transport detail');
+					const first = logMatch('duplicate', START + 300000),
+						second = structuredClone(first);
+					second.values.extra = 'conflicting payload';
+					return logResponse([first, second]);
+				}, prefixOptions()),
+			/warnings|launch|conflicting duplicate/,
+		);
+	}
+});
+
+test('ActivityFeed prefix does not leak newer revisions from an event-cap rejected leaf', async () => {
+	const result = await readActivityFeedPrefix(
+		async (request) => {
+			const start = Date.parse(JSON.parse(request.body).startTime);
+			if (start === START) return logResponse([logMatch('original'), logMatch('other')]);
+			const revised = logMatch('original', start);
+			revised.values['data.payload.note_text'] = 'newer rejected payload';
+			return logResponse([revised, logMatch('over-cap', start)]);
+		},
+		prefixOptions({ maxEvents: 2 }),
+	);
+	assert.equal(result.completedThroughMs, START + 300000);
+	assert.equal(result.events.length, 2);
+	assert.equal(
+		result.events.find((event) => event.activityId === 'original').noteText,
+		'all native fields',
+	);
+	assert.equal(
+		result.events.find((event) => event.activityId === 'original').timestampNs,
+		ns(START),
+	);
+});
+
+test('ActivityFeed prefix does not treat malformed completion responses as budget exhaustion', async () => {
+	for (const malformed of [
+		{ ...logResponse([]), stepsCompleted: '1' },
+		{ ...logResponse([]), data: null },
+	]) {
+		let launches = 0;
+		await assert.rejects(
+			() =>
+				readActivityFeedPrefix(
+					async (request) => {
+						if (request.method === 'DELETE') return {};
+						return ++launches === 1 ? logResponse([logMatch()]) : malformed;
+					},
+					prefixOptions({ timing: clock() }),
+				),
+			/invalid .*query/,
+		);
+	}
+});
+
+test('ActivityFeed prefix never resets the shared deadline between completed windows', async () => {
+	let time = 0,
+		launches = 0;
+	const result = await readActivityFeedPrefix(
+		async (request) => {
+			if (request.method === 'DELETE') return {};
+			launches++;
+			time += 1400;
+			const start = Date.parse(JSON.parse(request.body).startTime);
+			return logResponse([logMatch(String(start), start)]);
+		},
+		prefixOptions({ timing: { now: () => time, deadlineMs: 2000, lifecycleMs: 2000 } }),
+	);
+	assert.equal(launches, 2);
+	assert.equal(result.completedThroughMs, START + 300000);
+	assert.equal(result.events.length, 1);
+});

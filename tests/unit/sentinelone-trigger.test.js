@@ -1748,3 +1748,69 @@ test('snapshot triggers preserve their pre-activity-upgrade fingerprints', () =>
 	])
 		assert.equal(fingerprintConfig(config({ events })), expected);
 });
+
+test('saved groups without sites fail before requests for both trigger resources', async () => {
+	for (const [resource, operation] of [
+		['alert', 'new'],
+		['alertActivity', 'occurred'],
+	]) {
+		let requests = 0;
+		const context = createNodeContext(
+			{ resource, operation, accountIds: ['account-1'], siteIds: [], groupIds: ['group-1'] },
+			async () => {
+				requests++;
+				assert.fail('Invalid saved groups must not request scopes or data');
+			},
+			'trigger',
+		);
+		const state = {
+			configFingerprint: 'existing',
+			lastPollTime: NOW - 1000,
+			seenActivityIds: ['existing-activity'],
+		};
+		context.staticData.sentinelOneTrigger = state;
+		await assert.rejects(
+			new SentinelOnePlatformTrigger().poll.call(context),
+			/Group selections require a site selection.*Select the sites.*clear the saved group selections/,
+		);
+		assert.equal(requests, 0);
+		assert.equal(context.staticData.sentinelOneTrigger, state);
+		assert.deepEqual(context.staticData.sentinelOneTrigger, {
+			configFingerprint: 'existing',
+			lastPollTime: NOW - 1000,
+			seenActivityIds: ['existing-activity'],
+		});
+	}
+});
+
+test('activity trigger retains valid group selections and resolves their account', async () => {
+	let queries = 0;
+	const context = createNodeContext(
+		{
+			resource: 'alertActivity',
+			operation: 'occurred',
+			accountIds: ['account-1'],
+			siteIds: ['site-1'],
+			groupIds: ['group-1'],
+		},
+		async (request) => {
+			if (request.method === 'GET') {
+				if (request.url.endsWith('/accounts'))
+					return { data: [{ id: 'account-1', name: 'Account One' }] };
+				if (request.url.endsWith('/sites'))
+					return { data: { sites: [{ id: 'site-1', name: 'Site One', accountId: 'account-1' }] } };
+				if (request.url.endsWith('/groups'))
+					return { data: [{ id: 'group-1', name: 'Group One', siteId: 'site-1' }] };
+			}
+			assert.match(request.url, /\/sdl\/v2\/api\/queries$/);
+			const body = JSON.parse(request.body);
+			assert.deepEqual(body.accountIds, ['account-1']);
+			queries++;
+			return { id: 'empty-job', stepsCompleted: 1, stepsTotal: 1, data: { matches: [] } };
+		},
+		'trigger',
+	);
+	assert.equal(await new SentinelOnePlatformTrigger().poll.call(context), null);
+	assert.equal(queries, 1);
+	assert.ok(context.staticData.sentinelOneTrigger.configFingerprint);
+});

@@ -7,7 +7,12 @@ import type {
 	PollMode,
 	PollResult,
 } from './SentinelOneTriggerHelpers';
-import { readActivityFeed, type ActivityFeedEvent, type ActivityFeedTiming } from './ActivityFeed';
+import {
+	readActivityFeed,
+	readActivityFeedPrefix,
+	type ActivityFeedEvent,
+	type ActivityFeedTiming,
+} from './ActivityFeed';
 import { compileExclusions, matchesExclusion } from './Exclusions';
 import { matchesActivityConditions } from './ActivityConditions';
 import { responseStatus } from '../shared/transport/retry';
@@ -205,7 +210,8 @@ async function currentAlerts(
 	};
 	for (const alert of found) {
 		const id = String(alert.id);
-		if (!stringId(scopeOf(config, alert).id)) continue;
+		if (!stringId(scopeOf(config, alert).id))
+			throw fail('could not resolve current alert scope from a returned alert');
 		unresolvedIds.delete(id);
 		if (eligible(alert)) alerts.set(id, alert);
 		else ineligibleIds.add(id);
@@ -220,9 +226,7 @@ async function currentAlerts(
 		for (const id of alerts.keys()) {
 			const alert = filtered.get(id);
 			if (alert && !stringId(scopeOf(config, alert).id)) {
-				alerts.delete(id);
-				unresolvedIds.add(id);
-				continue;
+				throw fail('could not resolve current alert scope from a returned alert');
 			}
 			if (alert && eligible(alert)) alerts.set(id, alert);
 			else {
@@ -257,6 +261,34 @@ function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEv
 	return item;
 }
 
+function expiredMissingActivities(
+	config: TriggerConfig,
+	candidates: ActivityFeedEvent[],
+	lookup: AlertLookup,
+	pollStartMs: number,
+): number {
+	const retryFrom =
+		BigInt(Math.max(0, Math.floor(pollStartMs - config.overlapSeconds * 1000))) * BigInt(1000000);
+	const missing = candidates.filter((event) => lookup.unresolvedIds.has(event.alertId));
+	if (missing.some((event) => BigInt(event.timestampNs) >= retryFrom))
+		throw fail(
+			'could not resolve current alert scope for a recent activity; retry while alert indexing completes',
+		);
+	return missing.length;
+}
+
+function warnDropped(config: TriggerConfig, count: number): void {
+	if (!count) return;
+	try {
+		config.warnLog?.(
+			'Dropped alert activities whose parent alerts remained unavailable beyond the overlap retry window.',
+			{ droppedActivityCount: count },
+		);
+	} catch {
+		// Logging must not change delivery or checkpoint state.
+	}
+}
+
 export async function pollAlertActivities(
 	request: AuthenticatedRequest,
 	config: TriggerConfig & { activityAccountIds?: string[] },
@@ -284,7 +316,8 @@ export async function pollAlertActivities(
 			!Number.isFinite(activation) ||
 			typeof checkpoint !== 'number' ||
 			!Number.isFinite(checkpoint) ||
-			activation > checkpoint)
+			activation > checkpoint ||
+			checkpoint > pollStartMs)
 	)
 		throw fail('has an invalid activation checkpoint');
 	const accountIds =
@@ -293,6 +326,7 @@ export async function pollAlertActivities(
 		throw fail('requires resolved account and selected scope IDs');
 	if (mode === 'manual') {
 		const preview: IDataObject[] = [];
+		let dropped = 0;
 		await readActivityFeed(
 			request,
 			config.baseUrl,
@@ -305,8 +339,7 @@ export async function pollAlertActivities(
 				const lookup = await currentAlerts(request, config, [
 					...new Set(candidates.map((event) => event.alertId)),
 				]);
-				if (lookup.unresolvedIds.size)
-					throw fail('could not resolve current alert scope for an activity');
+				dropped += expiredMissingActivities(config, candidates, lookup, pollStartMs);
 				const eligible = candidates.filter((event) => lookup.alerts.has(event.alertId));
 				eligible.sort((a, b) =>
 					BigInt(a.timestampNs) < BigInt(b.timestampNs)
@@ -322,6 +355,7 @@ export async function pollAlertActivities(
 			config.includeRawActivity,
 			config.activityTypeIds,
 		);
+		warnDropped(config, dropped);
 		return { items: preview };
 	}
 	const start = (checkpoint ?? pollStartMs) - config.overlapSeconds * 1000;
@@ -336,20 +370,38 @@ export async function pollAlertActivities(
 		}
 		if (previous.size > ACTIVITY_STATE_LIMIT) throw fail('exceeded the activity state capacity');
 	}
-	const activities = await readActivityFeed(
-		request,
-		config.baseUrl,
-		Math.max(0, Math.floor(start)),
-		pollStartMs,
-		accountIds,
-		timing,
-		undefined,
-		config.includeRawActivity,
-		config.activityTypeIds,
-	);
-	if (activities.length > ACTIVITY_STATE_LIMIT) throw fail('exceeded the activity state capacity');
 	const baseline = mode === 'scheduled' && !matches;
+	const result = baseline
+		? {
+				events: await readActivityFeed(
+					request,
+					config.baseUrl,
+					Math.max(0, Math.floor(start)),
+					pollStartMs,
+					accountIds,
+					timing,
+					undefined,
+					config.includeRawActivity,
+					config.activityTypeIds,
+				),
+				completedThroughMs: pollStartMs,
+			}
+		: await readActivityFeedPrefix(request, {
+				baseUrl: config.baseUrl,
+				startMs: Math.max(0, Math.floor(start)),
+				endMs: pollStartMs,
+				accountIds,
+				timing,
+				checkpointMs: Number(checkpoint),
+				activityTypeIds: config.activityTypeIds,
+			});
+	const activities = result.events;
+	const end = result.completedThroughMs;
+	if (!baseline && end <= Number(checkpoint))
+		throw fail('did not complete a forward checkpoint window within the query budget');
+	if (activities.length > ACTIVITY_STATE_LIMIT) throw fail('exceeded the activity state capacity');
 	let items: IDataObject[] = [];
+	let dropped = 0;
 	if (!baseline) {
 		const candidates = activities.filter(
 			(event) =>
@@ -360,10 +412,7 @@ export async function pollAlertActivities(
 		const lookup = await currentAlerts(request, config, [
 			...new Set(candidates.map((event) => event.alertId)),
 		]);
-		if (lookup.unresolvedIds.size)
-			throw fail(
-				'could not resolve current alert scope for an activity; retry after alert indexing completes',
-			);
+		dropped = expiredMissingActivities(config, candidates, lookup, pollStartMs);
 		items = candidates.flatMap((event) => {
 			const alert = lookup.alerts.get(event.alertId);
 			return alert ? [output(config, alert, event)] : [];
@@ -375,10 +424,11 @@ export async function pollAlertActivities(
 			previous.set(event.activityId, event.timestampNs);
 	}
 	const retainFrom =
-		BigInt(Math.max(0, Math.floor(pollStartMs - config.overlapSeconds * 1000))) * BigInt(1000000);
+		BigInt(Math.max(0, Math.floor(end - config.overlapSeconds * 1000))) * BigInt(1000000);
 	for (const [id, timestamp] of previous) if (BigInt(timestamp) < retainFrom) previous.delete(id);
 	if (previous.size > ACTIVITY_STATE_LIMIT)
 		throw fail('exceeded the activity state capacity inside the overlap');
+	warnDropped(config, dropped);
 	if (config.debug)
 		config.debugLog?.('Completed direct ActivityFeed activity poll', {
 			outputCount: items.length,
@@ -390,7 +440,7 @@ export async function pollAlertActivities(
 		nextState: {
 			configFingerprint: fingerprint,
 			initialized: true,
-			checkpointMs: pollStartMs,
+			checkpointMs: end,
 			activityActivationMs: activation,
 			seenActivityIds: [...previous.keys()],
 			seenActivityTimestamps: Object.fromEntries(previous),

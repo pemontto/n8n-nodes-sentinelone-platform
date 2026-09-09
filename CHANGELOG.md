@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased fixes
+
+- Retry unavailable activity parents within the overlap window, then skip with a sanitised warning.
+- Recover activity backlogs through bounded checkpoint slices.
+- Reject trigger Group selections when no Site is selected.
+
 ## 0.1.0 (unreleased)
 
 - Breaking: replace the Alert Note > Created trigger with Alert Activity > Occurred, without a compatibility alias. Note actions and Alert snapshot triggers remain unchanged.

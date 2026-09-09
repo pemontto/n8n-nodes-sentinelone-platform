@@ -657,7 +657,13 @@ export class SentinelOnePlatformTrigger implements INodeType {
 								: ['alert.new'];
 				const accountIds = readStringArray(this, 'accountIds');
 				const siteIds = readStringArray(this, 'siteIds');
-				const groupIds = siteIds.length > 0 ? readStringArray(this, 'groupIds') : [];
+				const groupIds = readStringArray(this, 'groupIds');
+				if (groupIds.length > 0 && siteIds.length === 0) {
+					throw new NodeOperationError(
+						node,
+						'Group selections require a site selection. Select the sites for these groups, or clear the saved group selections before polling.',
+					);
+				}
 				const allVisibleAccounts =
 					accountIds.length === 0 && siteIds.length === 0 && groupIds.length === 0;
 				if (accountIds.length > 0) {
@@ -746,6 +752,10 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					simplifyOutput: options.simplifyOutput !== false,
 					includeOcsf: resource === 'alert' && options.includeOcsf === true,
 					debug: nodeDebug,
+					warnLog: (message, details = {}) =>
+						this.logger.warn(
+							`[SentinelOne Platform Trigger] ${message} ${JSON.stringify(details)}`,
+						),
 					debugLog: nodeDebug
 						? (message, details = {}) =>
 								this.logger.info(

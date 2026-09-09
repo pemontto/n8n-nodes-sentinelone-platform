@@ -36,6 +36,7 @@ export interface TriggerConfig extends ExclusionPatterns {
 	includeOcsf?: boolean;
 	debug: boolean;
 	debugLog?: (message: string, details?: IDataObject) => void;
+	warnLog?: (message: string, details?: IDataObject) => void;
 	overlapSeconds: number;
 	concurrentRequests: number;
 	requestTimeoutMs: number;
