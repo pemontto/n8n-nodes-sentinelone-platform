@@ -28,9 +28,9 @@ For multi-item testing, deliberately provide multiple explicit demo configuratio
 
 ## Notes
 
-Open `03-notes.json`. Configure the explicit alert ID and select XDR Demo on Listen for demo notes. Start listening, then run the manual creation branch once. The note has a `platform acceptance test` prefix and timestamp.
+Open `03-notes.json`. Configure the explicit alert ID and select XDR Demo on Listen for demo notes. The listener uses Alert Activity > Occurred with Note created (`16007`) selected. For read-only checks, fetch a test event without executing either write branch. For user-run write acceptance, start listening, then run the manual creation branch once. The note has a `platform acceptance test` prefix and timestamp.
 
-Expect a created-note result and a trigger event after polling. The event alertId must match the designated target. Remove the note manually in SentinelOne if permitted; this package has no note-delete operation.
+Expect a created-note result and a trigger event after polling. The trigger event has `eventType: "alert.activity"` and `activityTypeId: "16007"`; its `alertId` must match the designated target. Inspect note details within the event envelope. Remove the note manually in SentinelOne if permitted; this package has no note-delete operation.
 
 ## Alert changes
 

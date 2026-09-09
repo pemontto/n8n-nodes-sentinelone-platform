@@ -6,4 +6,4 @@ Select the credential on every action and trigger. n8n stores the token in its c
 
 Read access does not imply update access. SentinelOne can disable or omit actions for an alert. SDL and management API permissions can differ. Example workflows contain no credential references; select your own credential after import.
 
-The Alert Note > Created trigger requires SDL query access to read note events from ActivityFeed. Alert read access alone is not sufficient.
+The Alert Activity > Occurred trigger requires SDL query access to read alert-linked events from ActivityFeed. Alert read access alone is not sufficient.

@@ -6,7 +6,7 @@ Action modules live under `nodes/SentinelOnePlatform/actions/<resource>/<operati
 
 Shared catalogs live under `nodes/shared/`. Neither action nor trigger modules import configuration from the other node. Keep GraphQL list/detail differences explicit while sharing labels and common fields.
 
-Use native n8n request helpers and no monorepo-private imports. Preserve the public six-action/four-trigger scope. This is a fresh package with no compatibility aliases.
+Use native n8n request helpers and no monorepo-private imports. Preserve the public six-action/four-trigger scope: Alert Activity > Occurred replaces the note-created trigger. This is a fresh package with no compatibility aliases.
 
 ## References
 

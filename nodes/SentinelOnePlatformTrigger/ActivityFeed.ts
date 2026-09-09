@@ -5,20 +5,38 @@ export const ACTIVITY_FEED_LIMIT = 1000;
 export const ACTIVITY_FEED_INLINE_BYTES = 5 * 1024 * 1024;
 const ROUTING_HEADER = 'x-dataset-query-forward-tag';
 export const ACTIVITY_FEED_LOG_FILTER =
-	"dataSource.name='ActivityFeed' activity_type='16007' data.alert.id=*";
-export const ACTIVITY_FEED_QUERY =
-	'dataSource.name=\'ActivityFeed\' activity_type=\'16007\' data.alert.id=* | columns activity_id, created_at, data.alert.id, "timestampNs"=string(timestamp), "noteText"=data.payload.note_text, "authorId"=string(data.user.id), "authorName"=data.user.enriched_name | sort created_at | limit 1000';
+	"dataSource.name='ActivityFeed' dataset='activityLog' data.alert.id=*";
+
+export interface ActivityChange {
+	field: string;
+	oldValue?: IDataObject[string];
+	newValue?: IDataObject[string];
+}
 
 export interface ActivityFeedEvent {
 	activityId: string;
+	activityTypeId: string;
+	activityKind: string;
 	alertId: string;
 	timestampNs: string;
 	createdAt: string;
-	noteText: string;
+	changes: ActivityChange[];
+	noteText?: string | null;
+	mitigation?: { actionType?: IDataObject[string]; activityStatus?: IDataObject[string] };
 	rawActivity?: IDataObject;
 	authorId: string | null;
 	authorName: string | null;
 }
+
+const ACTIVITY_KINDS: Record<string, string> = {
+	'16000': 'alertCreated',
+	'16001': 'statusChanged',
+	'16002': 'analystVerdictChanged',
+	'16003': 'severityChanged',
+	'16004': 'assigneeChanged',
+	'16005': 'mitigationActivity',
+	'16007': 'noteCreated',
+};
 
 export interface ActivityFeedTiming {
 	now?: () => number;
@@ -71,49 +89,6 @@ function complete(payload: IDataObject): boolean {
 	);
 }
 
-function decode(payload: IDataObject): ActivityFeedEvent[] {
-	const data = record(payload.data);
-	if (!data || !Array.isArray(data.columns) || !Array.isArray(data.values))
-		throw failure('returned an invalid table');
-	const columns = data.columns.map((column) => record(column)?.name);
-	if (columns.some((name) => typeof name !== 'string') || new Set(columns).size !== columns.length)
-		throw failure('returned invalid column names');
-	const names = [
-		'activity_id',
-		'data.alert.id',
-		'timestampNs',
-		'created_at',
-		'noteText',
-		'authorId',
-		'authorName',
-	];
-	const positions = names.map((name) => columns.indexOf(name));
-	if (positions.includes(-1)) throw failure('omitted a required column');
-	return data.values.map((row) => {
-		if (!Array.isArray(row) || row.length !== columns.length)
-			throw failure('returned an invalid table row');
-		const [activityId, alertId, timestampNs, createdAt, noteText, authorId, authorName] =
-			positions.map((position) => row[position]);
-		if (
-			typeof activityId !== 'string' ||
-			!activityId.trim() ||
-			activityId !== activityId.trim() ||
-			typeof alertId !== 'string' ||
-			!alertId.trim() ||
-			alertId !== alertId.trim() ||
-			typeof timestampNs !== 'string' ||
-			!/^\d{1,30}$/.test(timestampNs) ||
-			typeof createdAt !== 'string' ||
-			!Number.isFinite(Date.parse(createdAt)) ||
-			typeof noteText !== 'string' ||
-			(authorId !== null && typeof authorId !== 'string') ||
-			(authorName !== null && typeof authorName !== 'string')
-		)
-			throw failure('returned invalid activity identity, timestamps or note text');
-		return { activityId, alertId, timestampNs, createdAt, noteText, authorId, authorName };
-	});
-}
-
 function retryable(error: unknown): boolean {
 	const value = record(error);
 	const response = record(value?.response);
@@ -156,7 +131,11 @@ function parseLogJson(text: string): unknown {
 			parts.push(text[index++]);
 		}
 	}
-	return JSON.parse(parts.join('')) as unknown;
+	try {
+		return JSON.parse(parts.join('')) as unknown;
+	} catch {
+		throw failure('returned invalid LOG JSON');
+	}
 }
 
 function validateLogNumbers(value: unknown): void {
@@ -176,8 +155,11 @@ function decodeLog(payload: IDataObject): ActivityFeedEvent[] {
 	return matches.map((match) => {
 		const rawActivity = record(match);
 		const fields = record(rawActivity?.values);
-		const activityId = fields?.activity_id;
-		const alertId = fields?.['data.alert.id'];
+		const identifier = (value: unknown) =>
+			typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : value;
+		const activityId = identifier(fields?.activity_id);
+		const activityTypeId = identifier(fields?.activity_type);
+		const alertId = identifier(fields?.['data.alert.id']);
 		const createdAt = fields?.created_at;
 		const noteText = fields?.['data.payload.note_text'];
 		const userId = fields?.['data.user.id'];
@@ -193,6 +175,9 @@ function decodeLog(payload: IDataObject): ActivityFeedEvent[] {
 				: timestamp;
 		if (
 			!rawActivity ||
+			!fields ||
+			typeof activityTypeId !== 'string' ||
+			!/^\d+$/.test(activityTypeId) ||
 			typeof activityId !== 'string' ||
 			!activityId.trim() ||
 			activityId.trim() !== activityId ||
@@ -203,22 +188,64 @@ function decodeLog(payload: IDataObject): ActivityFeedEvent[] {
 			!/^\d{1,30}$/.test(timestampNs) ||
 			typeof createdAt !== 'string' ||
 			!Number.isFinite(Date.parse(createdAt)) ||
-			typeof noteText !== 'string' ||
+			(noteText !== undefined && noteText !== null && typeof noteText !== 'string') ||
 			(authorId !== null && typeof authorId !== 'string') ||
 			(authorName !== null && typeof authorName !== 'string')
 		)
 			throw failure('returned invalid LOG activity identity, timestamps or note text');
+		const changes: ActivityChange[] = [];
+		for (const [field, source] of [
+			['status', 'status'],
+			['analystVerdict', 'analyst_verdict'],
+			['severity', 'severity'],
+			['assigneeEmail', 'assignee_email'],
+			['assigneeId', 'assignee_id'],
+		]) {
+			const change: ActivityChange = { field };
+			for (const [endpoint, property] of [
+				['old', 'oldValue'],
+				['new', 'newValue'],
+			] as const) {
+				if (source === 'assignee_id' && endpoint === 'old') continue;
+				const key = `data.payload.changes.${endpoint}_${source}`;
+				if (Object.prototype.hasOwnProperty.call(fields, key)) change[property] = fields[key];
+			}
+			if (Object.keys(change).length > 1) changes.push(change);
+		}
+		const mitigation: NonNullable<ActivityFeedEvent['mitigation']> = {};
+		for (const [source, target] of [
+			['mitigation_action_type', 'actionType'],
+			['mitigation_action_status', 'activityStatus'],
+		] as const) {
+			const key = `data.payload.${source}`;
+			if (Object.prototype.hasOwnProperty.call(fields, key)) mitigation[target] = fields[key];
+		}
 		return {
 			activityId,
+			activityTypeId,
+			activityKind: ACTIVITY_KINDS[activityTypeId] ?? 'unknown',
+			changes,
+			...(Object.keys(mitigation).length ? { mitigation } : {}),
 			alertId,
 			timestampNs,
 			createdAt,
-			noteText,
+			...(noteText !== undefined ? { noteText } : {}),
 			authorId,
 			authorName,
 			rawActivity,
 		};
 	});
+}
+
+function canonical(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+	const object = record(value);
+	if (object)
+		return `{${Object.keys(object)
+			.sort()
+			.map((key) => `${JSON.stringify(key)}:${canonical(object[key])}`)
+			.join(',')}}`;
+	return JSON.stringify(value) ?? 'undefined';
 }
 
 export async function readActivityFeed(
@@ -230,16 +257,20 @@ export async function readActivityFeed(
 	timing: ActivityFeedTiming = {},
 	previewWindow?: (events: ActivityFeedEvent[]) => Promise<boolean>,
 	fullOutput = false,
+	activityTypeIds?: string[],
 ): Promise<ActivityFeedEvent[]> {
 	if (
+		typeof fullOutput !== 'boolean' ||
 		!Number.isSafeInteger(startMs) ||
 		!Number.isSafeInteger(endMs) ||
 		startMs < 0 ||
 		endMs <= startMs ||
 		!Number.isFinite(new Date(endMs).getTime()) ||
-		accountIds.some((id) => typeof id !== 'string' || !id.trim() || id !== id.trim())
+		accountIds.some((id) => typeof id !== 'string' || !id.trim() || id !== id.trim()) ||
+		(activityTypeIds !== undefined &&
+			(!activityTypeIds.length || activityTypeIds.some((id) => !/^\d+$/.test(id))))
 	)
-		throw failure('requires a valid half-open time window and account IDs');
+		throw failure('requires a valid half-open time window, account IDs and activity selection');
 	const now = timing.now ?? Date.now;
 	const sleep = timing.sleep ?? workflowSleep;
 	const deadlineMs = timing.deadlineMs ?? 300_000;
@@ -256,6 +287,7 @@ export async function readActivityFeed(
 	const endpoint = `${baseUrl}/sdl/v2/api/queries`;
 	let queries = 0;
 	const collected = new Map<string, ActivityFeedEvent>();
+	const observedPayloads = new Map<string, string>();
 
 	async function queryWindow(start: number, end: number): Promise<ActivityFeedEvent[] | null> {
 		if (++queries > Math.min(maxQueries, 128) || now() >= deadline)
@@ -278,8 +310,8 @@ export async function readActivityFeed(
 			}
 			const body =
 				wrapper && Object.prototype.hasOwnProperty.call(wrapper, 'body') ? wrapper.body : response;
-			const payload = fullOutput && typeof body === 'string' ? parseLogJson(body) : body;
-			if (fullOutput) validateLogNumbers(payload);
+			const payload = typeof body === 'string' ? parseLogJson(body) : body;
+			validateLogNumbers(payload);
 			return record(payload);
 		};
 		const routedHeaders = () => (routingTag ? { [ROUTING_HEADER]: routingTag } : {});
@@ -291,12 +323,17 @@ export async function readActivityFeed(
 		};
 		try {
 			const queryBody = {
-				queryType: fullOutput ? 'LOG' : 'PQ',
+				queryType: 'LOG',
 				startTime: new Date(start).toISOString(),
 				endTime: new Date(end).toISOString(),
-				...(fullOutput
-					? { log: { filter: ACTIVITY_FEED_LOG_FILTER, limit: ACTIVITY_FEED_LIMIT } }
-					: { pq: { query: ACTIVITY_FEED_QUERY, resultType: 'TABLE' } }),
+				log: {
+					filter:
+						ACTIVITY_FEED_LOG_FILTER +
+						(activityTypeIds
+							? ` (${activityTypeIds.map((id) => `activity_type='${id}'`).join(' OR ')})`
+							: ''),
+					limit: ACTIVITY_FEED_LIMIT,
+				},
 				...(accountIds.length ? { tenant: false, accountIds } : { tenant: true }),
 			};
 			let payload = unwrap(
@@ -305,10 +342,12 @@ export async function readActivityFeed(
 					returnFullResponse: true,
 					url: endpoint,
 					timeout: remaining(),
-					json: !fullOutput,
-					encoding: fullOutput ? 'text' : undefined,
-					headers: fullOutput ? { 'Content-Type': 'application/json' } : undefined,
-					body: fullOutput ? JSON.stringify(queryBody) : queryBody,
+					json: false,
+					encoding: 'text',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify(queryBody),
+				}).catch(() => {
+					throw failure('SDL query launch failed');
 				}),
 			);
 			if (typeof payload?.id !== 'string' || !payload.id.trim())
@@ -334,7 +373,7 @@ export async function readActivityFeed(
 					return null;
 				}
 				if (complete(payload)) {
-					const rows = fullOutput ? decodeLog(payload) : decode(payload);
+					const rows = decodeLog(payload);
 					accepted = true;
 					return rows;
 				}
@@ -345,8 +384,8 @@ export async function readActivityFeed(
 					headers: routedHeaders(),
 					url: `${endpoint}/${encodeURIComponent(id)}`,
 					timeout: remaining(),
-					json: !fullOutput,
-					encoding: fullOutput ? 'text' : undefined,
+					json: false,
+					encoding: 'text',
 				}).then(
 					(value) => ({ value, error: undefined }),
 					(error: unknown) => ({ value: undefined, error }),
@@ -367,7 +406,7 @@ export async function readActivityFeed(
 					headers: routedHeaders(),
 					url: `${endpoint}/${encodeURIComponent(id)}`,
 					timeout: 1000,
-					json: !fullOutput,
+					json: false,
 				}).then(
 					() => undefined,
 					() => undefined,
@@ -393,7 +432,7 @@ export async function readActivityFeed(
 			}
 			return;
 		}
-		const acceptedRows: ActivityFeedEvent[] = [];
+		const windowEvents = new Map<string, ActivityFeedEvent>();
 		for (const event of rows) {
 			const timestamp = BigInt(event.timestampNs);
 			if (
@@ -401,18 +440,22 @@ export async function readActivityFeed(
 				timestamp >= BigInt(end) * BigInt(1_000_000)
 			)
 				continue;
+			const identity = JSON.stringify([event.activityId, event.timestampNs]);
+			const payload = canonical(event.rawActivity?.values);
+			const observed = observedPayloads.get(identity);
+			if (observed !== undefined && observed !== payload)
+				throw failure('returned conflicting duplicate activity IDs at the same source timestamp');
+			observedPayloads.set(identity, payload);
 			const previous = collected.get(event.activityId);
-			if (
-				previous &&
-				(previous.alertId !== event.alertId ||
-					previous.timestampNs !== event.timestampNs ||
-					previous.createdAt !== event.createdAt ||
-					previous.noteText !== event.noteText)
-			)
-				throw failure('returned conflicting duplicate activity IDs');
+			if (previous) {
+				const previousTimestamp = BigInt(previous.timestampNs);
+				if (timestamp < previousTimestamp) continue;
+				if (timestamp === previousTimestamp) continue;
+			}
 			collected.set(event.activityId, event);
-			if (!previous) acceptedRows.push(event);
+			windowEvents.set(event.activityId, event);
 		}
+		const acceptedRows = [...windowEvents.values()];
 		if (previewWindow) {
 			previewComplete = await previewWindow(acceptedRows);
 			collected.clear();

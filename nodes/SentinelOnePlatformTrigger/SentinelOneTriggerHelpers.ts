@@ -2,8 +2,9 @@ import type { IDataObject, IHttpRequestOptions } from 'n8n-workflow';
 import type { ScopeType } from '../shared/Scopes';
 import { alertFieldSelection, additionalAlertOutput } from '../shared/AlertFields';
 import { fetchOcsfDetail } from './Ocsf';
+import type { ActivityCondition } from './ActivityConditions';
 
-export type TriggerEvent = 'alert.new' | 'alert.updated' | 'alert.note.created';
+export type TriggerEvent = 'alert.new' | 'alert.updated' | 'alert.activity';
 export type PollMode = 'manual' | 'scheduled';
 
 export const MAX_SEEN_ALERT_IDS = 20_000;
@@ -18,7 +19,12 @@ export interface TriggerConfig extends ExclusionPatterns {
 	credentialIdentity: IDataObject;
 	scopeType: ScopeType;
 	scopeIds: string[];
-	noteAccountIds?: string[];
+	activityAccountIds?: string[];
+	activityTypeIds?: string[];
+	activityConditions?: ActivityCondition[];
+	conditionMatch?: 'any' | 'all';
+	includeRawActivity?: boolean;
+	includeCurrentAlert?: boolean;
 	allVisibleAccounts: boolean;
 	events: TriggerEvent[];
 	severities: string[];
@@ -44,7 +50,7 @@ export interface TriggerState extends IDataObject {
 	seenAlertIds?: string[];
 	seenAlertVersions?: string[];
 	seenActivityIds?: string[];
-	noteActivationMs?: number;
+	activityActivationMs?: number;
 }
 
 export interface PollResult {
@@ -273,10 +279,18 @@ export function fingerprintConfig(config: TriggerConfig): string {
 			excludeAccountName: config.excludeAccountName ?? '',
 			excludeSiteName: config.excludeSiteName ?? '',
 			excludeGroupName: config.excludeGroupName ?? '',
-			excludeNoteAuthorName: config.events.includes('alert.note.created')
-				? (config.excludeNoteAuthorName ?? '')
-				: '',
-			noteDetection: config.events.includes('alert.note.created') ? 'activityFeed-v1' : null,
+			...(config.events.includes('alert.activity')
+				? {
+						activity: {
+							types: config.activityTypeIds ? [...config.activityTypeIds].sort() : null,
+							conditions: config.activityConditions ?? [],
+							match: config.conditionMatch ?? 'any',
+							excludeActorName: config.excludeActorName ?? '',
+							excludeActorIds: [...(config.excludeActorIds ?? [])].sort(),
+							detection: 'activityFeed-v2-once-per-id',
+						},
+					}
+				: { excludeNoteAuthorName: '', noteDetection: null }),
 		}),
 	);
 }
@@ -672,7 +686,7 @@ async function enrichOcsfItems(
 	const exclusions = compileExclusions(config);
 	const alerts = new Map<string, { id: string; scopeId: string }>();
 	for (const item of items) {
-		if (item.eventType === 'alert.note.created') continue;
+		if (item.eventType === 'alert.activity') continue;
 		const id = config.simplifyOutput ? item.alertId : asRecord(item.alert)?.id;
 		const scopeId = asRecord(item.scope)?.id;
 		if (typeof id !== 'string' || typeof scopeId !== 'string' || !scopeId)
@@ -711,7 +725,7 @@ async function enrichOcsfItems(
 		),
 	);
 	return items.flatMap((item) => {
-		if (item.eventType === 'alert.note.created') return [item];
+		if (item.eventType === 'alert.activity') return [item];
 		const id = String(config.simplifyOutput ? item.alertId : asRecord(item.alert)?.id);
 		const detail = details.get(id);
 		return detail
@@ -750,8 +764,8 @@ export async function pollSentinelOne(
 	if (config.events.length === 0)
 		throw new Error('Select at least one event before activating the trigger.');
 
-	if (config.events.includes('alert.note.created'))
-		throw new Error('Note events must use ActivityFeed polling.');
+	if (config.events.some((event) => event !== 'alert.new' && event !== 'alert.updated'))
+		throw new Error('Activity events must use ActivityFeed polling.');
 	compileExclusions(config);
 	alertFieldSelection(config.additionalAlertFields);
 	const fingerprint = fingerprintConfig(config);

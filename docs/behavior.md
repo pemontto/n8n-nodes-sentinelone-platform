@@ -19,3 +19,9 @@ Remove the redundant initial alert read. Verify Update is enabled by default and
 Compare strings exactly. Compare ticket JSON structurally when both sides parse, preserving types, numeric precision, and array order. On older JavaScript engines without original JSON number tokens, numeric JSON falls back to exact string comparison. Keep per-field requested, observed, and verified values; verified is null when comparison was impossible. Report verificationStatus as verified, mismatch, unavailable, skipped, or pending. Preserve the mutation acknowledgement when verification fails, and scheduled execution IDs. A matching read after an uncertain mutation proves the observed state, not causality. Explicit rejection needs no readback. Never repeat the mutation as part of verification.
 
 The user performs live mutation tests against a designated demo account using inactive workflows supplied with the package. Automated implementation checks use mocks, schema validation, and read-only requests.
+
+## Alert activity delivery
+
+Alert Activity > Occurred replaces Alert Note > Created without an alias. It uses V2 LOG queries for both normal and raw output. Activity selection and builder conditions inspect one recorded event; current-parent filters inspect lookup state. The stable envelope retains all recognised changes, exact IDs, and optional raw/current-alert enrichment. See [the trigger contract](trigger.md) for endpoint-presence rules, migration, preview windows, and delivery limits.
+
+Polling deduplicates by activity ID within bounded checkpoint/overlap history and does not monitor later revisions. Incomplete data, duplicate conflicts at the same timestamp, unresolved scope, and exhausted limits fail without advancing state. First use and relevant configuration changes establish a baseline without replay. Manual searches retain the January 2020 lower boundary and stop at the first nonempty matching window, with at most 10 newest matches.

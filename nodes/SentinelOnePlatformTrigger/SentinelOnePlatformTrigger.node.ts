@@ -1,5 +1,6 @@
 import {
 	additionalAlertFields,
+	analystVerdictOptions,
 	managementScopeFields,
 	severityOptions,
 	statusOptions,
@@ -17,6 +18,7 @@ import type {
 	ILoadOptionsFunctions,
 	INodeExecutionData,
 	INodePropertyOptions,
+	INodeProperties,
 	INodeType,
 	INodeTypeDescription,
 	IPollFunctions,
@@ -33,10 +35,159 @@ import {
 
 import { DEFAULT_ADDITIONAL_ALERT_FIELDS } from '../shared/AlertFields';
 import { activityAccountIds } from '../shared/Scopes';
-import { pollActivityNotes } from './ActivityNotePoll';
+import { pollAlertActivities } from './ActivityNotePoll';
+import {
+	parseActivitySelection,
+	parseExactValues,
+	parseActivityConditions,
+	mitigationActionTypeOptions,
+	mitigationActivityStatusOptions,
+} from './ActivityConditions';
 import { debugSetting, logGraphqlRequest, logGraphqlResult } from '../shared/Debug';
 import { requestWithRetry } from '../shared/transport/request';
 import { responseStatus, isRetryableReadError, retryAfterMs } from '../shared/transport/retry';
+
+const activityFields: INodeProperties[] = [
+	{
+		displayName: 'Activity Types',
+		name: 'activityTypes',
+		type: 'multiOptions',
+		default: ['any'],
+		displayOptions: { show: { resource: ['alertActivity'] } },
+		options: [
+			{ name: 'Alert Created', value: '16000' },
+			{ name: 'Analyst Verdict Changed', value: '16002' },
+			{
+				name: 'Any Alert Activity',
+				value: 'any',
+				description: 'All alert-linked activity types, including unknown IDs',
+			},
+			{ name: 'Assignee Changed', value: '16004' },
+			{ name: 'Mitigation Activity', value: '16005' },
+			{ name: 'Note Created', value: '16007' },
+			{ name: 'Severity Changed', value: '16003' },
+			{ name: 'Status Changed', value: '16001' },
+		],
+		description: 'Types to include. Any Alert Activity overrides individual selections.',
+	},
+	{
+		displayName: 'Match Conditions',
+		name: 'conditionMatch',
+		type: 'options',
+		default: 'any',
+		displayOptions: { show: { resource: ['alertActivity'] } },
+		options: [
+			{ name: 'Match Any', value: 'any' },
+			{ name: 'Match All', value: 'all' },
+		],
+		description:
+			'Evaluate all conditions against one activity. Empty conditions match every selected activity type.',
+	},
+	{
+		displayName: 'Recorded Activity Conditions',
+		name: 'activityConditions',
+		type: 'fixedCollection',
+		default: {},
+		placeholder: 'Add Condition',
+		typeOptions: { multipleValues: true },
+		displayOptions: { show: { resource: ['alertActivity'] } },
+		description:
+			'Recorded values from one activity. Lists match any selected value; From and To must match the same change. Status, verdict and severity require present, unequal endpoints.',
+		options: [
+			{
+				name: 'conditions',
+				displayName: 'Condition',
+				// Keep the field selector before its dependent value controls.
+				// eslint-disable-next-line n8n-nodes-base/node-param-fixed-collection-type-unsorted-items
+				values: [
+					{
+						displayName: 'Field',
+						name: 'field',
+						type: 'options',
+						default: 'status',
+						options: [
+							{ name: 'Analyst Verdict', value: 'analystVerdict' },
+							{ name: 'Assignment', value: 'assignment' },
+							{ name: 'Mitigation', value: 'mitigation' },
+							{ name: 'Severity', value: 'severity' },
+							{ name: 'Status', value: 'status' },
+						],
+					},
+					...(['status', 'analystVerdict', 'severity'] as const).flatMap(
+						(field): INodeProperties[] => {
+							const suffix =
+								field === 'analystVerdict' ? 'Verdict' : field === 'status' ? 'Status' : 'Severity';
+							const options =
+								field === 'analystVerdict'
+									? analystVerdictOptions
+									: field === 'status'
+										? statusOptions
+										: severityOptions;
+							return ['from', 'to'].map(
+								(endpoint): INodeProperties => ({
+									displayName: endpoint === 'from' ? 'From' : 'To',
+									name: `${endpoint}${suffix}`,
+									type: 'multiOptions',
+									default: [],
+									options,
+									displayOptions: { show: { field: [field] } },
+									description:
+										'Optional recorded values. Leave empty for any present value; selected values use OR.',
+								}),
+							);
+						},
+					),
+					{
+						displayName: 'Previous Email Equals',
+						name: 'previousEmail',
+						type: 'string',
+						default: '',
+						displayOptions: { show: { field: ['assignment'] } },
+						description:
+							'Optional comma-separated exact email values. Requires the recorded previous email; a missing value cannot match.',
+					},
+					{
+						displayName: 'New Email Equals',
+						name: 'newEmail',
+						type: 'string',
+						default: '',
+						displayOptions: { show: { field: ['assignment'] } },
+						description:
+							'Optional comma-separated exact email values. Matches the destination email even when the previous email is absent.',
+					},
+					{
+						displayName: 'Destination ID Equals',
+						name: 'destinationIds',
+						type: 'string',
+						default: '',
+						displayOptions: { show: { field: ['assignment'] } },
+						description:
+							'Optional comma-separated exact destination assignee IDs. Does not require a previous assignee value.',
+					},
+					{
+						displayName: 'Action Type Equals',
+						name: 'actionTypes',
+						type: 'multiOptions',
+						default: [],
+						options: mitigationActionTypeOptions,
+						displayOptions: { show: { field: ['mitigation'] } },
+						description: 'Optional recorded action types. Selected values use OR.',
+					},
+					{
+						displayName: 'Activity Status Equals',
+						name: 'activityStatuses',
+						type: 'multiOptions',
+						default: [],
+						options: mitigationActivityStatusOptions,
+						displayOptions: { show: { field: ['mitigation'] } },
+						description:
+							'Optional recorded activity statuses. Selected values use OR. Mitigation activity does not by itself mean successful remediation.',
+					},
+				],
+			},
+		],
+	},
+];
 
 const activePollKeys = new Set<string>();
 
@@ -163,7 +314,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 		group: ['trigger'],
 		version: 1,
 		subtitle:
-			'={{$parameter["resource"] === "alertNote" ? "Alert note: Created" : "Alert: " + ({new: "New", newOrUpdated: "New or updated", updated: "Updated"}[$parameter["operation"]] || "New")}}',
+			'={{$parameter["resource"] === "alertActivity" ? "Alert activity: Occurred" : "Alert: " + ({new: "New", newOrUpdated: "New or updated", updated: "Updated"}[$parameter["operation"]] || "New")}}',
 		description: 'Starts the workflow when selected SentinelOne Unified Alerts events are found',
 		defaults: {
 			name: 'SentinelOne Platform Trigger',
@@ -187,7 +338,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				default: 'alert',
 				options: [
 					{ name: 'Alert', value: 'alert' },
-					{ name: 'Alert Note', value: 'alertNote' },
+					{ name: 'Alert Activity', value: 'alertActivity' },
 				],
 			},
 			{
@@ -225,17 +376,19 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				name: 'operation',
 				type: 'options',
 				noDataExpression: true,
-				default: 'created',
-				displayOptions: { show: { resource: ['alertNote'] } },
+				default: 'occurred',
+				displayOptions: { show: { resource: ['alertActivity'] } },
 				options: [
 					{
-						name: 'Created',
-						value: 'created',
-						description: 'Emit newly created notes discovered through SDL ActivityFeed',
-						action: 'Trigger on created alert notes',
+						name: 'Occurred',
+						value: 'occurred',
+						description:
+							'Emit each matching alert activity once within the checkpoint and overlap window',
+						action: 'Trigger on alert activity',
 					},
 				],
 			},
+			...activityFields,
 			...managementScopeFields(),
 			{
 				displayName: 'Options',
@@ -329,7 +482,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				type: 'collection',
 				placeholder: 'Add Option',
 				default: {},
-				displayOptions: { show: { resource: ['alertNote'] } },
+				displayOptions: { show: { resource: ['alertActivity'] } },
 				options: [
 					{
 						displayName: 'Alert Name',
@@ -338,6 +491,32 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						default: '',
 						placeholder: 'Suspicious process',
 						description: 'Optional full-text match against the SentinelOne alert name',
+					},
+					{
+						displayName: 'Current Parent Alert Severity',
+						name: 'severities',
+						type: 'multiOptions',
+						default: [],
+						options: severityOptions,
+						description:
+							'Only emit activities whose parent alert currently has a selected severity. This does not filter the recorded change. Leave empty for any severity.',
+					},
+					{
+						displayName: 'Current Parent Alert Status',
+						name: 'statuses',
+						type: 'multiOptions',
+						default: [],
+						options: statusOptions,
+						description:
+							'Only emit activities whose parent alert currently has a selected status. This does not filter the recorded change. Leave empty for any status.',
+					},
+					{
+						displayName: 'Custom Activity Type IDs',
+						name: 'customActivityTypeIds',
+						type: 'string',
+						default: '',
+						description:
+							'Advanced: comma-separated numeric activity type IDs to include with named selections. Any Alert Activity includes these IDs already.',
 					},
 					{
 						displayName: 'Exclude Account Name',
@@ -349,6 +528,23 @@ export class SentinelOnePlatformTrigger implements INodeType {
 							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See the README for supported syntax.',
 					},
 					{
+						displayName: 'Exclude Actor IDs',
+						name: 'excludeActorIds',
+						type: 'string',
+						default: '',
+						description:
+							'Comma-separated actor IDs to exclude by exact match. Activities without an actor ID are kept.',
+					},
+					{
+						displayName: 'Exclude Actor Name',
+						name: 'excludeActorName',
+						type: 'string',
+						default: '',
+						placeholder: 'automation|integration',
+						description:
+							'Case-insensitive exclusion regex for the SDL user name. Leave empty to disable. Missing names are kept. See the README for supported syntax.',
+					},
+					{
 						displayName: 'Exclude Group Name',
 						name: 'excludeGroupName',
 						type: 'string',
@@ -356,15 +552,6 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						placeholder: 'demo|test',
 						description:
 							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See the README for supported syntax.',
-					},
-					{
-						displayName: 'Exclude Note Author Name',
-						name: 'excludeNoteAuthorName',
-						type: 'string',
-						default: '',
-						placeholder: 'automation|integration',
-						description:
-							'Case-insensitive exclusion regex for the SDL user name. Leave empty to disable. Missing names are kept. See the README for supported syntax.',
 					},
 					{
 						displayName: 'Exclude Site Name',
@@ -376,30 +563,20 @@ export class SentinelOnePlatformTrigger implements INodeType {
 							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See the README for supported syntax.',
 					},
 					{
-						displayName: 'Parent Alert Severity',
-						name: 'severities',
-						type: 'multiOptions',
-						default: [],
-						options: severityOptions,
-						description:
-							'Only emit notes whose parent alert currently has a selected severity. Leave empty for any severity.',
-					},
-					{
-						displayName: 'Parent Alert Status',
-						name: 'statuses',
-						type: 'multiOptions',
-						default: [],
-						options: statusOptions,
-						description:
-							'Only emit notes whose parent alert currently has a selected status. Leave empty for any status.',
-					},
-					{
-						displayName: 'Simplify',
-						name: 'simplifyOutput',
+						displayName: 'Include Current Alert',
+						name: 'includeCurrentAlert',
 						type: 'boolean',
-						default: true,
+						default: false,
 						description:
-							'Whether to return a simplified version of the response instead of the raw data',
+							'Whether to add the current parent alert alongside the activity envelope. Current values do not replace recorded changes.',
+					},
+					{
+						displayName: 'Include Raw Activity',
+						name: 'includeRawActivity',
+						type: 'boolean',
+						default: false,
+						description:
+							'Whether to add the complete raw activity alongside the stable activity envelope',
 					},
 				],
 			},
@@ -454,15 +631,25 @@ export class SentinelOnePlatformTrigger implements INodeType {
 
 			try {
 				const baseUrl = normalizeBaseUrl(credentials.baseUrl);
-				const resource = this.getNodeParameter('resource') as 'alert' | 'alertNote';
+				const resource = this.getNodeParameter('resource') as 'alert' | 'alertActivity';
 				const operation = this.getNodeParameter('operation') as
-					| 'created'
+					| 'occurred'
 					| 'new'
 					| 'newOrUpdated'
 					| 'updated';
+				if (
+					(resource !== 'alert' && resource !== 'alertActivity') ||
+					(resource === 'alertActivity' && operation !== 'occurred') ||
+					(resource === 'alert' && !['new', 'newOrUpdated', 'updated'].includes(operation))
+				) {
+					throw new NodeOperationError(
+						node,
+						'Unsupported trigger resource or operation. Migrate Alert Note triggers to Alert Activity > Occurred and select Note Created.',
+					);
+				}
 				const events: TriggerEvent[] =
-					resource === 'alertNote'
-						? ['alert.note.created']
+					resource === 'alertActivity'
+						? ['alert.activity']
 						: operation === 'newOrUpdated'
 							? ['alert.new', 'alert.updated']
 							: operation === 'updated'
@@ -515,8 +702,8 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					credentialIdentity: credentialIdentity(this),
 					scopeType,
 					scopeIds,
-					noteAccountIds:
-						resource === 'alertNote'
+					activityAccountIds:
+						resource === 'alertActivity'
 							? await activityAccountIds(
 									authenticatedRequest(this, nodeDebug),
 									baseUrl,
@@ -538,8 +725,24 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					excludeAccountName: String(options.excludeAccountName ?? ''),
 					excludeSiteName: String(options.excludeSiteName ?? ''),
 					excludeGroupName: String(options.excludeGroupName ?? ''),
-					excludeNoteAuthorName:
-						resource === 'alertNote' ? String(options.excludeNoteAuthorName ?? '') : '',
+					activityTypeIds:
+						resource === 'alertActivity'
+							? parseActivitySelection(
+									this.getNodeParameter('activityTypes', ['any']),
+									options.customActivityTypeIds,
+								)
+							: undefined,
+					activityConditions:
+						resource === 'alertActivity'
+							? parseActivityConditions(this.getNodeParameter('activityConditions', {}))
+							: [],
+					conditionMatch: this.getNodeParameter('conditionMatch', 'any') === 'all' ? 'all' : 'any',
+					excludeActorIds:
+						resource === 'alertActivity' ? parseExactValues(options.excludeActorIds) : [],
+					includeRawActivity: resource === 'alertActivity' && options.includeRawActivity === true,
+					includeCurrentAlert: resource === 'alertActivity' && options.includeCurrentAlert === true,
+					excludeActorName:
+						resource === 'alertActivity' ? String(options.excludeActorName ?? '') : '',
 					simplifyOutput: options.simplifyOutput !== false,
 					includeOcsf: resource === 'alert' && options.includeOcsf === true,
 					debug: nodeDebug,
@@ -555,7 +758,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					alertPageSize: 200,
 					maxAlertPages: 25,
 				};
-				const result = await (resource === 'alertNote' ? pollActivityNotes : pollSentinelOne)(
+				const result = await (resource === 'alertActivity' ? pollAlertActivities : pollSentinelOne)(
 					authenticatedRequest(this, nodeDebug),
 					config,
 					previousState,

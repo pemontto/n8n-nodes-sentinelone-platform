@@ -4,7 +4,8 @@ export interface ExclusionPatterns {
 	excludeAccountName?: string;
 	excludeSiteName?: string;
 	excludeGroupName?: string;
-	excludeNoteAuthorName?: string;
+	excludeActorName?: string;
+	excludeActorIds?: string[];
 }
 
 /** Bound native regex work without runtime dependencies or worker processes. */
@@ -72,6 +73,6 @@ export function compileExclusions(patterns: ExclusionPatterns) {
 		account: compileExclusion(patterns.excludeAccountName, 'Exclude Account Name'),
 		site: compileExclusion(patterns.excludeSiteName, 'Exclude Site Name'),
 		group: compileExclusion(patterns.excludeGroupName, 'Exclude Group Name'),
-		author: compileExclusion(patterns.excludeNoteAuthorName, 'Exclude Note Author Name'),
+		author: compileExclusion(patterns.excludeActorName, 'Exclude Actor Name'),
 	};
 }

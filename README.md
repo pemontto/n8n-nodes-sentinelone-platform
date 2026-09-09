@@ -1,8 +1,8 @@
 # SentinelOne Platform for n8n
 
-Two n8n nodes for SentinelOne: **SentinelOne Platform** reads and updates alerts, manages notes, and runs SDL queries. **SentinelOne Platform Trigger** starts workflows when alerts are created or updated, or when someone adds an alert note. The credential determines which records and actions are accessible.
+Two n8n nodes for SentinelOne: **SentinelOne Platform** reads and updates alerts, manages notes, and runs SDL queries. **SentinelOne Platform Trigger** starts workflows when alerts are created or updated, or when an alert activity occurs. The credential determines which records and actions are accessible.
 
-![An n8n workflow connecting the SentinelOne Platform note-created trigger to a Get parent alert action](https://raw.githubusercontent.com/pemontto/n8n-nodes-sentinelone-platform/main/docs/images/note-trigger-workflow.png)
+![The inactive note test workflow with the Alert Activity trigger filtered to Note Created; only the trigger preview has run](https://raw.githubusercontent.com/pemontto/n8n-nodes-sentinelone-platform/main/docs/images/note-trigger-workflow.png)
 
 Example: a new alert note starts the workflow, then Alert > Get fetches its parent using the event's `alertId`. No account or site selection is required for that lookup.
 
@@ -22,14 +22,18 @@ Update supports status, analyst verdict, and ticket ID. Verification reads chang
 
 Add **SentinelOne Platform Trigger** as the first node in a workflow and choose an event:
 
-| Resource   | Events                       |
-| ---------- | ---------------------------- |
-| Alert      | New, Updated, New or Updated |
-| Alert Note | Created                      |
+| Resource       | Events                       |
+| -------------- | ---------------------------- |
+| Alert          | New, Updated, New or Updated |
+| Alert Activity | Occurred                     |
 
 The trigger polls on the schedule you configure and keeps checkpoint and deduplication state. Optional Account, Site, and Group selections narrow the records it checks; empty selections include accessible records. A poll with no qualifying events produces no items.
 
-See [trigger configuration](docs/trigger.md) for fields, note filters, and testing guidance.
+See [trigger configuration](docs/trigger.md) for activity conditions, current-parent filters, delivery limits, and migration guidance.
+
+Alert Activity supports alert creation, status/verdict/severity/assignee changes, mitigation activity, and note creation. It also accepts unknown alert-linked activity types. The condition builder matches recorded values within one activity. Optional raw activity and current alert fields add to a stable event envelope.
+
+Breaking change: Alert Activity > Occurred replaces the trigger's Alert Note > Created resource without an alias. To keep note-only delivery, select Note created (`16007`) and start with fresh trigger state. Alert Note actions and Alert snapshot triggers are unchanged. See [migration steps](docs/trigger.md#breaking-migration-from-alert-note).
 
 ## Documentation
 

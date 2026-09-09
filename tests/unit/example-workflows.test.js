@@ -98,3 +98,20 @@ test('update captures original state and enables verification; reads add raw dat
 		['rawData'],
 	);
 });
+
+test('note listener migrates to note-only Alert Activity and snapshot listener stays unchanged', () => {
+	const listeners = workflows
+		.flatMap((w) => w.nodes)
+		.filter((n) => n.type.endsWith('Trigger') && n.type.includes('sentinelOnePlatform'));
+	const note = listeners.find((n) => n.id === '00000000-0000-4000-8000-000000000018');
+	assert.equal(note.parameters.resource, 'alertActivity');
+	assert.equal(note.parameters.operation, 'occurred');
+	assert.deepEqual(note.parameters.activityTypes, ['16007']);
+	assert.equal(note.name, 'Listen for demo notes');
+	assert.deepEqual(note.parameters.accountIds, []);
+	assert.deepEqual(note.parameters.siteIds, []);
+	assert.deepEqual(note.parameters.groupIds, []);
+	const snapshot = listeners.find((n) => n.parameters.resource === 'alert');
+	assert.equal(snapshot.parameters.operation, 'newOrUpdated');
+	assert.equal(snapshot.parameters.activityTypes, undefined);
+});

@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
 	readActivityFeed,
-	ACTIVITY_FEED_QUERY,
+	ACTIVITY_FEED_LOG_FILTER,
 } = require('../../dist/nodes/SentinelOnePlatformTrigger/ActivityFeed.js');
 
 const BASE = 'https://tenant.example';
@@ -22,18 +22,18 @@ const response = (rows = [], data = {}) => ({
 	stepsCompleted: 1,
 	stepsTotal: 1,
 	data: {
-		columns: [
-			'activity_id',
-			'created_at',
-			'data.alert.id',
-			'timestampNs',
-			'noteText',
-			'authorId',
-			'authorName',
-		].map((name) => ({
-			name,
+		matches: rows.map((input) => ({
+			timestamp: input[3],
+			values: {
+				activity_id: input[0],
+				created_at: input[1],
+				'data.alert.id': input[2],
+				activity_type: '16007',
+				'data.payload.note_text': input[4],
+				'data.user.id': input[5],
+				'data.user.enriched_name': input[6],
+			},
 		})),
-		values: rows,
 		omittedEvents: 0,
 		discardedArrayItems: 0,
 		...data,
@@ -57,10 +57,10 @@ test('ActivityFeed completes inline, preserves nanoseconds and restricts account
 	const events = await readActivityFeed(
 		async (request) => {
 			assert.equal(request.method, 'POST');
-			assert.equal(request.body.pq.query, ACTIVITY_FEED_QUERY);
-			assert.deepEqual(request.body.accountIds, ['account-1']);
-			assert.equal(request.body.tenant, false);
-			assert.equal(request.body.startTime, new Date(START).toISOString());
+			assert.equal(JSON.parse(request.body).log.filter, ACTIVITY_FEED_LOG_FILTER);
+			assert.deepEqual(JSON.parse(request.body).accountIds, ['account-1']);
+			assert.equal(JSON.parse(request.body).tenant, false);
+			assert.equal(JSON.parse(request.body).startTime, new Date(START).toISOString());
 			return response([input]);
 		},
 		BASE,
@@ -115,16 +115,16 @@ test('ActivityFeed cancels abandoned queries on deadline and poll failure', asyn
 	}
 });
 
-test('ActivityFeed fails on partial data, errors, warnings and malformed tables', async () => {
+test('ActivityFeed fails on partial data, errors, warnings and malformed LOG matches', async () => {
 	for (const data of [
 		{ warnings: ['partial'] },
 		{ errors: [{}] },
 		{ partialResultsDueToTimeLimit: true },
 		{ omittedEvents: 1 },
 		{ discardedArrayItems: 1 },
-		{ columns: [] },
-		{ values: undefined },
-		{ columns: [{ name: 'activity_id' }, { name: 'activity_id' }] },
+		{ matches: null },
+		{ matches: [{}] },
+		{ matches: undefined },
 	]) {
 		await assert.rejects(
 			() =>
@@ -139,7 +139,7 @@ test('ActivityFeed fails on partial data, errors, warnings and malformed tables'
 	}
 	for (const index of [0, 2, 3]) {
 		const bad = row();
-		bad[index] = 123;
+		bad[index] = {};
 		await assert.rejects(
 			() =>
 				readActivityFeed(
@@ -157,8 +157,8 @@ test('ActivityFeed splits saturation into gapless half-open windows', async () =
 	const windows = [];
 	const events = await readActivityFeed(
 		async (request) => {
-			const start = Date.parse(request.body.startTime),
-				end = Date.parse(request.body.endTime);
+			const start = Date.parse(JSON.parse(request.body).startTime),
+				end = Date.parse(JSON.parse(request.body).endTime);
 			windows.push([start, end]);
 			return response(
 				end - start > 1
@@ -280,13 +280,13 @@ test('ActivityFeed rejects top-level warnings and failure after a successful spl
 	assert.equal(creates, 3);
 });
 
-test('ActivityFeed preserves required note text and rejects missing or null payloads', async () => {
+test('ActivityFeed preserves optional note text and rejects invalid text values', async () => {
 	const input = row();
 	input[4] = 'A note with Unicode 🔎\nand another line';
 	const result = await readActivityFeed(async () => response([input]), BASE, START, START + 1);
 	assert.equal(result[0].noteText, input[4]);
-	assert.ok(ACTIVITY_FEED_QUERY.includes('data.payload.note_text'));
-	for (const value of [null, undefined, 42]) {
+	assert.ok(!ACTIVITY_FEED_LOG_FILTER.includes('16007'));
+	for (const value of [42]) {
 		const invalid = row();
 		invalid[4] = value;
 		await assert.rejects(
@@ -362,8 +362,8 @@ test('ActivityFeed splits oversized inline responses instead of truncating', asy
 	const windows = [];
 	const result = await readActivityFeed(
 		async (r) => {
-			const start = Date.parse(r.body.startTime),
-				end = Date.parse(r.body.endTime);
+			const start = Date.parse(JSON.parse(r.body).startTime),
+				end = Date.parse(JSON.parse(r.body).endTime);
 			windows.push([start, end]);
 			const input = row(String(start), start);
 			input[4] = end - start > 1 ? 'x'.repeat(2000) : 'small';
@@ -394,8 +394,8 @@ test('ActivityFeed never ignores or downloads a full-result URL', async () => {
 		async (r) => {
 			assert.ok(r.url.startsWith(BASE));
 			calls++;
-			const start = Date.parse(r.body.startTime),
-				end = Date.parse(r.body.endTime);
+			const start = Date.parse(JSON.parse(r.body).startTime),
+				end = Date.parse(JSON.parse(r.body).endTime);
 			return end - start > 1
 				? response([], { fullResultUrl: 'https://elsewhere.invalid/result' })
 				: response([row(String(start), start)]);
@@ -467,6 +467,7 @@ const logMatch = (id = 'raw-activity', time = START) => ({
 	timestamp: ns(time),
 	values: {
 		activity_id: id,
+		activity_type: '16007',
 		created_at: new Date(time).toISOString(),
 		'data.alert.id': 'alert-1',
 		'data.payload.note_text': 'all native fields',
@@ -545,7 +546,7 @@ test('LOG rejects rounded object numbers and malformed events or match arrays', 
 		logResponse([{}]),
 		{ ...logResponse([]), data: {} },
 		logResponse([
-			{ ...logMatch(), values: { ...logMatch().values, 'data.payload.note_text': null } },
+			{ ...logMatch(), values: { ...logMatch().values, 'data.payload.note_text': 42 } },
 		]),
 	]) {
 		await assert.rejects(
@@ -585,11 +586,188 @@ test('ActivityFeed preserves exact string author IDs and nullable names', async 
 	const [event] = await readActivityFeed(async () => response([input]), BASE, START, START + 1);
 	assert.equal(event.authorId, '90071992547409930002');
 	assert.equal(event.authorName, 'Example Analyst');
-	assert.match(ACTIVITY_FEED_QUERY, /"authorId"=string\(data\.user\.id\)/);
-	assert.match(ACTIVITY_FEED_QUERY, /"authorName"=data\.user\.enriched_name/);
+	assert.match(ACTIVITY_FEED_LOG_FILTER, /dataset='activityLog'/);
 	input[5] = 90071992547409930002;
 	await assert.rejects(
 		() => readActivityFeed(async () => response([input]), BASE, START, START + 1),
-		/invalid activity/,
+		/unsafe LOG numbers/,
 	);
+});
+
+test('ActivityFeed decodes every known category and unknown alert-linked types without note text', async () => {
+	const kinds = [
+		'alertCreated',
+		'statusChanged',
+		'analystVerdictChanged',
+		'severityChanged',
+		'assigneeChanged',
+		'mitigationActivity',
+		'noteCreated',
+		'unknown',
+	];
+	const ids = ['16000', '16001', '16002', '16003', '16004', '16005', '16007', '19999'];
+	const matches = ids.map((id) => {
+		const match = logMatch(id);
+		match.values.activity_type = id;
+		delete match.values['data.payload.note_text'];
+		return match;
+	});
+	const events = await readFull(async () => logResponse(matches));
+	assert.deepEqual(
+		events.map((event) => event.activityKind),
+		kinds,
+	);
+	assert.deepEqual(
+		events.map((event) => event.activityTypeId),
+		ids,
+	);
+	assert.ok(events.every((event) => !Object.hasOwn(event, 'noteText')));
+});
+
+test('ActivityFeed keeps every recorded change, including null, UNDEFINED and missing endpoints', async () => {
+	const match = logMatch();
+	Object.assign(match.values, {
+		'data.payload.changes.old_status': 'RESOLVED',
+		'data.payload.changes.new_status': 'IN_PROGRESS',
+		'data.payload.changes.old_analyst_verdict': 'UNDEFINED',
+		'data.payload.changes.new_analyst_verdict': null,
+		'data.payload.changes.new_severity': 'HIGH',
+		'data.payload.changes.new_assignee_email': 'analyst@example.invalid',
+		'data.payload.changes.new_assignee_id': '90071992547409930002',
+		'data.payload.changes.old_assignee_id': 'never-inferred',
+		'data.payload.changes.old_verdict': 'never-aliased',
+		'data.payload.mitigation_action_type': 'WORKFLOW',
+		'data.payload.mitigation_action_status': 'RUNNING',
+	});
+	const [event] = await readFull(async () => logResponse([match]));
+	assert.deepEqual(event.changes, [
+		{ field: 'status', oldValue: 'RESOLVED', newValue: 'IN_PROGRESS' },
+		{ field: 'analystVerdict', oldValue: 'UNDEFINED', newValue: null },
+		{ field: 'severity', newValue: 'HIGH' },
+		{ field: 'assigneeEmail', newValue: 'analyst@example.invalid' },
+		{ field: 'assigneeId', newValue: '90071992547409930002' },
+	]);
+	assert.deepEqual(event.mitigation, { actionType: 'WORKFLOW', activityStatus: 'RUNNING' });
+	assert.equal(event.rawActivity.values['data.payload.changes.old_verdict'], 'never-aliased');
+});
+
+test('ActivityFeed prefers newest duplicate source timestamp and ignores transport metadata differences', async () => {
+	const old = logMatch();
+	const newest = logMatch();
+	newest.timestamp = ns(START, 50n);
+	newest.values['data.payload.note_text'] = 'newest';
+	const copy = { ...newest, cursor: 'different-cursor' };
+	for (const matches of [
+		[old, newest, copy],
+		[newest, old, copy],
+	]) {
+		const events = await readFull(async () => logResponse(matches));
+		assert.equal(events.length, 1);
+		assert.equal(events[0].noteText, 'newest');
+	}
+	const conflict = structuredClone(newest);
+	conflict.values['unrecognized.payload'] = true;
+	await assert.rejects(
+		() => readFull(async () => logResponse([newest, conflict])),
+		/conflicting duplicate/,
+	);
+});
+
+test('ActivityFeed normal and raw modes request identical LOG selection and preserve exact numbers', async () => {
+	const bodies = [];
+	for (const raw of [false, true]) {
+		const events = await readActivityFeed(
+			async (request) => {
+				bodies.push(JSON.parse(request.body));
+				return JSON.stringify(logResponse([logMatch()])).replace('"' + ns(START) + '"', ns(START));
+			},
+			BASE,
+			START,
+			START + 1,
+			[],
+			{},
+			undefined,
+			raw,
+			['16001', '16007'],
+		);
+		assert.equal(events[0].timestampNs, ns(START));
+	}
+	assert.deepEqual(bodies[0], bodies[1]);
+	assert.equal(bodies[0].queryType, 'LOG');
+	assert.match(bodies[0].log.filter, /activity_type='16001' OR activity_type='16007'/);
+});
+
+test('ActivityFeed reports sanitized SDL launch and polling failures', async () => {
+	for (const stage of ['launch', 'polling']) {
+		await assert.rejects(
+			() =>
+				readFull(
+					async (request) => {
+						if (request.method === 'POST' && stage === 'polling') return { id: 'raw-query' };
+						throw new Error('SECRET request body https://private.invalid');
+					},
+					START,
+					START + 1,
+					clock(),
+				),
+			(error) => {
+				assert.match(error.message, new RegExp(stage));
+				assert.ok(!error.message.includes('SECRET'));
+				return true;
+			},
+		);
+	}
+});
+
+test('ActivityFeed manual preview stops at the first matching window and reports budget exhaustion', async () => {
+	let requests = 0;
+	const matched = [];
+	await readActivityFeed(
+		async (request) => {
+			requests++;
+			const body = JSON.parse(request.body);
+			return logResponse([logMatch('match', Date.parse(body.startTime))]);
+		},
+		BASE,
+		Date.parse('2020-01-01'),
+		START + 1,
+		[],
+		{},
+		async (events) => {
+			matched.push(...events);
+			return events.length > 0;
+		},
+	);
+	assert.equal(requests, 1);
+	assert.equal(matched.length, 1);
+	await assert.rejects(
+		() =>
+			readActivityFeed(
+				async () => logResponse([]),
+				BASE,
+				Date.parse('2020-01-01'),
+				START + 1,
+				[],
+				{ maxQueries: 1 },
+				async () => false,
+			),
+		/query budget/,
+	);
+});
+
+test('ActivityFeed rejects conflicting older duplicate payloads in every input order', async () => {
+	const first = logMatch();
+	const conflicting = structuredClone(first);
+	conflicting.values['data.payload.note_text'] = 'conflicting older payload';
+	const newest = logMatch();
+	newest.timestamp = ns(START, 50n);
+	const permutations = (items) =>
+		items.length === 0
+			? [[]]
+			: items.flatMap((item, index) =>
+					permutations(items.filter((_, i) => i !== index)).map((rest) => [item, ...rest]),
+				);
+	for (const matches of permutations([first, conflicting, newest])) {
+		await assert.rejects(() => readFull(async () => logResponse(matches)), /conflicting duplicate/);
+	}
 });

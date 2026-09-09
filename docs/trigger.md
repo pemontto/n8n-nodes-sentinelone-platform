@@ -1,13 +1,57 @@
 # Triggers
 
-Alert supports New, Updated, and New or Updated. Alert Note supports Created. These are polling triggers with checkpoint and deduplication state.
+Alert supports New, Updated, and New or Updated. These snapshot triggers remain unchanged. Alert Activity > Occurred reads individual alert-linked ActivityFeed records through the current SDL V2 LOG query API. It requires SDL query access as well as the alert read access needed to validate current scope.
 
-Choose Account, Site, and Group selections to narrow polling. Empty selections include accessible records. Options > Additional Alert Fields adds optional data to common alert fields; large enrichments are not requested by default.
+## Activity selection
 
-Parent Alert Severity and Parent Alert Status apply to a note's parent at polling time. They do not reconstruct its state when the note was created.
+Choose Any alert activity, named activity types, or advanced custom numeric IDs. Any includes unknown alert-linked activity types and preserves their IDs without assigning a guessed name.
 
-A note event's `alertId` can feed Alert > Get directly without account or site scope. Trigger output retains event metadata.
+| Type ID | Activity                |
+| ------- | ----------------------- |
+| `16000` | Alert created           |
+| `16001` | Status changed          |
+| `16002` | Analyst verdict changed |
+| `16003` | Severity changed        |
+| `16004` | Assignee changed        |
+| `16005` | Mitigation activity     |
+| `16007` | Note created            |
 
-Fetch Test Event searches recent note activity first, then older windows if no notes match. It returns up to 10 notes from the first matching window and stops, even if only one matches. Scheduled polling still returns all qualifying new events.
+Mitigation activity describes a recorded action and its supplied status. It does not mean remediation succeeded. In particular, `WORKFLOW` with `RUNNING` is not completion evidence. The trigger delivers once per activity ID within its retained checkpoint state; it does not monitor later revisions or wait for completion.
 
-Use [inactive testing workflows](testing.md) to check delivery and deduplication. Select the demo account before listening. Keep the listener running while making a designated test change. A poll without new qualifying events produces no items.
+## Conditions and current alert filters
+
+Add repeatable builder conditions and choose Match any or Match all. Every condition applies to one activity. Match all never accumulates separate events across polls. There is no JSON condition editor or free-form SDL input.
+
+Status, analyst verdict, and severity conditions offer optional From and To multiselects using the complete shared enum values. Values within a list use OR. From and To use AND on the same recorded change. Both endpoints must exist and differ, even when only one list is selected. Empty lists add no endpoint restriction. For example, Status with To `RESOLVED` accepts a recorded resolution; From `RESOLVED` and To `NEW` or `IN_PROGRESS` accepts reopening.
+
+Missing properties, explicit null, and the literal string `UNDEFINED` remain distinct. Missing endpoints do not match transition conditions. Equal endpoints do not match. The trigger never reconstructs historical values from current alerts, descriptions, or polling snapshots.
+
+Assignment conditions match supplied previous/new email values or destination IDs. A previous-email condition requires that field in the event; some events omit it. A destination email or ID condition can match without a previous value. There is no previous-ID selector. Mitigation conditions match action-type and activity-status values from the schema enums; they are value conditions, not completion monitoring.
+
+Account, Site, and Group selections restrict current scope. Empty selections include accessible records. Current parent alert status and severity filters inspect the parent at polling time, separately from recorded transitions. An old resolution can still match after the alert reopens unless a current-parent filter excludes it. Scope/name exclusions remain available alongside separate actor-name regex and exact actor-ID exclusions.
+
+## Output
+
+Each activity produces one item with `eventType: "alert.activity"`, `activityId`, `activityTypeId` as a string, `activityKind`, `alertId`, `eventTimestamp`, `actor`, and `changes`. Scope resolved from a parent lookup is identified as current scope. An event's `alertId` can feed Alert > Get directly without account or site selection.
+
+Each recognised change appears in `changes[]` as `{field, oldValue?, newValue?}`. One activity can contain several changes. An empty array means no recognised changes were supplied. A missing endpoint stays absent; an explicit null stays null. Note and mitigation details appear when supplied. Unknown types retain the generic envelope.
+
+Include Raw Activity adds `rawActivity` with the original flattened keys and exact large integer values. Include Current Alert adds `currentAlert`; it does not replace the event envelope or historical changes. Raw and normal output use the same activity selection and current V2 LOG endpoint.
+
+## Polling and test events
+
+Scheduled polling establishes a fresh baseline on first use or after relevant configuration changes. It does not replay history at that point. Later polls use bounded overlap and deduplicate by activity ID. Duplicate IDs in one batch prefer the newest source timestamp. Conflicting payloads with the same timestamp fail the poll without advancing its checkpoint. Later revisions of an already delivered activity do not trigger another delivery while its ID remains retained.
+
+Fetch Test Event searches newest windows first, down to the existing January 2020 lower boundary. It returns at most the 10 newest matches from the first nonempty matching window and stops even if only one matches. It never searches older windows just to fill ten. Finite request and query budgets still apply; exhausting them reports an incomplete search rather than claiming no matches.
+
+Scope resolution, SDL launch/poll, and alert lookup errors identify the failed stage without including source records or credentials. Incomplete results, unresolved current scope, saturated windows that cannot be split further, and exceeded limits fail without advancing scheduled state. This can block delivery until the underlying problem is resolved.
+
+Delivery depends on source retention, late-arrival timing, and the bounded overlap/checkpoint history. It is not an exactly-once downstream guarantee or a complete historical archive. Use activity IDs for downstream idempotency where needed. Actor exclusions can reduce self-triggering but do not guarantee loop prevention.
+
+## Breaking migration from Alert Note
+
+The trigger resource Alert Note > Created has been removed without an alias. The action node's Alert Note > Get Many/Create operations are unchanged, as are Alert snapshot triggers.
+
+Change each affected trigger to Alert Activity > Occurred and select Note created (`16007`). Preserve credentials, Account/Site/Group selections, current-parent filters, exclusions, node labels, and workflow inactive state. Translate the old note-author exclusion to the actor-name exclusion. Translate simplified output to the generic envelope, or enable Include Raw Activity for the old raw setting. Update dependent expressions to the envelope's note details and `alertId` as needed.
+
+Discard note-only polling state during migration. The activity configuration gets a fresh fingerprint and scheduled baseline, with no historical replay. The inactive [note example](../examples/workflows/03-notes.json) uses the new resource and selection. See [testing guidance](testing.md) before using listener controls.

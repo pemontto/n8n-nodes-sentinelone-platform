@@ -9,12 +9,14 @@ import type {
 } from './SentinelOneTriggerHelpers';
 import { readActivityFeed, type ActivityFeedEvent, type ActivityFeedTiming } from './ActivityFeed';
 import { compileExclusions, matchesExclusion } from './Exclusions';
+import { matchesActivityConditions } from './ActivityConditions';
+import { responseStatus } from '../shared/transport/retry';
 
 // SDL rejects Unix epoch dates; use a verified historical query boundary.
 const PREVIEW_START_MS = Date.UTC(2020, 0, 1);
 
-export const ACTIVITY_NOTE_STATE_LIMIT = 40_000;
-export const ALERT_QUERY = `query ActivityNoteAlerts($first: Int!, $after: String, $scope: ScopeSelectorInput!, $filters: [FilterInput!]) {
+export const ACTIVITY_STATE_LIMIT = 40_000;
+export const ALERT_QUERY = `query ActivityAlerts($first: Int!, $after: String, $scope: ScopeSelectorInput!, $filters: [FilterInput!]) {
   alerts(first: $first, after: $after, scope: $scope, viewType: ALL, filters: $filters) {
     edges { node { id name severity status realTime { scope { account { id name } site { id name } group { id name } } } } }
     pageInfo { hasNextPage endCursor }
@@ -26,7 +28,7 @@ function record(value: unknown): IDataObject | undefined {
 		: undefined;
 }
 function fail(message: string): Error {
-	return new Error(`SentinelOne note polling ${message}; state was not advanced.`);
+	return new Error(`SentinelOne activity polling ${message}; state was not advanced.`);
 }
 function stringId(value: unknown): value is string {
 	return typeof value === 'string' && value.length > 0 && value.trim() === value;
@@ -50,7 +52,7 @@ async function parallel<T, R>(items: T[], worker: (item: T) => Promise<R>): Prom
 			}
 		}),
 	);
-	if (failures.length) throw fail('could not finish all alert or note requests');
+	if (failures.length) throw failures[0];
 	return results;
 }
 
@@ -66,20 +68,28 @@ async function pages(
 	const cursors = new Set<string>();
 	let after: string | null = null;
 	for (let page = 0; page < maxPages; page++) {
-		const response = record(
-			await request({
-				method: 'POST',
-				url: `${config.baseUrl}/web/api/v2.1/unifiedalerts/graphql`,
-				timeout: config.requestTimeoutMs,
-				json: true,
-				body: { query, variables: { ...variables, after } },
-			}),
-		);
+		let response: IDataObject | undefined;
+		try {
+			response = record(
+				await request({
+					method: 'POST',
+					url: `${config.baseUrl}/web/api/v2.1/unifiedalerts/graphql`,
+					timeout: config.requestTimeoutMs,
+					json: true,
+					body: { query, variables: { ...variables, after } },
+				}),
+			);
+		} catch (error) {
+			const status = responseStatus(error);
+			throw fail(
+				`current alert lookup failed${status ? ` (HTTP ${status})` : ''}. Check alert read permissions and service availability`,
+			);
+		}
 		if (
 			response?.errors !== undefined &&
 			(!Array.isArray(response.errors) || response.errors.length > 0)
 		)
-			throw fail('received GraphQL errors');
+			throw fail('current alert lookup received GraphQL errors; check alert read permissions');
 		const connection = record(record(response?.data)?.[key]);
 		const info = record(connection?.pageInfo);
 		if (!Array.isArray(connection?.edges) || typeof info?.hasNextPage !== 'boolean')
@@ -127,11 +137,12 @@ interface AlertLookup {
 
 async function currentAlerts(
 	request: AuthenticatedRequest,
-	config: TriggerConfig & { noteAccountIds?: string[] },
+	config: TriggerConfig & { activityAccountIds?: string[] },
 	ids: string[],
 ): Promise<AlertLookup> {
 	const exclusions = compileExclusions(config);
-	const accounts = config.noteAccountIds ?? (config.scopeType === 'ACCOUNT' ? config.scopeIds : []);
+	const accounts =
+		config.activityAccountIds ?? (config.scopeType === 'ACCOUNT' ? config.scopeIds : []);
 	if (!accounts.length) throw fail('requires resolved account IDs');
 	async function lookup(
 		wanted: string[],
@@ -194,6 +205,7 @@ async function currentAlerts(
 	};
 	for (const alert of found) {
 		const id = String(alert.id);
+		if (!stringId(scopeOf(config, alert).id)) continue;
 		unresolvedIds.delete(id);
 		if (eligible(alert)) alerts.set(id, alert);
 		else ineligibleIds.add(id);
@@ -207,6 +219,11 @@ async function currentAlerts(
 		);
 		for (const id of alerts.keys()) {
 			const alert = filtered.get(id);
+			if (alert && !stringId(scopeOf(config, alert).id)) {
+				alerts.delete(id);
+				unresolvedIds.add(id);
+				continue;
+			}
 			if (alert && eligible(alert)) alerts.set(id, alert);
 			else {
 				alerts.delete(id);
@@ -219,66 +236,48 @@ async function currentAlerts(
 
 function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEvent): IDataObject {
 	const scope = scopeOf(config, alert);
-	const note: IDataObject = {
-		alertId: event.alertId,
+	const item: IDataObject = {
+		eventType: 'alert.activity',
 		activityId: event.activityId,
-		id: null,
-		actionType: 'CREATE',
-		createdAt: event.createdAt,
-		updatedAt: null,
-		eventText: 'New note was added to alert',
-		text: { content: event.noteText, type: null },
-		createdBy:
-			event.authorId !== null || event.authorName !== null
-				? { userId: event.authorId, fullName: event.authorName }
-				: null,
-	};
-	if (!config.simplifyOutput) {
-		if (!event.rawActivity) throw fail('omitted the full activity record');
-		return {
-			eventType: 'alert.note.created',
-			eventTimestamp: event.createdAt,
-			activityId: event.activityId,
-			scope,
-			note,
-			activity: event.rawActivity,
-		};
-	}
-	return {
-		eventType: 'alert.note.created',
+		activityTypeId: event.activityTypeId,
+		activityKind: event.activityKind,
+		alertId: event.alertId,
 		eventTimestamp: event.createdAt,
-		scope,
-		alertId: event.alertId,
-		activityId: event.activityId,
-		noteId: null,
-		actionType: 'CREATE',
-		createdAt: event.createdAt,
-		updatedAt: null,
-		noteType: null,
-		noteText: event.noteText,
-		authorType: null,
-		authorId: event.authorId,
-		authorName: event.authorName,
-		authorEmail: null,
+		actor: { id: event.authorId, name: event.authorName },
+		scope: { ...scope, source: 'current' },
+		changes: event.changes,
 	};
+	if (event.noteText !== undefined) item.note = { text: event.noteText };
+	if (event.mitigation !== undefined) item.mitigation = event.mitigation;
+	if (config.includeRawActivity) {
+		if (!event.rawActivity) throw fail('omitted the full activity record');
+		item.rawActivity = event.rawActivity;
+	}
+	if (config.includeCurrentAlert) item.currentAlert = alert;
+	return item;
 }
 
-export async function pollActivityNotes(
+export async function pollAlertActivities(
 	request: AuthenticatedRequest,
-	config: TriggerConfig & { noteAccountIds?: string[] },
+	config: TriggerConfig & { activityAccountIds?: string[] },
 	previousState: TriggerState,
 	mode: PollMode,
 	pollStartMs: number,
 	timing?: ActivityFeedTiming,
 ): Promise<PollResult> {
 	const exclusions = compileExclusions(config);
-	const fingerprint = `${fingerprintConfig(config)}:sdl-notes-v2`;
+	const selected = (event: ActivityFeedEvent) =>
+		(!config.activityTypeIds || config.activityTypeIds.includes(event.activityTypeId)) &&
+		!matchesExclusion(exclusions.author, event.authorName) &&
+		!(config.excludeActorIds ?? []).includes(event.authorId ?? '') &&
+		matchesActivityConditions(event, config.activityConditions, config.conditionMatch);
+	const fingerprint = `${fingerprintConfig(config)}:sdl-activities-v1`;
 	const matches =
 		mode === 'scheduled' &&
 		previousState.configFingerprint === fingerprint &&
 		previousState.initialized === true;
 	const checkpoint = matches ? previousState.checkpointMs : undefined;
-	const activation = matches ? previousState.noteActivationMs : pollStartMs;
+	const activation = matches ? previousState.activityActivationMs : pollStartMs;
 	if (
 		matches &&
 		(typeof activation !== 'number' ||
@@ -289,7 +288,7 @@ export async function pollActivityNotes(
 	)
 		throw fail('has an invalid activation checkpoint');
 	const accountIds =
-		config.noteAccountIds ?? (config.scopeType === 'ACCOUNT' ? config.scopeIds : undefined);
+		config.activityAccountIds ?? (config.scopeType === 'ACCOUNT' ? config.scopeIds : undefined);
 	if (!accountIds?.length || !config.scopeIds.length)
 		throw fail('requires resolved account and selected scope IDs');
 	if (mode === 'manual') {
@@ -302,9 +301,7 @@ export async function pollActivityNotes(
 			accountIds,
 			timing,
 			async (events) => {
-				const candidates = events.filter(
-					(event) => !matchesExclusion(exclusions.author, event.authorName),
-				);
+				const candidates = events.filter(selected);
 				const lookup = await currentAlerts(request, config, [
 					...new Set(candidates.map((event) => event.alertId)),
 				]);
@@ -322,9 +319,10 @@ export async function pollActivityNotes(
 					preview.push(output(config, lookup.alerts.get(event.alertId)!, event));
 				return preview.length > 0;
 			},
-			!config.simplifyOutput,
+			config.includeRawActivity,
+			config.activityTypeIds,
 		);
-		return { items: preview.reverse() };
+		return { items: preview };
 	}
 	const start = (checkpoint ?? pollStartMs) - config.overlapSeconds * 1000;
 	const previous = new Map<string, string>();
@@ -336,8 +334,7 @@ export async function pollActivityNotes(
 				throw fail('has invalid saved activity identities');
 			previous.set(id, timestamp);
 		}
-		if (previous.size > ACTIVITY_NOTE_STATE_LIMIT)
-			throw fail('exceeded the activity state capacity');
+		if (previous.size > ACTIVITY_STATE_LIMIT) throw fail('exceeded the activity state capacity');
 	}
 	const activities = await readActivityFeed(
 		request,
@@ -347,17 +344,17 @@ export async function pollActivityNotes(
 		accountIds,
 		timing,
 		undefined,
-		!config.simplifyOutput,
+		config.includeRawActivity,
+		config.activityTypeIds,
 	);
-	if (activities.length > ACTIVITY_NOTE_STATE_LIMIT)
-		throw fail('exceeded the activity state capacity');
+	if (activities.length > ACTIVITY_STATE_LIMIT) throw fail('exceeded the activity state capacity');
 	const baseline = mode === 'scheduled' && !matches;
 	let items: IDataObject[] = [];
 	if (!baseline) {
 		const candidates = activities.filter(
 			(event) =>
 				!previous.has(event.activityId) &&
-				!matchesExclusion(exclusions.author, event.authorName) &&
+				selected(event) &&
 				BigInt(event.timestampNs) >= BigInt(Number(activation)) * BigInt(1000000),
 		);
 		const lookup = await currentAlerts(request, config, [
@@ -374,17 +371,16 @@ export async function pollActivityNotes(
 	}
 	for (const event of activities) {
 		const earlier = previous.get(event.activityId);
-		if (earlier !== undefined && earlier !== event.timestampNs)
-			throw fail('received conflicting timestamps for an activity ID');
-		previous.set(event.activityId, event.timestampNs);
+		if (earlier === undefined || BigInt(event.timestampNs) > BigInt(earlier))
+			previous.set(event.activityId, event.timestampNs);
 	}
 	const retainFrom =
 		BigInt(Math.max(0, Math.floor(pollStartMs - config.overlapSeconds * 1000))) * BigInt(1000000);
 	for (const [id, timestamp] of previous) if (BigInt(timestamp) < retainFrom) previous.delete(id);
-	if (previous.size > ACTIVITY_NOTE_STATE_LIMIT)
+	if (previous.size > ACTIVITY_STATE_LIMIT)
 		throw fail('exceeded the activity state capacity inside the overlap');
 	if (config.debug)
-		config.debugLog?.('Completed direct ActivityFeed note poll', {
+		config.debugLog?.('Completed direct ActivityFeed activity poll', {
 			outputCount: items.length,
 			checkpointAdvanced: true,
 			seenActivityCount: previous.size,
@@ -395,7 +391,7 @@ export async function pollActivityNotes(
 			configFingerprint: fingerprint,
 			initialized: true,
 			checkpointMs: pollStartMs,
-			noteActivationMs: activation,
+			activityActivationMs: activation,
 			seenActivityIds: [...previous.keys()],
 			seenActivityTimestamps: Object.fromEntries(previous),
 		},
