@@ -23,21 +23,18 @@ test('empty Get Many hierarchy uses all accessible alerts without management req
 	);
 });
 
-test('clearing sites ignores saved group IDs and does not evaluate a hidden group expression', async () => {
-	assert.equal(await readListScope(fixture({ siteIds: [], groupIds: ['old-group'] }), 0), null);
-	const context = fixture(
-		{ accountIds: ['a'], siteIds: [], groupIds: '={{ invalid.expression }}' },
-		async (request) => {
-			assert.ok(request.url.endsWith('/accounts'));
-			return { data: [{ id: 'a' }] };
-		},
+test('legacy group selections without a site are rejected before management requests', async () => {
+	let requests = 0;
+	await assert.rejects(
+		readListScope(
+			fixture({ accountIds: ['a'], siteIds: [], groupIds: ['old-group'] }, async () => {
+				requests++;
+			}),
+			0,
+		),
+		/Group selections require a site selection/,
 	);
-	const getNodeParameter = context.getNodeParameter;
-	context.getNodeParameter = (name, index, fallback) => {
-		assert.notEqual(name, 'groupIds', 'Hidden group expressions must not be evaluated');
-		return getNodeParameter(name, index, fallback);
-	};
-	assert.deepEqual(await readListScope(context, 0), { scopeType: 'ACCOUNT', scopeIds: ['a'] });
+	assert.equal(requests, 0);
 });
 
 test('Get Many validates every selected level and uses the narrowest scope', async () => {
@@ -168,11 +165,12 @@ test('nested scope loaders wait for the parent selection before listing children
 		return context;
 	};
 	const empty = loaderContext({ options: { scope: { selection: {} } } }, async (request) => {
-		assert.ok(request.url.endsWith('/accounts'));
-		return { data: [] };
+		if (request.url.endsWith('/accounts')) return { data: [] };
+		assert.ok(request.url.endsWith('/sites'));
+		return { data: { sites: [{ id: 'site-1', name: 'London' }] } };
 	});
 	assert.deepEqual(await loadListScopeOptions(empty, 'SITE'), [
-		{ name: 'Select an Account First', value: '__selectParentFirst' },
+		{ name: 'London', value: 'site-1' },
 	]);
 	assert.deepEqual(await loadListScopeOptions(empty, 'GROUP'), [
 		{ name: 'Select a Site First', value: '__selectParentFirst' },

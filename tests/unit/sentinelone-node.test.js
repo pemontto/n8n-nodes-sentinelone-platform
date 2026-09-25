@@ -337,11 +337,13 @@ test('Continue On Fail returns a rejected update as a linked error item', async 
 test('Continue using error output returns a linked error item for error-output routing', async () => {
 	const result = await new SentinelOnePlatform().execute.call(
 		executionContext([updateParameters()], rejectAlertUpdate, {
+			continueOnFail: true,
 			onError: 'continueErrorOutput',
 		}),
 	);
 	const errorItems = result[0].filter((item) => item.error);
 	assert.equal(errorItems.length, 1);
+	assert.ok(errorItems[0].error);
 	assert.match(errorItems[0].json.error, /denied this update/);
 	assert.equal(errorItems[0].json.httpCode, '403');
 	assert.deepEqual(errorItems[0].pairedItem, { item: 0 });

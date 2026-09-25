@@ -168,9 +168,10 @@ export async function updateUnifiedAlert(
 				context,
 				itemIndex,
 				'Alert update was rejected before execution.',
-				'400',
+				undefined,
 				requested,
 				errors,
+				alertId,
 			);
 		}
 		if (root.__typename === 'TriggerActionsScheduled') {
@@ -226,10 +227,18 @@ export async function updateUnifiedAlert(
 				isRecord(error) && typeof error.httpCode === 'string'
 					? error.httpCode
 					: status === null
-						? '400'
+						? undefined
 						: String(status),
 				requested,
-				[{ message }],
+				[
+					{
+						message,
+						...(isRecord(error) && isSafeErrorCode(error.errorCode ?? error.code)
+							? { errorCode: String(error.errorCode ?? error.code) }
+							: {}),
+					},
+				],
+				alertId,
 			);
 		}
 		const errorCode = isRecord(error) ? (error.errorCode ?? error.code) : undefined;
@@ -297,28 +306,39 @@ function rejectedUpdateError(
 	context: IExecuteFunctions,
 	itemIndex: number,
 	message: string,
-	httpCode: string,
+	httpCode: string | undefined,
 	requested: Record<string, string>,
 	errors: IDataObject[],
+	alertId: string,
 ) {
 	const verification = Object.fromEntries(
 		Object.keys(requested).map((field) => [field, { observed: null, verified: null }]),
 	);
-	const description = `Mutation acknowledged: no. Verification status: skipped. ${errors
+	const serviceCodes = errors
+		.map((detail) => detail.errorCode ?? detail.errorType)
+		.filter(isSafeErrorCode);
+	const description = `Mutation acknowledged: no. Verification status: skipped.${serviceCodes.length ? ` Service error codes: ${[...new Set(serviceCodes)].join(', ')}.` : ''} ${errors
 		.map((detail) => {
 			const messages = [detail.message, detail.errorMessage, detail.skipMessage];
 			return messages.find((value) => typeof value === 'string') ?? '';
 		})
 		.filter(Boolean)
 		.join(' ')}`;
-	const error = apiError(context, itemIndex, message, description, httpCode);
+	const error = apiError(context, itemIndex, message, description, httpCode ?? null);
+	if (httpCode === undefined) delete (error as unknown as Record<string, unknown>).httpCode;
 	Object.assign(error, {
 		rejected: true,
 		updateRejection: true,
 		outcome: 'rejected',
 		mayHaveCommitted: false,
+		alertId,
+		requested,
+		mutationAcknowledged: false,
+		errors,
 		context: {
 			...error.context,
+			alertId,
+			requested,
 			mutationAcknowledged: false,
 			verification,
 			verificationStatus: 'skipped',

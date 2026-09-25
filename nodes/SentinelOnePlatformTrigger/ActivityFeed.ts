@@ -281,7 +281,7 @@ export interface ActivityFeedPrefix {
 	completedThroughMs: number;
 }
 
-class ActivityFeedBudgetError extends Error {
+export class ActivityFeedBudgetError extends Error {
 	constructor(message: string) {
 		super(`SentinelOne ActivityFeed ${message}; state was not advanced.`);
 	}

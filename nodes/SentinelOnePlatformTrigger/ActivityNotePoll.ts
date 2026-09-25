@@ -18,6 +18,7 @@ import { compileExclusions, matchesExclusion } from './Exclusions';
 import { matchesActivityConditions } from './ActivityConditions';
 import { responseStatus } from '../shared/transport/retry';
 import { PollBudgetError } from '../shared/transport/request';
+import { ActivityFeedBudgetError } from './ActivityFeed';
 
 // SDL rejects Unix epoch dates; use a verified historical query boundary.
 const PREVIEW_START_MS = Date.UTC(2020, 0, 1);
@@ -433,10 +434,10 @@ export async function pollAlertActivities(
 			activityTypeIds: config.activityTypeIds,
 		});
 	} catch (error) {
-		if (error instanceof Error && /exceeded the query budget or deadline/i.test(error.message)) {
+		if (error instanceof ActivityFeedBudgetError) {
 			const position = baseline ? startMs : Number(checkpoint);
 			throw fail(
-				`activity stream is stuck at checkpoint ${position} because its query budget ended before a forward window completed`,
+				`activity stream is stuck at checkpoint ${new Date(position).toISOString()} because its query budget ended before a forward window completed`,
 			);
 		}
 		// Transport failures keep their identity for the trigger boundary to report.
@@ -448,7 +449,7 @@ export async function pollAlertActivities(
 	if (end <= (baseline ? startMs : Number(checkpoint))) {
 		const position = baseline ? startMs : Number(checkpoint);
 		throw fail(
-			`activity stream is stuck at checkpoint ${position} and did not complete a forward window within the query budget`,
+			`activity stream is stuck at checkpoint ${new Date(position).toISOString()} and did not complete a forward window within the query budget`,
 		);
 	}
 	if (activities.length > ACTIVITY_STATE_LIMIT) throw fail('exceeded the activity state capacity');
@@ -474,7 +475,7 @@ export async function pollAlertActivities(
 			candidates = candidates.filter(before);
 			if (end <= Number(checkpoint) && candidates.every((event) => previous.has(event.activityId)))
 				throw fail(
-					`activity stream is stuck at checkpoint ${Number(checkpoint)} because the n8n poll time budget ended before the current alert lookup completed a forward window`,
+					`activity stream is stuck at checkpoint ${new Date(Number(checkpoint)).toISOString()} because the n8n poll time budget ended before the current alert lookup completed a forward window`,
 				);
 		}
 		dropped = expiredMissingActivities(config, candidates, lookup, pollStartMs);

@@ -7,7 +7,7 @@ import type {
 	ILoadOptionsFunctions,
 	INodePropertyOptions,
 } from 'n8n-workflow';
-import { NodeOperationError } from 'n8n-workflow';
+import { NodeApiError, NodeOperationError } from 'n8n-workflow';
 import { PollBudgetError, requestWithRetry } from './transport/request';
 
 export type ScopeType = 'ACCOUNT' | 'SITE' | 'GROUP';
@@ -353,13 +353,16 @@ export async function loadListScopeOptions(
 		const siteIds = readManagementScopeIds(context, 'siteIds');
 		if (scopeType === 'SITE' && accountIds.length === 0) {
 			try {
-				await options(context, 'ACCOUNT', {});
+				const accounts = await options(context, 'ACCOUNT', {});
+				if (accounts.length) return scopeParentPlaceholder('SITE');
 			} catch (error) {
-				if (!isScopePermissionError(error))
+				if (!isScopePermissionError(error)) {
+					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+					if (error instanceof NodeApiError) throw error;
 					throw new NodeOperationError(context.getNode(), error as Error);
-				return await options(context, 'SITE', {});
+				}
 			}
-			return scopeParentPlaceholder('SITE');
+			return await options(context, 'SITE', {});
 		}
 		if (scopeType === 'GROUP' && siteIds.length === 0) return scopeParentPlaceholder('GROUP');
 		return await options(
@@ -373,6 +376,8 @@ export async function loadListScopeOptions(
 		);
 	} catch (error) {
 		if (scopeType === 'ACCOUNT' && isScopePermissionError(error)) return [];
+		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+		if (error instanceof NodeApiError) throw error;
 		throw new NodeOperationError(context.getNode(), error as Error);
 	}
 }
@@ -384,11 +389,8 @@ export async function readListScope(
 	try {
 		const accountIds = readManagementScopeIds(context, 'accountIds', itemIndex);
 		const siteIds = readManagementScopeIds(context, 'siteIds', itemIndex);
-		const configuration = context.getNodeParameter('options', itemIndex, {}) as IDataObject;
-		const hasNewScope = Object.prototype.hasOwnProperty.call(configuration, 'scope');
-		const groupIds =
-			siteIds.length || hasNewScope ? readManagementScopeIds(context, 'groupIds', itemIndex) : [];
-		if (hasNewScope && groupIds.length > 0 && siteIds.length === 0) {
+		const groupIds = readManagementScopeIds(context, 'groupIds', itemIndex);
+		if (groupIds.length > 0 && siteIds.length === 0) {
 			throw new Error(
 				'Group selections require a site selection. Select the sites for these groups, or clear the group selections before executing.',
 			);
@@ -412,6 +414,8 @@ export async function readListScope(
 		if (accountIds.length) return { scopeType: 'ACCOUNT', scopeIds: accountIds };
 		return null;
 	} catch (error) {
+		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+		if (error instanceof NodeApiError) throw error;
 		throw new NodeOperationError(context.getNode(), error as Error, { itemIndex });
 	}
 }
@@ -427,6 +431,8 @@ export async function loadManagementScopeOptions(
 		return await options(context, scopeType, {});
 	} catch (error) {
 		if (scopeType === 'ACCOUNT' && isScopePermissionError(error)) return [];
+		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+		if (error instanceof NodeApiError) throw error;
 		throw new NodeOperationError(context.getNode(), error as Error);
 	}
 }
@@ -457,14 +463,33 @@ export async function discoverVisibleScopes(
 		// A spent poll budget keeps its own message; the trigger boundary wraps it with node context.
 		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 		if (error instanceof PollBudgetError) throw error;
-		if (!isScopePermissionError(error))
-			throw new NodeOperationError(
-				node,
-				'Unable to discover SentinelOne accounts. Check the credential and service availability.',
-			);
+		if (!isScopePermissionError(error)) throw scopeDiscoveryApiError(node, error, 'accounts');
 	}
-	const sites = await loadScopeOptions(request, baseUrl, 'SITE');
-	return { scopeType: 'SITE', scopeIds: sites.map((option) => String(option.value)) };
+	try {
+		const sites = await loadScopeOptions(request, baseUrl, 'SITE');
+		return { scopeType: 'SITE', scopeIds: sites.map((option) => String(option.value)) };
+	} catch (error) {
+		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+		if (error instanceof PollBudgetError) throw error;
+		throw scopeDiscoveryApiError(node, error, 'sites');
+	}
+}
+
+function scopeDiscoveryApiError(node: INode, error: unknown, scopeType: string): NodeApiError {
+	if (error instanceof NodeApiError) return error;
+	const status = statusCode(error);
+	const message = `Unable to discover SentinelOne ${scopeType}. Check the credential and service availability.`;
+	if (status === undefined)
+		throw new NodeOperationError(node, `${message} ${(error as Error).message}`);
+	return new NodeApiError(
+		node,
+		{ message },
+		{
+			message,
+			description: `SentinelOne returned HTTP ${status}.`,
+			httpCode: String(status),
+		},
+	);
 }
 
 export async function activityAccountIds(

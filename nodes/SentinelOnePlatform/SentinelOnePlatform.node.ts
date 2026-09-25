@@ -43,6 +43,10 @@ function safeFailureOutput(error: NodeApiError | NodeOperationError): IDataObjec
 	if (typeof value.queryId === 'string' && value.queryId) output.queryId = value.queryId;
 	if (typeof value.httpCode === 'string') output.httpCode = value.httpCode;
 	if (typeof value.errorCode === 'string') output.errorCode = value.errorCode;
+	for (const key of ['alertId', 'requested', 'errors', 'mutationAcknowledged'] as const) {
+		const detail = value[key] ?? (value.context as IDataObject | undefined)?.[key];
+		if (detail !== undefined) output[key] = detail as IDataObject[string];
+	}
 	return output;
 }
 
@@ -104,8 +108,7 @@ export class SentinelOnePlatform implements INodeType {
 				);
 			} catch (error) {
 				const normalized = normalizeExecutionError(this, error, itemIndex);
-				const useErrorOutput = this.getNode().onError === 'continueErrorOutput';
-				if (!this.continueOnFail() && !useErrorOutput) throw normalized;
+				if (!this.continueOnFail()) throw normalized;
 				output.push({
 					json: safeFailureOutput(normalized),
 					error: normalized,

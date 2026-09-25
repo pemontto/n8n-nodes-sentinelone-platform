@@ -1,5 +1,5 @@
 import type { IDataObject, IExecuteFunctions, INodeProperties } from 'n8n-workflow';
-import { NodeOperationError } from 'n8n-workflow';
+import { NodeApiError, NodeOperationError } from 'n8n-workflow';
 import { asRecord, safeError, requireString, validateNoQueryErrors, SdlQueryError } from './common';
 import { collectTable, boundOutput } from './results';
 import {
@@ -74,7 +74,9 @@ function retryableStatus(status: number): boolean {
 }
 
 function statusFailure(stage: 'launch' | 'poll', status: number): Error {
-	return safeError(`${stage} failed with HTTP ${status}`);
+	return Object.assign(safeError(`${stage} failed with HTTP ${status}`), {
+		httpCode: String(status),
+	});
 }
 
 function cleanupWarning(status: CleanupStatus): string | undefined {
@@ -236,8 +238,15 @@ async function executeSdlQueryInternal(
 				primaryFailure instanceof SdlQueryError
 					? primaryFailure.message
 					: 'SentinelOne SDL query failed';
-			throw new SdlQueryError(
-				`${message.replace(/^SentinelOne SDL query /, '')}; queryId=${queryId}; cleanupStatus=${cleanupStatus}`,
+			throw Object.assign(
+				new SdlQueryError(
+					`${message.replace(/^SentinelOne SDL query /, '')}; queryId=${queryId}; cleanupStatus=${cleanupStatus}`,
+				),
+				{
+					...(typeof (primaryFailure as { httpCode?: unknown }).httpCode === 'string'
+						? { httpCode: (primaryFailure as { httpCode: string }).httpCode }
+						: {}),
+				},
 			);
 		}
 		throw primaryFailure;
@@ -261,6 +270,12 @@ export async function executeSdlQuery(
 		if (error instanceof NodeOperationError) {
 			return Promise.reject(error);
 		}
+		if (error instanceof SdlQueryError && error.httpCode)
+			throw new NodeApiError(
+				context.getNode(),
+				{ message: error.message },
+				{ message: error.message, description: error.message, httpCode: error.httpCode },
+			);
 		if (error instanceof SdlQueryError)
 			throw new NodeOperationError(context.getNode(), error.message, { itemIndex });
 		const message = error instanceof Error ? error.message : 'SentinelOne SDL query failed';

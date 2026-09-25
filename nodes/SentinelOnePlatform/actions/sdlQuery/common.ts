@@ -1,6 +1,8 @@
 import type { IDataObject } from 'n8n-workflow';
 
 export class SdlQueryError extends Error {
+	readonly httpCode?: string;
+
 	constructor(message: string) {
 		super(`SentinelOne SDL query ${message}`);
 		this.name = 'SdlQueryError';

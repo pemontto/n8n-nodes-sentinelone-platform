@@ -158,7 +158,7 @@ test('Explicit rejection throws NodeApiError with skipped verification context',
 		),
 		(error) => {
 			assert.ok(error instanceof NodeApiError);
-			assert.equal(error.httpCode, '400');
+			assert.equal(error.httpCode, undefined);
 			assert.equal(error.context.mutationAcknowledged, false);
 			assert.equal(error.context.verificationStatus, 'skipped');
 			assert.equal(error.context.errors[0].errorMessage, 'Action rejected');

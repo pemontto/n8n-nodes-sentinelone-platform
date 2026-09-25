@@ -329,9 +329,20 @@ async function scopeOptions(
 		// A spent poll budget is not a permission problem; poll() wraps it with node context.
 		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 		if (error instanceof PollBudgetError) throw error;
-		throw new NodeOperationError(
+		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+		if (error instanceof NodeApiError) throw error;
+		const status = responseStatus(error);
+		const message = `Unable to load SentinelOne ${scopeType.toLowerCase()} scopes. Check the credential permissions and try again.`;
+		if (status === null)
+			throw new NodeOperationError(context.getNode(), `${message} ${(error as Error).message}`);
+		throw new NodeApiError(
 			context.getNode(),
-			`Unable to load SentinelOne ${scopeType.toLowerCase()} scopes. Check the credential permissions and try again. ${(error as Error).message}`,
+			{ message },
+			{
+				message,
+				description: `${(error as Error).message} (HTTP ${status})`,
+				httpCode: String(status),
+			},
 		);
 	}
 }

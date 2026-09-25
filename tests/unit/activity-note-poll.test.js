@@ -763,7 +763,7 @@ test('no-progress errors identify the activity stream and saved checkpoint posit
 			),
 		(error) => {
 			assert.match(error.message, /activity stream/);
-			assert.match(error.message, new RegExp(String(checkpoint)));
+			assert.match(error.message, new RegExp(new Date(checkpoint).toISOString()));
 			return true;
 		},
 	);

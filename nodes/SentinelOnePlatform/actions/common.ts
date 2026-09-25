@@ -24,7 +24,7 @@ export function apiError(
 	itemIndex: number,
 	message: string,
 	description?: string,
-	httpCode = '400',
+	httpCode: string | null = '400',
 	mutationUnknown = false,
 ): NodeApiError {
 	const safeResponse: JsonObject = { message, name: 'SentinelOneGraphQLError' };
@@ -32,7 +32,7 @@ export function apiError(
 		itemIndex,
 		message,
 		description,
-		httpCode,
+		...(httpCode === null ? {} : { httpCode }),
 	});
 	if (mutationUnknown) Object.assign(error, { mayHaveCommitted: true, outcome: 'unknown' });
 	return error;
