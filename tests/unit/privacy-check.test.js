@@ -35,11 +35,26 @@ test('privacy check permits generic examples and credential type definitions', a
 		),
 		[],
 	);
-	const uuid = ['11111111', '1111', '4111', '8111', '111111111111'].join('-');
+	const uuid = ['7d3e91a2', 'c4b0', '4f19', '9a6e', '2b58c0d4e713'].join('-');
 	assert.deepEqual(inspectText(uuid), ['UUID record identifier']);
-	assert.deepEqual(inspectText(['11111111', '1111', '5111', '8111', '111111111111'].join('-')), [
+	assert.deepEqual(inspectText(['7d3e91a2', 'c4b0', '5f19', '9a6e', '2b58c0d4e713'].join('-')), [
 		'UUID record identifier',
 	]);
+});
+
+test('privacy check ignores placeholder and documented example UUIDs', async () => {
+	const { inspectText } = await import('../../scripts/privacy-check.mjs');
+	assert.deepEqual(inspectText(['11111111', '1111', '4111', '8111', '111111111111'].join('-')), []);
+	assert.deepEqual(inspectText(['00000000', '0000', '4000', '8000', '000000000007'].join('-')), []);
+	assert.deepEqual(inspectText(['abc000e0', '9c3e', '432b', '8654', '0360b10800cb'].join('-')), []);
+	const mixed = `${['11111111', '1111', '4111', '8111', '111111111111'].join('-')} ${[
+		'7d3e91a2',
+		'c4b0',
+		'4f19',
+		'9a6e',
+		'2b58c0d4e713',
+	].join('-')}`;
+	assert.deepEqual(inspectText(mixed), ['UUID record identifier']);
 });
 
 test('package allowlist excludes documentation captures, schemas, workflows, and unexpected runtime files', async () => {

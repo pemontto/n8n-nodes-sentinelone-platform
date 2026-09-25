@@ -17,10 +17,6 @@ const patterns = [
 		/(?:\/Users\/|\/home\/)[a-z][a-z0-9._-]+\/|[A-Z]:\\Users\\[^\\\s]+\\/i,
 	],
 	[
-		'UUID record identifier',
-		/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i,
-	],
-	[
 		'copied numeric record identifier',
 		/["']?(?:alertId|accountId|siteId|groupId)["']?\s*[:=]\s*["']\d{15,}["']/i,
 	],
@@ -31,6 +27,16 @@ const patterns = [
 	],
 	['copied workflow instance identifier', /["']instanceId["']\s*:\s*["'][0-9a-f]{32,}["']/i],
 ];
+
+const uuidPattern = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi;
+// Obvious fixtures (a repeated first block such as 00000000-... or 11111111-...) and the
+// example value printed in SentinelOne's own GraphQL schema documentation.
+const documentedExampleUuids = new Set(['abc000e0-9c3e-432b-8654-0360b10800cb']);
+
+function isPlaceholderUuid(uuid) {
+	const lower = uuid.toLowerCase();
+	return /^([0-9a-f])\1{7}-/.test(lower) || documentedExampleUuids.has(lower);
+}
 
 function findCredentialReferences(value) {
 	if (!value || typeof value !== 'object') return false;
@@ -55,6 +61,8 @@ function findCredentialReferences(value) {
 // Return categories only. Failure output must not repeat the value being removed.
 export function inspectText(text, filename = '') {
 	const findings = patterns.filter(([, pattern]) => pattern.test(text)).map(([label]) => label);
+	const uuids = text.match(uuidPattern) ?? [];
+	if (uuids.some((uuid) => !isPlaceholderUuid(uuid))) findings.push('UUID record identifier');
 	const hosts = text.match(/(?:https?:\/\/)?(?:[a-z0-9-]+\.)+sentinelone\.(?:net|com)\b/gi) ?? [];
 	for (const host of hosts) {
 		const hostname = host.replace(/^https?:\/\//i, '').toLowerCase();
