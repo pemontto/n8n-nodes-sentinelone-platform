@@ -436,8 +436,9 @@ export async function pollAlertActivities(
 	} catch (error) {
 		if (error instanceof ActivityFeedBudgetError) {
 			const position = baseline ? startMs : Number(checkpoint);
+			const budget = error.kind === 'event-count' ? 'activity event budget' : 'query budget';
 			throw fail(
-				`activity stream is stuck at checkpoint ${new Date(position).toISOString()} because its query budget ended before a forward window completed`,
+				`activity stream is stuck at checkpoint ${new Date(position).toISOString()} because its ${budget} ended before a forward window completed`,
 			);
 		}
 		// Transport failures keep their identity for the trigger boundary to report.

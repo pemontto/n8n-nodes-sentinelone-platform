@@ -282,7 +282,10 @@ export interface ActivityFeedPrefix {
 }
 
 export class ActivityFeedBudgetError extends Error {
-	constructor(message: string) {
+	constructor(
+		readonly kind: 'deadline' | 'event-count',
+		message: string,
+	) {
 		super(`SentinelOne ActivityFeed ${message}; state was not advanced.`);
 	}
 }
@@ -386,7 +389,7 @@ async function readActivityFeedRun(
 
 	async function queryWindow(start: number, end: number): Promise<ActivityFeedEvent[] | null> {
 		if (++queries > Math.min(maxQueries, 128) || now() >= deadline)
-			throw new ActivityFeedBudgetError('exceeded the query budget or deadline');
+			throw new ActivityFeedBudgetError('deadline', 'exceeded the query budget or deadline');
 		const expires = Math.min(deadline, now() + Math.min(lifecycleMs, 100_000));
 		let id: string | undefined;
 		let accepted = false;
@@ -422,14 +425,14 @@ async function readActivityFeedRun(
 				// Rate limits that outlast one query's lifecycle fail it; ones that reach the whole read's deadline end the read at its completed prefix.
 				if (lastPollStatus === 429 && now() < deadline)
 					throw requestFailure('polling', { statusCode: 429 });
-				throw new ActivityFeedBudgetError('exceeded the query deadline');
+				throw new ActivityFeedBudgetError('deadline', 'exceeded the query deadline');
 			}
 			return Math.max(1, Math.min(milliseconds, 30_000));
 		};
 		// A request the poll budget stopped, or a transient failure once the deadline has passed, ends the read at its completed prefix; permanent failures still fail it.
 		const stopped = (stage: 'launch' | 'polling', error: unknown): Error =>
 			error instanceof PollBudgetError || (now() >= deadline && isRetryableReadError(error))
-				? new ActivityFeedBudgetError('exceeded the query deadline')
+				? new ActivityFeedBudgetError('deadline', 'exceeded the query deadline')
 				: requestFailure(stage, error);
 		try {
 			const queryBody = {
@@ -589,7 +592,7 @@ async function readActivityFeedRun(
 			collected.size + acceptedRows.filter((event) => !collected.has(event.activityId)).length >
 				Math.min(prefix.maxEvents, 40000)
 		)
-			throw new ActivityFeedBudgetError('exceeded the activity event budget');
+			throw new ActivityFeedBudgetError('event-count', 'exceeded the activity event budget');
 		for (const event of acceptedRows) {
 			newestTimestamps.set(event.activityId, BigInt(event.timestampNs));
 			collected.set(event.activityId, event);

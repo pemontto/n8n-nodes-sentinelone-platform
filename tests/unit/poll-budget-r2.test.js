@@ -353,7 +353,7 @@ test('Legacy unscoped seen IDs still suppress duplicate alerts across scope batc
 	);
 });
 
-test('A repeatedly starved batch warns after three polls and fails visibly after ten', async () => {
+test('A repeatedly starved batch warns after three polls and fails only when the whole poll makes no progress', async () => {
 	const warnings = [];
 	const triggerConfig = config({
 		scopeIds: Array.from({ length: 501 }, (_, index) => `account-${index}`),
@@ -397,24 +397,37 @@ test('A repeatedly starved batch warns after three polls and fails visibly after
 		state = result.nextState;
 	}
 	assert.equal(state.stalledAlertPolls[secondCreatedKey], 9);
-	assert.equal(warnings.length, 1);
+	assert.equal(warnings.length, 7);
 	assert.match(warnings[0].message, /scope batch 2.*3 polls/i);
+	const progressed = await pollSentinelOne(
+		async (options) => {
+			if (
+				options.body.variables.sortBy === 'createdAt' &&
+				options.body.variables.scope.scopeIds.includes(secondBatchScopeId)
+			)
+				throw new PollBudgetError();
+			return fakeServer([]).request(options);
+		},
+		{ ...triggerConfig, pollDeadlineMs: NOW + 9 * 60_000 + 36_000 },
+		state,
+		'scheduled',
+		NOW + 9 * 60_000,
+	);
+	state = progressed.nextState;
+	assert.equal(state.stalledAlertPolls[secondCreatedKey], 10);
+	assert.equal(warnings.length, 8);
 	await assert.rejects(
 		pollSentinelOne(
 			async (options) => {
-				if (
-					options.body.variables.sortBy === 'createdAt' &&
-					options.body.variables.scope.scopeIds.includes(secondBatchScopeId)
-				)
-					throw new PollBudgetError();
+				if (options.body.variables.sortBy === 'createdAt') throw new PollBudgetError();
 				return fakeServer([]).request(options);
 			},
-			{ ...triggerConfig, pollDeadlineMs: NOW + 9 * 60_000 + 36_000 },
+			{ ...triggerConfig, pollDeadlineMs: NOW + 10 * 60_000 + 36_000 },
 			state,
 			'scheduled',
-			NOW + 9 * 60_000,
+			NOW + 10 * 60_000,
 		),
-		/error.*createdAt.*scope batch 2.*2026-09-01T00:00:00.000Z.*10 polls/i,
+		/error.*createdAt.*scope batch 2.*2026-09-01T00:00:00.000Z.*11 polls/i,
 	);
 });
 
