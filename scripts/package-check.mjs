@@ -9,7 +9,8 @@ export function allowedPackageFile(name) {
 	if (name.split('/').some((part) => part === '..' || part === '.')) return false;
 	return (
 		/^(?:package\.json|README\.md|LICENSE\.md|CHANGELOG\.md)$/.test(name) ||
-		/^dist\/(?:nodes|credentials)\/.+\.(?:js|js\.map|d\.ts|json|svg|png)$/.test(name)
+		/^dist\/(?:nodes|credentials)\/.+\.(?:js|js\.map|d\.ts|json|svg|png)$/.test(name) ||
+		/^dist\/icons\/.+\.svg$/.test(name)
 	);
 }
 
@@ -17,10 +18,10 @@ export function checkPackage(directory, output) {
 	const manifest = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
 	if (
 		JSON.stringify(manifest.files) !==
-		JSON.stringify(['dist/nodes', 'dist/credentials', 'CHANGELOG.md'])
+		JSON.stringify(['dist/nodes', 'dist/credentials', 'dist/icons', 'CHANGELOG.md'])
 	) {
 		throw new Error(
-			'Keep the explicit package files whitelist: dist/nodes, dist/credentials, CHANGELOG.md.',
+			'Keep the explicit package files whitelist: dist/nodes, dist/credentials, dist/icons, CHANGELOG.md.',
 		);
 	}
 	const target = output ? resolve(output) : mkdtempSync(join(tmpdir(), 'sentinelone-package-'));

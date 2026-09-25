@@ -345,7 +345,10 @@ export class SentinelOnePlatformTrigger implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'SentinelOne Platform Trigger',
 		name: 'sentinelOnePlatformTrigger',
-		icon: { light: 'file:sentinelone.svg', dark: 'file:sentinelone.dark.svg' },
+		icon: {
+			light: 'file:../../icons/sentinelone.svg',
+			dark: 'file:../../icons/sentinelone.dark.svg',
+		},
 		group: ['trigger'],
 		version: 1,
 		subtitle:

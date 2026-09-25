@@ -95,8 +95,8 @@ test('action node description exposes the intended v1 resources, operations, and
 	assert.equal(description.name, 'sentinelOnePlatform');
 	assert.equal(description.version, 1);
 	assert.deepEqual(description.icon, {
-		light: 'file:../SentinelOnePlatformTrigger/sentinelone.svg',
-		dark: 'file:../SentinelOnePlatformTrigger/sentinelone.dark.svg',
+		light: 'file:../../icons/sentinelone.svg',
+		dark: 'file:../../icons/sentinelone.dark.svg',
 	});
 	assert.deepEqual(description.inputs, ['main']);
 	assert.deepEqual(description.outputs, ['main']);

@@ -3,6 +3,7 @@
 	"nodeVersion": "1.0",
 	"codexVersion": "1.0",
 	"categories": ["Security"],
+	"alias": ["SentinelOne", "S1", "EDR", "XDR", "Singularity"],
 	"resources": {
 		"credentialDocumentation": [
 			{

@@ -35,7 +35,11 @@ test('privacy check permits generic examples and credential type definitions', a
 		),
 		[],
 	);
-	assert.deepEqual(inspectText('11111111-1111-4111-8111-111111111111'), []);
+	const uuid = ['11111111', '1111', '4111', '8111', '111111111111'].join('-');
+	assert.deepEqual(inspectText(uuid), ['UUID record identifier']);
+	assert.deepEqual(inspectText(['11111111', '1111', '5111', '8111', '111111111111'].join('-')), [
+		'UUID record identifier',
+	]);
 });
 
 test('package allowlist excludes documentation captures, schemas, workflows, and unexpected runtime files', async () => {
@@ -46,6 +50,7 @@ test('package allowlist excludes documentation captures, schemas, workflows, and
 		'dist/nodes/shared/fields.js',
 		'dist/nodes/Example/Example.node.js.map',
 		'dist/credentials/Example.credentials.d.ts',
+		'dist/icons/sentinelone.svg',
 	])
 		assert.equal(allowedPackageFile(file), true, file);
 	for (const file of [
@@ -54,6 +59,7 @@ test('package allowlist excludes documentation captures, schemas, workflows, and
 		'.env',
 		'examples/workflow.json',
 		'dist/nodes/private.txt',
+		'dist/icons/private.png',
 		'dist/nodes/../../secret.json',
 		'dist/nodes/../secret.json',
 	])

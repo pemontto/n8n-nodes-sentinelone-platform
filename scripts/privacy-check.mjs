@@ -17,8 +17,8 @@ const patterns = [
 		/(?:\/Users\/|\/home\/)[a-z][a-z0-9._-]+\/|[A-Z]:\\Users\\[^\\\s]+\\/i,
 	],
 	[
-		'time-based record identifier',
-		/\b[0-9a-f]{8}-[0-9a-f]{4}-[167][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i,
+		'UUID record identifier',
+		/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i,
 	],
 	[
 		'copied numeric record identifier',
@@ -83,7 +83,7 @@ export function scanDirectory(root) {
 	let files = 0;
 	function walk(directory) {
 		for (const entry of readdirSync(directory, { withFileTypes: true })) {
-			if (entry.isDirectory() && ignoredDirectories.has(entry.name)) continue;
+			if (ignoredDirectories.has(entry.name) || entry.name === '.git') continue;
 			if (ignoredFiles.test(entry.name)) continue;
 			const path = join(directory, entry.name);
 			const name = relative(root, path);

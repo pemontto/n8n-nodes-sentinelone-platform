@@ -51,8 +51,8 @@ export class SentinelOnePlatform implements INodeType {
 		displayName: 'SentinelOne Platform',
 		name: 'sentinelOnePlatform',
 		icon: {
-			light: 'file:../SentinelOnePlatformTrigger/sentinelone.svg',
-			dark: 'file:../SentinelOnePlatformTrigger/sentinelone.dark.svg',
+			light: 'file:../../icons/sentinelone.svg',
+			dark: 'file:../../icons/sentinelone.dark.svg',
 		},
 		group: ['output'],
 		version: 1,

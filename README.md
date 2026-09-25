@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="icons/sentinelone.svg" alt="SentinelOne Logo" width="120" />
+</p>
+
 # SentinelOne Platform for n8n
 
 Two n8n nodes for SentinelOne: **SentinelOne Platform** reads and updates alerts, manages notes, and runs SDL queries. **SentinelOne Platform Trigger** starts workflows when alerts are created or updated, or when an alert activity occurs. The credential determines which records and actions are accessible.

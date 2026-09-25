@@ -11,8 +11,8 @@ export class SentinelOnePlatformApi implements ICredentialType {
 	displayName = 'SentinelOne Platform API';
 
 	icon = {
-		light: 'file:../nodes/SentinelOnePlatformTrigger/sentinelone.svg',
-		dark: 'file:../nodes/SentinelOnePlatformTrigger/sentinelone.dark.svg',
+		light: 'file:../icons/sentinelone.svg',
+		dark: 'file:../icons/sentinelone.dark.svg',
 	} as const;
 
 	documentationUrl =
