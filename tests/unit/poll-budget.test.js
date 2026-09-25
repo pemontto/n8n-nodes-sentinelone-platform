@@ -190,7 +190,7 @@ async function drain(triggerConfig, initialState, alerts, { budgetMs, pageCostMs
 	});
 }
 
-test('Without a budget the scheduled read keeps its output order from the overlap before the checkpoint, every alert delivered, checkpoint at the poll start', async () => {
+test('Without a budget the scheduled read keeps its legacy shape: one descending query per stream from the overlap before the checkpoint, every alert delivered, checkpoint at the poll start', async () => {
 	const triggerConfig = config({ events: ['alert.new', 'alert.updated'] });
 	const source = tenant(backlog);
 	const result = await pollSentinelOne(
@@ -212,7 +212,7 @@ test('Without a budget the scheduled read keeps its output order from the overla
 			.sort(),
 		[
 			['createdAt', 'DESC', CHECKPOINT - 300_000, NOW],
-			['updatedAt', 'ASC', CHECKPOINT - 300_000, NOW],
+			['updatedAt', 'DESC', CHECKPOINT - 300_000, NOW],
 		],
 	);
 	assert.ok(variables.every((value) => !value.filters.some((filter) => filter.fieldId === 'id')));
