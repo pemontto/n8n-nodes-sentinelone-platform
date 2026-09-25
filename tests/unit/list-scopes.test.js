@@ -167,14 +167,15 @@ test('nested scope loaders wait for the parent selection before listing children
 		context.getNodeParameter = (name, fallback) => context.getNode().parameters[name] ?? fallback;
 		return context;
 	};
-	const empty = loaderContext({ options: { scope: { selection: {} } } }, async () => {
-		assert.fail('A missing parent selection must not request scopes');
+	const empty = loaderContext({ options: { scope: { selection: {} } } }, async (request) => {
+		assert.ok(request.url.endsWith('/accounts'));
+		return { data: [] };
 	});
 	assert.deepEqual(await loadListScopeOptions(empty, 'SITE'), [
-		{ name: 'Select an Account First', value: '' },
+		{ name: 'Select an Account First', value: '__selectParentFirst' },
 	]);
 	assert.deepEqual(await loadListScopeOptions(empty, 'GROUP'), [
-		{ name: 'Select a Site First', value: '' },
+		{ name: 'Select a Site First', value: '__selectParentFirst' },
 	]);
 
 	const calls = [];
@@ -193,14 +194,44 @@ test('nested scope loaders wait for the parent selection before listing children
 	assert.equal(calls[1].qs.siteIds, 's');
 });
 
-test('a selected placeholder never reaches the scope IDs', async () => {
+test('parent placeholders are ignored while blank IDs are rejected', async () => {
 	const { readManagementScopeIds } = require('../../dist/nodes/shared/Scopes');
 	const context = fixture({
-		options: { scope: { selection: { accountIds: ['a'], siteIds: [''], groupIds: [''] } } },
+		options: {
+			scope: {
+				selection: {
+					accountIds: ['a'],
+					siteIds: ['__selectParentFirst'],
+					groupIds: ['__selectParentFirst'],
+				},
+			},
+		},
 	});
 	assert.deepEqual(readManagementScopeIds(context, 'siteIds', 0), []);
 	assert.deepEqual(readManagementScopeIds(context, 'groupIds', 0), []);
-	assert.deepEqual(readManagementScopeIds(fixture({ siteIds: ['', 's'] }), 'siteIds', 0), ['s']);
+	assert.throws(
+		() => readManagementScopeIds(fixture({ siteIds: [''] }), 'siteIds', 0),
+		/non-empty/,
+	);
+	assert.throws(
+		() => readManagementScopeIds(fixture({ siteIds: ['  '] }), 'siteIds', 0),
+		/non-empty/,
+	);
+});
+
+test('site options stay available when account discovery returns 403', async () => {
+	const calls = [];
+	const context = fixture({ accountIds: [] }, async (request) => {
+		calls.push(request);
+		if (request.url.endsWith('/accounts')) throw { statusCode: 403 };
+		return { data: { sites: [{ id: 'site-1', name: 'Site One' }] } };
+	});
+	context.getNodeParameter = (name, fallback) => context.getNode().parameters[name] ?? fallback;
+	assert.deepEqual(await loadListScopeOptions(context, 'SITE'), [
+		{ name: 'Site One', value: 'site-1' },
+	]);
+	assert.ok(calls[1].url.endsWith('/sites'));
+	assert.equal(calls[1].qs.accountIds, undefined);
 });
 
 test('new Get Many scope rejects groups without sites before any request', async () => {

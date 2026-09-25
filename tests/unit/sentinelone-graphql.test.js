@@ -17,6 +17,9 @@ const {
 const {
 	updateUnifiedAlert,
 } = require('../../dist/nodes/SentinelOnePlatform/actions/alert/update.operation.js');
+const {
+	SentinelOnePlatform,
+} = require('../../dist/nodes/SentinelOnePlatform/SentinelOnePlatform.node.js');
 
 const ALERT_ID = '11111111-1111-4111-8111-111111111111';
 const ACCOUNT_ID = '90071992547409930001';
@@ -167,6 +170,66 @@ test('Get Many ignores empty guided filter selections', async () => {
 			},
 		),
 		0,
+	);
+});
+
+test('Get Many validates runtime-filtered scope selections without widening', async () => {
+	const { NodeHelpers } = require('n8n-workflow');
+	const node = new SentinelOnePlatform();
+	const parametersFor = (selection) =>
+		NodeHelpers.getNodeParameters(
+			node.description.properties,
+			{
+				resource: 'alert',
+				operation: 'getAll',
+				options: { scope: { selection } },
+				returnAll: false,
+				limit: 1,
+			},
+			true,
+			false,
+			{ typeVersion: 1 },
+			node.description,
+		);
+	const run = (parameters, request) => {
+		const execution = context(parameters, request);
+		execution.helpers.httpRequestWithAuthentication = async (credential, options) =>
+			options.method === 'GET'
+				? options.url.endsWith('/sites')
+					? { data: { sites: [{ id: 'site-1', name: 'Site One' }] } }
+					: { data: [], pagination: { nextCursor: null } }
+				: request(credential, options);
+		return getManyUnifiedAlerts(execution, 0);
+	};
+
+	const invalidGroups = parametersFor({
+		accountIds: ['account-1'],
+		siteIds: [],
+		groupIds: ['group-1'],
+	});
+	assert.deepEqual(invalidGroups.options.scope.selection.groupIds, ['group-1']);
+	let requests = 0;
+	await assert.rejects(
+		run(invalidGroups, async () => {
+			requests++;
+			assert.fail('Invalid group scope must fail before requests');
+		}),
+		/Group selections require a site selection/,
+	);
+	assert.equal(requests, 0);
+
+	const siteOnly = parametersFor({ accountIds: [], siteIds: ['site-1'], groupIds: [] });
+	assert.deepEqual(siteOnly.options.scope.selection.siteIds, ['site-1']);
+	await run(siteOnly, async (_credential, options) => {
+		assert.deepEqual(options.body.variables.scope, { scopeType: 'SITE', scopeIds: ['site-1'] });
+		return envelope('alerts', { edges: [], pageInfo: { hasNextPage: false, endCursor: null } });
+	});
+
+	const blank = parametersFor({ accountIds: [], siteIds: [''], groupIds: [] });
+	assert.deepEqual(blank.options.scope.selection.siteIds, ['']);
+	await assert.rejects(
+		run(blank, async () => assert.fail('Blank scope IDs must fail')),
+		/non-empty/,
 	);
 });
 

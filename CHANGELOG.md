@@ -20,6 +20,7 @@
 - Recover activity backlogs through bounded checkpoint slices.
 - Finish scheduled trigger polls within the n8n 2.38.0+ poll time budget: alert polls read oldest first in ascending order with one forward-only cursor per stream and scope batch, a budget stop hands over every page already read and resumes from its last timestamp, activity polls keep the completed feed slices and the activities whose parent lookup finished, and a stream that stops without progress fails visibly. Hosts without a budget now also request ascending order and page to the end of the range instead of splitting at a page cap.
 - Reject trigger Group selections when no Site is selected.
+- Preserve saved child scope selections at runtime, reject blank scope IDs, and allow site-scoped credentials to load Sites without account-list permission.
 - Keep the retained Occurred operation usable after switching the trigger resource back to Alert, instead of failing the poll.
 - List Sites and Groups only once their parent scope is selected, so an unfiltered site list is never cached against a later account selection.
 

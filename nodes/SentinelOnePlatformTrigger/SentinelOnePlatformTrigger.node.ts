@@ -8,6 +8,7 @@ import {
 } from '../shared/Descriptions';
 import {
 	loadScopeOptions,
+	loadListScopeOptions,
 	readManagementScopeIds,
 	discoverVisibleScopes,
 	isScopePermissionError,
@@ -633,9 +634,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				}
 			},
 			async getSites(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
-				const accountIds = readStringArray(this, 'accountIds');
-				if (accountIds.length === 0) return scopeParentPlaceholder('SITE');
-				return await scopeOptions(this, 'SITE', { accountIds });
+				return await loadListScopeOptions(this, 'SITE');
 			},
 			async getGroups(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const accountIds = readStringArray(this, 'accountIds');

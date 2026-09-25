@@ -306,15 +306,16 @@ async function options(
 /** Dependent scope fields render before their parent is chosen; a placeholder keeps n8n from caching an unfiltered list. */
 export function scopeParentPlaceholder(scopeType: ScopeType): INodePropertyOptions[] {
 	return [
-		{ name: scopeType === 'SITE' ? 'Select an Account First' : 'Select a Site First', value: '' },
+		{
+			name: scopeType === 'SITE' ? 'Select an Account First' : 'Select a Site First',
+			value: '__selectParentFirst',
+		},
 	];
 }
 
-/** A selected placeholder carries an empty value and is not a scope selection. */
+/** A selected parent prompt is not a scope selection; blank IDs remain invalid. */
 function withoutPlaceholders(value: unknown): unknown {
-	return Array.isArray(value)
-		? value.filter((entry) => !(typeof entry === 'string' && entry.trim() === ''))
-		: value;
+	return Array.isArray(value) ? value.filter((entry) => entry !== '__selectParentFirst') : value;
 }
 
 export function readManagementScopeIds(
@@ -350,7 +351,16 @@ export async function loadListScopeOptions(
 	try {
 		const accountIds = readManagementScopeIds(context, 'accountIds');
 		const siteIds = readManagementScopeIds(context, 'siteIds');
-		if (scopeType === 'SITE' && accountIds.length === 0) return scopeParentPlaceholder('SITE');
+		if (scopeType === 'SITE' && accountIds.length === 0) {
+			try {
+				await options(context, 'ACCOUNT', {});
+			} catch (error) {
+				if (!isScopePermissionError(error))
+					throw new NodeOperationError(context.getNode(), error as Error);
+				return await options(context, 'SITE', {});
+			}
+			return scopeParentPlaceholder('SITE');
+		}
 		if (scopeType === 'GROUP' && siteIds.length === 0) return scopeParentPlaceholder('GROUP');
 		return await options(
 			context,

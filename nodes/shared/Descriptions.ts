@@ -85,7 +85,6 @@ export function managementScopeFields(): INodeProperties[] {
 			name: 'siteIds',
 			type: 'multiOptions',
 			default: [],
-			displayOptions: { show: { accountIds: [{ _cnd: { exists: true } }] } },
 			hint: 'Optional. Leave empty to keep the account scope.',
 			typeOptions: { loadOptionsMethod: 'getSites', loadOptionsDependsOn: ['accountIds'] },
 			description:
@@ -96,7 +95,6 @@ export function managementScopeFields(): INodeProperties[] {
 			name: 'groupIds',
 			type: 'multiOptions',
 			default: [],
-			displayOptions: { show: { siteIds: [{ _cnd: { exists: true } }] } },
 			hint: 'Optional. Leave empty to use the selected sites.',
 			typeOptions: {
 				loadOptionsMethod: 'getGroups',

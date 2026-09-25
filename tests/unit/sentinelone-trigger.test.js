@@ -1711,13 +1711,29 @@ test('snapshot triggers preserve their pre-activity-upgrade fingerprints', () =>
 });
 
 test('saved groups without sites fail before requests for both trigger resources', async () => {
+	const { NodeHelpers } = require('n8n-workflow');
+	const node = new SentinelOnePlatformTrigger();
 	for (const [resource, operation] of [
 		['alert', 'new'],
 		['alertActivity', 'occurred'],
 	]) {
+		const params = NodeHelpers.getNodeParameters(
+			node.description.properties,
+			{
+				resource,
+				operation,
+				options: {
+					scope: { selection: { accountIds: ['account-1'], siteIds: [], groupIds: ['group-1'] } },
+				},
+			},
+			true,
+			false,
+			{ typeVersion: 1 },
+			node.description,
+		);
 		let requests = 0;
 		const context = createNodeContext(
-			{ resource, operation, accountIds: ['account-1'], siteIds: [], groupIds: ['group-1'] },
+			params,
 			async () => {
 				requests++;
 				assert.fail('Invalid saved groups must not request scopes or data');
@@ -1742,6 +1758,70 @@ test('saved groups without sites fail before requests for both trigger resources
 			seenActivityIds: ['existing-activity'],
 		});
 	}
+});
+
+test('runtime parameter filtering preserves selected sites after accounts are cleared', async () => {
+	const { NodeHelpers } = require('n8n-workflow');
+	const node = new SentinelOnePlatformTrigger();
+	const params = NodeHelpers.getNodeParameters(
+		node.description.properties,
+		{
+			resource: 'alert',
+			operation: 'new',
+			options: {
+				scope: { selection: { accountIds: [], siteIds: ['site-1'], groupIds: [] } },
+			},
+		},
+		true,
+		false,
+		{ typeVersion: 1 },
+		node.description,
+	);
+	assert.deepEqual(params.options.scope.selection.siteIds, ['site-1']);
+	let scopedQuery = false;
+	const context = createNodeContext(
+		params,
+		async (request) => {
+			if (request.method === 'GET') {
+				assert.ok(request.url.endsWith('/sites'));
+				return { data: { sites: [{ id: 'site-1', name: 'Site One' }] } };
+			}
+			assert.deepEqual(request.body.variables.scope, { scopeType: 'SITE', scopeIds: ['site-1'] });
+			scopedQuery = true;
+			return alertResponse([]);
+		},
+		'trigger',
+	);
+	await node.poll.call(context);
+	assert.equal(scopedQuery, true);
+});
+
+test('runtime parameter filtering preserves blank scope IDs for validation', async () => {
+	const { NodeHelpers } = require('n8n-workflow');
+	const node = new SentinelOnePlatformTrigger();
+	const params = NodeHelpers.getNodeParameters(
+		node.description.properties,
+		{
+			resource: 'alert',
+			operation: 'new',
+			options: {
+				scope: { selection: { accountIds: [], siteIds: [''], groupIds: [] } },
+			},
+		},
+		true,
+		false,
+		{ typeVersion: 1 },
+		node.description,
+	);
+	assert.deepEqual(params.options.scope.selection.siteIds, ['']);
+	const context = createNodeContext(
+		params,
+		async () => {
+			assert.fail('Blank scope IDs must fail before requests');
+		},
+		'trigger',
+	);
+	await assert.rejects(node.poll.call(context), /non-empty string or safe integer ID/);
 });
 
 test('activity trigger retains valid group selections and resolves their account', async () => {
