@@ -276,11 +276,11 @@ test('A stalled batch keeps warning while other batches save progress, then fail
 			'scheduled',
 			NOW + 10 * 60_000,
 		),
-		/error.*createdAt.*scope batch 2.*2026-09-01T00:00:00.000Z.*11 polls/i,
+		/error.*createdAt.*scope batch 2.*2026-09-01T00:00:00.000Z.*10 polls/i,
 	);
 });
 
-test('Budgeted New exclusions are capped at the oldest 1,000 candidates', async () => {
+test('Budgeted New exclusions fit the request byte limit and prioritise the oldest candidates', async () => {
 	const debug = [];
 	const triggerConfig = config({
 		alertPageSize: 200,
@@ -289,8 +289,8 @@ test('Budgeted New exclusions are capped at the oldest 1,000 candidates', async 
 	});
 	const seeded = await seededState(triggerConfig);
 	const cursorKey = Object.keys(seeded.alertCursors).find((key) => key.startsWith('createdAt:'));
-	const rows = Array.from({ length: 1_500 }, (_, index) =>
-		alert(`seen-${index}`, NOW - 90_000 + index),
+	const rows = Array.from({ length: 5_500 }, (_, index) =>
+		alert(`seen-${String(index).padStart(40, '0')}`, NOW - 90_000 + index),
 	);
 	const state = {
 		...seeded,
@@ -309,19 +309,20 @@ test('Budgeted New exclusions are capped at the oldest 1,000 candidates', async 
 			request.body.variables.filters.find((filter) => filter.fieldId === 'id')?.stringIn.values ??
 			[],
 	);
-	assert.ok(exclusionLists.every((ids) => ids.length <= 1_000));
+	assert.ok(exclusionLists.every((ids) => Buffer.byteLength(JSON.stringify(ids)) <= 200_000));
+	assert.ok(exclusionLists[0].length > 1_000 && exclusionLists[0].length < rows.length);
 	assert.deepEqual(
 		exclusionLists[0],
-		rows.slice(0, 1_000).map((row) => row.id),
+		rows.slice(0, exclusionLists[0].length).map((row) => row.id),
 	);
-	assert.ok(JSON.stringify(source.requests[0].body).length < 100_000);
+	assert.ok(Buffer.byteLength(JSON.stringify(source.requests[0].body)) < 250_000);
 	assert.ok(
 		debug.every(
-			({ details }) => details.excludedIdCount === undefined || details.excludedIdCount <= 1_000,
+			({ details }) => details.excludedIdCount === undefined || details.excludedIdCount <= 5_500,
 		),
 	);
 	assert.ok(!JSON.stringify(debug).includes('seen-0'));
-	assert.equal(result.nextState.seenAlertIds.length, 1_500);
+	assert.equal(result.nextState.seenAlertIds.length, 5_500);
 	assert.ok(result.nextState.seenAlertIds.length < MAX_SEEN_ALERT_IDS);
 });
 

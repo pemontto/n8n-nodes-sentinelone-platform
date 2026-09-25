@@ -427,7 +427,7 @@ test('A repeatedly starved batch warns after three polls and fails only when the
 			'scheduled',
 			NOW + 10 * 60_000,
 		),
-		/error.*createdAt.*scope batch 2.*2026-09-01T00:00:00.000Z.*11 polls/i,
+		/error.*createdAt.*scope batch 2.*2026-09-01T00:00:00.000Z.*10 polls/i,
 	);
 });
 
