@@ -1,4 +1,5 @@
 import type { IDataObject, IExecuteFunctions, INodeProperties } from 'n8n-workflow';
+import { NodeApiError } from 'n8n-workflow';
 import { alertId, statusOptions, analystVerdictOptions } from '../../../shared/Descriptions';
 import {
 	apiError,
@@ -37,8 +38,8 @@ export const description: INodeProperties[] = [
 				displayName: 'Analyst Verdict',
 				name: 'analystVerdict',
 				type: 'options',
-				default: 'UNDEFINED',
-				options: analystVerdictOptions,
+				default: '',
+				options: [{ name: '- Select -', value: '' }, ...analystVerdictOptions],
 				description: 'Analyst verdict to set',
 			},
 			{
@@ -162,17 +163,15 @@ export async function updateUnifiedAlert(
 		if (root.__typename === 'TriggerActionsError') {
 			if (!Array.isArray(root.errors) || !root.errors.length)
 				throw apiError(context, itemIndex, 'SentinelOne returned a malformed update rejection.');
-			return [
-				{
-					outcome: 'rejected',
-					mutationAcknowledged: false,
-					alertId,
-					requested,
-					errors: root.errors.map((value) => sanitizeDetail(value, [requested.ticketId ?? ''])),
-					verification: unavailableVerification(requested),
-					verificationStatus: 'skipped',
-				},
-			];
+			const errors = root.errors.map((value) => sanitizeDetail(value, [requested.ticketId ?? '']));
+			throw rejectedUpdateError(
+				context,
+				itemIndex,
+				'Alert update was rejected before execution.',
+				'400',
+				requested,
+				errors,
+			);
 		}
 		if (root.__typename === 'TriggerActionsScheduled') {
 			const executionId = idString(root.executionId);
@@ -203,37 +202,43 @@ export async function updateUnifiedAlert(
 			acknowledgement = {
 				outcome: accepted ? 'complete' : 'partial',
 				mutationAcknowledged: true,
+				...(accepted ? {} : { mayHaveCommitted: true }),
 				results,
+				...(accepted ? {} : { errorCodes: actionErrorCodes(results) }),
 			};
 		} else
 			throw apiError(context, itemIndex, 'SentinelOne returned an unknown update result type.');
 	} catch (error) {
+		if (error instanceof NodeApiError && isRecord(error) && error.updateRejection === true)
+			return Promise.reject(error);
 		const status = responseStatus(error);
-		if (status === 401 || status === 403 || (isRecord(error) && error.rejected === true))
-			return [
-				{
-					outcome: 'rejected',
-					mutationAcknowledged: false,
-					alertId,
-					requested,
-					errors: [
-						{
-							message:
-								status === 401
-									? 'SentinelOne rejected authentication. Check the credential.'
-									: status === 403
-										? 'SentinelOne denied this update. Check the credential permissions.'
-										: 'SentinelOne rejected the GraphQL update before execution.',
-						},
-					],
-					verification: unavailableVerification(requested),
-					verificationStatus: 'skipped',
-				},
-			];
+		if (status === 401 || status === 403 || (isRecord(error) && error.rejected === true)) {
+			const message =
+				status === 401
+					? 'SentinelOne rejected authentication. Check the credential.'
+					: status === 403
+						? 'SentinelOne denied this update. Check the credential permissions.'
+						: 'SentinelOne rejected the GraphQL update before execution.';
+			throw rejectedUpdateError(
+				context,
+				itemIndex,
+				message,
+				isRecord(error) && typeof error.httpCode === 'string'
+					? error.httpCode
+					: status === null
+						? '400'
+						: String(status),
+				requested,
+				[{ message }],
+			);
+		}
+		const errorCode = isRecord(error) ? (error.errorCode ?? error.code) : undefined;
 		acknowledgement = {
 			outcome: 'unknown',
 			mutationAcknowledged: false,
 			mayHaveCommitted: true,
+			...(status === null ? {} : { httpCode: String(status) }),
+			...(isSafeErrorCode(errorCode) ? { errorCode } : {}),
 			warning:
 				'The mutation was sent once. Its result is unavailable; do not repeat it without checking the alert.',
 		};
@@ -270,4 +275,55 @@ export async function updateUnifiedAlert(
 					: verified.verificationStatus,
 		},
 	];
+}
+
+function isSafeErrorCode(value: unknown): value is string {
+	return typeof value === 'string' && /^[A-Z0-9_.-]{1,64}$/.test(value);
+}
+
+function actionErrorCodes(results: IDataObject[]): string[] {
+	return [
+		...new Set(
+			results.flatMap((result) => {
+				if (result.status !== 'failed' || !isRecord(result.detail)) return [];
+				const code = result.detail.errorType;
+				return isSafeErrorCode(code) ? [code] : [];
+			}),
+		),
+	];
+}
+
+function rejectedUpdateError(
+	context: IExecuteFunctions,
+	itemIndex: number,
+	message: string,
+	httpCode: string,
+	requested: Record<string, string>,
+	errors: IDataObject[],
+) {
+	const verification = Object.fromEntries(
+		Object.keys(requested).map((field) => [field, { observed: null, verified: null }]),
+	);
+	const description = `Mutation acknowledged: no. Verification status: skipped. ${errors
+		.map((detail) => {
+			const messages = [detail.message, detail.errorMessage, detail.skipMessage];
+			return messages.find((value) => typeof value === 'string') ?? '';
+		})
+		.filter(Boolean)
+		.join(' ')}`;
+	const error = apiError(context, itemIndex, message, description, httpCode);
+	Object.assign(error, {
+		rejected: true,
+		updateRejection: true,
+		outcome: 'rejected',
+		mayHaveCommitted: false,
+		context: {
+			...error.context,
+			mutationAcknowledged: false,
+			verification,
+			verificationStatus: 'skipped',
+			errors,
+		},
+	});
+	return error;
 }

@@ -1,5 +1,6 @@
 import type { IDataObject, IExecuteFunctions, INodeProperties } from 'n8n-workflow';
-import { asRecord, safeError, requireString, validateNoQueryErrors } from './common';
+import { NodeOperationError } from 'n8n-workflow';
+import { asRecord, safeError, requireString, validateNoQueryErrors, SdlQueryError } from './common';
 import { collectTable, boundOutput } from './results';
 import {
 	createSdlTransport,
@@ -81,7 +82,7 @@ function cleanupWarning(status: CleanupStatus): string | undefined {
 	if (status === 'timed_out') return 'SentinelOne query cleanup timed out before confirmation.';
 	return undefined;
 }
-export async function executeSdlQuery(
+async function executeSdlQueryInternal(
 	context: IExecuteFunctions,
 	itemIndex: number,
 ): Promise<IDataObject[]> {
@@ -232,11 +233,12 @@ export async function executeSdlQuery(
 	if (primaryFailure !== undefined) {
 		if (queryId && cleanupStatus) {
 			const message =
-				primaryFailure instanceof Error &&
-				primaryFailure.message.startsWith('SentinelOne SDL query ')
+				primaryFailure instanceof SdlQueryError
 					? primaryFailure.message
 					: 'SentinelOne SDL query failed';
-			throw new Error(`${message}; queryId=${queryId}; cleanupStatus=${cleanupStatus}`);
+			throw new SdlQueryError(
+				`${message.replace(/^SentinelOne SDL query /, '')}; queryId=${queryId}; cleanupStatus=${cleanupStatus}`,
+			);
 		}
 		throw primaryFailure;
 	}
@@ -247,6 +249,23 @@ export async function executeSdlQuery(
 	const warning = cleanupWarning(cleanupStatus);
 	if (warning) (table.metadata.warnings as string[]).push(warning);
 	return boundOutput(outputMode, table, maxRows, maxResponseBytes, itemIndex);
+}
+
+export async function executeSdlQuery(
+	context: IExecuteFunctions,
+	itemIndex: number,
+): Promise<IDataObject[]> {
+	try {
+		return await executeSdlQueryInternal(context, itemIndex);
+	} catch (error) {
+		if (error instanceof NodeOperationError) {
+			return Promise.reject(error);
+		}
+		if (error instanceof SdlQueryError)
+			throw new NodeOperationError(context.getNode(), error.message, { itemIndex });
+		const message = error instanceof Error ? error.message : 'SentinelOne SDL query failed';
+		throw new NodeOperationError(context.getNode(), message, { itemIndex });
+	}
 }
 
 export const sdlOperation: INodeProperties = {

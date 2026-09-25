@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { NodeOperationError } = require('n8n-workflow');
 
 const {
 	createAlertNote,
@@ -221,6 +222,35 @@ test('GraphQL transport errors preserve safe HTTP status codes', async () => {
 			return true;
 		},
 	);
+});
+
+test('GraphQL transport preserves timeout and network errors without inventing HTTP 500', async (t) => {
+	for (const [name, transportError] of [
+		['timeout', Object.assign(new Error('timeout of 15000ms exceeded'), { code: 'ECONNABORTED' })],
+		[
+			'network',
+			Object.assign(new Error('getaddrinfo EAI_AGAIN tenant.example'), { code: 'EAI_AGAIN' }),
+		],
+	]) {
+		await t.test(name, async () => {
+			await assert.rejects(
+				getUnifiedAlert(
+					context(baseParameters(), async () => {
+						throw transportError;
+					}),
+					0,
+				),
+				(error) => {
+					assert.ok(error instanceof NodeOperationError);
+					assert.match(error.message, /timeout|EAI_AGAIN/i);
+					assert.equal(error.cause, transportError);
+					assert.equal(error.httpCode, undefined);
+					assert.equal(error.errorCode, transportError.code);
+					return true;
+				},
+			);
+		});
+	}
 });
 
 test('numeric alert and scope IDs are rejected instead of coerced', async (t) => {

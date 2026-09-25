@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { NodeOperationError } = require('n8n-workflow');
 const {
 	executeSdlQuery,
 } = require('../../dist/nodes/SentinelOnePlatform/actions/sdlQuery/execute.operation.js');
@@ -33,6 +34,9 @@ function context(request, overrides = {}) {
 		...overrides,
 	};
 	return {
+		getNode() {
+			return { type: 'n8n-nodes-sentinelone-platform.sentinelOnePlatform', name: 'SentinelOne' };
+		},
 		getNodeParameter(name, _itemIndex, fallback) {
 			return Object.prototype.hasOwnProperty.call(parameters, name) ? parameters[name] : fallback;
 		},
@@ -50,6 +54,21 @@ function context(request, overrides = {}) {
 		},
 	};
 }
+
+test('SDL Query reports local validation failures as NodeOperationError', async () => {
+	await assert.rejects(
+		() =>
+			executeSdlQuery(
+				context(async () => assert.fail('No request expected'), { query: ' ' }),
+				0,
+			),
+		(error) => {
+			assert.ok(error instanceof NodeOperationError);
+			assert.match(error.message, /SentinelOne SDL query requires a query/);
+			return true;
+		},
+	);
+});
 
 test('SDL Query launches once, scopes the PQ request, maps safe unique columns, and cleans up', async () => {
 	const calls = [];

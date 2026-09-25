@@ -16,7 +16,6 @@
 - Read retry status, Retry-After and network codes through the wrapped error cause, so rate limits and dropped connections retry again.
 - Cap the per-attempt read timeout at a share of the 30-second deadline with a 15-second floor, so a timed-out attempt still leaves room to retry without cutting a slow read short.
 - Emit Alert Updated only when the alert was revised after creation, instead of suppressing every alert first seen in the poll.
-- Default Analyst Verdict to Undefined and require an explicit Status selection in Alert > Update.
 - Retry unavailable activity parents within the overlap window, then skip with a sanitised warning.
 - Recover activity backlogs through bounded checkpoint slices.
 - Finish scheduled trigger polls within the n8n 2.38.0+ poll time budget: alert polls read oldest first in ascending order with one forward-only cursor per stream and scope batch, a budget stop hands over every page already read and resumes from its last timestamp, activity polls keep the completed feed slices and the activities whose parent lookup finished, and a stream that stops without progress fails visibly. Hosts without a budget now also request ascending order and page to the end of the range instead of splitting at a page cap.
@@ -27,6 +26,7 @@
 ## 0.1.0 (unreleased)
 
 - Add SentinelOne icons to the node editor and package README.
+- Throw typed errors for rejected Alert Updates, retain status or service codes for uncertain and partial outcomes, and require explicit Status and Analyst Verdict choices.
 - Breaking: replace the Alert Note > Created trigger with Alert Activity > Occurred, without a compatibility alias. Note actions and Alert snapshot triggers remain unchanged.
 - Support seven verified activity types, unknown alert-linked types, and a builder for recorded transition and value conditions.
 - Emit one generic envelope per activity, with optional raw activity and current alert enrichment.

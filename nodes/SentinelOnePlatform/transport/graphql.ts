@@ -1,5 +1,5 @@
 import type { IDataObject, IExecuteFunctions } from 'n8n-workflow';
-import { NodeApiError } from 'n8n-workflow';
+import { NodeApiError, NodeOperationError } from 'n8n-workflow';
 import { isRecord, localError, apiError } from '../actions/common';
 import { logGraphqlRequest, logGraphqlResult } from '../../shared/Debug';
 import { responseStatus, isRetryableReadError, retryAfterMs } from '../../shared/transport/retry';
@@ -80,7 +80,32 @@ export async function graphQlRequest(
 		const error = result.error;
 		const retryable = isRetryableReadError(error);
 		const status = responseStatus(error);
-		const suffix = status === null ? '' : ` (HTTP ${status})`;
+		// Without an HTTP response, preserve the transport error so callers can
+		// distinguish timeouts and network failures from service responses.
+		if (status === null) {
+			const transportMessage = error instanceof Error ? error.message : String(error);
+			const errorCode = isRecord(error) ? error.code : undefined;
+			const transportError = new NodeOperationError(
+				context.getNode(),
+				error instanceof Error ? error : new Error(transportMessage),
+				{
+					itemIndex,
+					message: transportMessage,
+				},
+			);
+			// NodeOperationError expands common socket codes; keep the transport message intact.
+			transportError.message = transportMessage;
+			Object.assign(transportError, {
+				...(typeof errorCode === 'string' && /^[A-Z0-9_.-]{1,64}$/.test(errorCode)
+					? { errorCode }
+					: {}),
+				retryable,
+				retryAfterMs: retryAfterMs(error),
+				...(mutation ? { statusCode: null, mayHaveCommitted: true, outcome: 'unknown' } : {}),
+			});
+			throw transportError;
+		}
+		const suffix = ` (HTTP ${status})`;
 		const rejected = mutation && (status === 401 || status === 403);
 		const description = rejected
 			? 'SentinelOne rejected authentication or permission before the write could execute.'
@@ -96,7 +121,7 @@ export async function graphQlRequest(
 					? 'SentinelOne rate limit reached. Retry after the service delay.'
 					: `SentinelOne GraphQL request failed${suffix}.`,
 			description,
-			status === null ? '500' : String(status),
+			String(status),
 			mutation && !rejected,
 		);
 		Object.assign(failure, { retryable, retryAfterMs: retryAfterMs(error), statusCode: status });

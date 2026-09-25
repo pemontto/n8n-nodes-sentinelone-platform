@@ -41,6 +41,8 @@ function safeFailureOutput(error: NodeApiError | NodeOperationError): IDataObjec
 	)
 		output.cleanupStatus = value.cleanupStatus;
 	if (typeof value.queryId === 'string' && value.queryId) output.queryId = value.queryId;
+	if (typeof value.httpCode === 'string') output.httpCode = value.httpCode;
+	if (typeof value.errorCode === 'string') output.errorCode = value.errorCode;
 	return output;
 }
 
@@ -102,7 +104,8 @@ export class SentinelOnePlatform implements INodeType {
 				);
 			} catch (error) {
 				const normalized = normalizeExecutionError(this, error, itemIndex);
-				if (!this.continueOnFail()) throw normalized;
+				const useErrorOutput = this.getNode().onError === 'continueErrorOutput';
+				if (!this.continueOnFail() && !useErrorOutput) throw normalized;
 				output.push({
 					json: safeFailureOutput(normalized),
 					error: normalized,

@@ -45,7 +45,7 @@ function getManyEnvelope(alerts) {
 	};
 }
 
-function executionContext(parametersByItem, request, { continueOnFail = false } = {}) {
+function executionContext(parametersByItem, request, { continueOnFail = false, onError } = {}) {
 	return {
 		continueOnFail: () => continueOnFail,
 		getCredentials: async () => ({
@@ -53,7 +53,7 @@ function executionContext(parametersByItem, request, { continueOnFail = false } 
 			apiToken: 'never-return-this',
 		}),
 		getInputData: () => parametersByItem.map((parameters) => ({ json: parameters.input ?? {} })),
-		getNode: () => ({ ...workflowNode, parameters: parametersByItem[0] ?? {} }),
+		getNode: () => ({ ...workflowNode, parameters: parametersByItem[0] ?? {}, onError }),
 		getNodeParameter(name, itemIndex, fallback) {
 			const parameters = parametersByItem[itemIndex] ?? {};
 			return Object.prototype.hasOwnProperty.call(parameters, name) ? parameters[name] : fallback;
@@ -71,6 +71,38 @@ function executionContext(parametersByItem, request, { continueOnFail = false } 
 					: request(credential, options),
 		},
 	};
+}
+
+function updateParameters() {
+	return {
+		resource: 'alert',
+		operation: 'update',
+		alertId: ALERT_ID,
+		updateFields: { status: 'RESOLVED' },
+		options: { verifyUpdate: false },
+	};
+}
+
+function rejectAlertUpdate(_credential, options) {
+	if (options.body.query.includes('SentinelOneAvailableAlertActions'))
+		return {
+			data: {
+				alertAvailableActions: {
+					data: [
+						{
+							id: 'status',
+							isDisabled: false,
+							disabledReason: '',
+							types: ['STATUS_UPDATE'],
+							triggeredAfter: [],
+							triggersActions: [],
+						},
+					],
+					errors: [],
+				},
+			},
+		};
+	throw { statusCode: 403 };
 }
 
 function alertParameters(overrides = {}) {
@@ -289,6 +321,30 @@ test('Continue On Fail links an HTTP-200 GraphQL error to its input and continue
 	assert.equal(result[0][0].error.context.itemIndex, 0);
 	assert.equal(result[0][1].json.id, secondAlertId);
 	assert.deepEqual(result[0][1].pairedItem, { item: 1 });
+});
+
+test('Continue On Fail returns a rejected update as a linked error item', async () => {
+	const result = await new SentinelOnePlatform().execute.call(
+		executionContext([updateParameters()], rejectAlertUpdate, { continueOnFail: true }),
+	);
+	assert.equal(result[0].length, 1);
+	assert.match(result[0][0].json.error, /denied this update/);
+	assert.equal(result[0][0].json.httpCode, '403');
+	assert.equal(result[0][0].error.httpCode, '403');
+	assert.deepEqual(result[0][0].pairedItem, { item: 0 });
+});
+
+test('Continue using error output returns a linked error item for error-output routing', async () => {
+	const result = await new SentinelOnePlatform().execute.call(
+		executionContext([updateParameters()], rejectAlertUpdate, {
+			onError: 'continueErrorOutput',
+		}),
+	);
+	const errorItems = result[0].filter((item) => item.error);
+	assert.equal(errorItems.length, 1);
+	assert.match(errorItems[0].json.error, /denied this update/);
+	assert.equal(errorItems[0].json.httpCode, '403');
+	assert.deepEqual(errorItems[0].pairedItem, { item: 0 });
 });
 
 test('router rejects unsupported resource and operation pairs with the item index', async () => {

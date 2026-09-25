@@ -1,5 +1,12 @@
 import type { IDataObject } from 'n8n-workflow';
 
+export class SdlQueryError extends Error {
+	constructor(message: string) {
+		super(`SentinelOne SDL query ${message}`);
+		this.name = 'SdlQueryError';
+	}
+}
+
 export function asRecord(value: unknown): IDataObject | undefined {
 	return value !== null && typeof value === 'object' && !Array.isArray(value)
 		? (value as IDataObject)
@@ -7,7 +14,7 @@ export function asRecord(value: unknown): IDataObject | undefined {
 }
 
 export function safeError(message: string): Error {
-	return new Error(`SentinelOne SDL query ${message}`);
+	return new SdlQueryError(message);
 }
 
 export function requireString(value: unknown, label: string): string {

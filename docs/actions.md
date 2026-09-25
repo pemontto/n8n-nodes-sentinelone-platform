@@ -6,7 +6,9 @@ Get requires an Alert ID. Get Many supports optional Account, Site, and Group se
 
 Options > Additional Alert Fields adds supported extras without removing common fields. Large enrichments remain opt-in. Get also accepts selection-only Additional GraphQL Fields, including nested selections. It does not accept a complete query or mutation; follow the input's syntax restrictions.
 
-Update supports status, analyst verdict, and ticket ID. Strings are preserved; objects and arrays are serialized once. Ticket updates replace the entire value. Merge existing JSON explicitly if other metadata must survive. For example, after checking the existing value is a JSON object, use `{ ...existingMetadata, externalTicketId: 'demo-ticket' }`.
+Update supports status, analyst verdict, and ticket ID. Choose a Status or Analyst Verdict explicitly; neither field is selected by default. Strings are preserved; objects and arrays are serialized once. Ticket updates replace the entire value. Merge existing JSON explicitly if other metadata must survive. For example, after checking the existing value is a JSON object, use `{ ...existingMetadata, externalTicketId: 'demo-ticket' }`.
+
+Authentication, permission, and explicit action rejections throw an error with the HTTP status. Continue On Fail returns the error as a linked item, and Continue (using error output) routes it to the error output. An unknown result includes `httpCode` for an HTTP failure or `errorCode` for a statusless network failure. Partial results include safe service error codes when available. Check the alert before retrying an uncertain or partial update.
 
 Advanced Update Payload uses the same fields. Enable its toggle before supplying JSON. Guided and JSON inputs are additive; duplicate keys are rejected. Severity changes and clearing fields are unsupported.
 

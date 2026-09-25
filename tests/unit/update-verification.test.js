@@ -1,4 +1,5 @@
 const test = require('node:test');
+const { NodeApiError } = require('n8n-workflow');
 const {
 	updateUnifiedAlert,
 } = require('../../dist/nodes/SentinelOnePlatform/actions/alert/update.operation');
@@ -65,11 +66,14 @@ test('Disabled and rejected messages redact reflected ticket metadata', async ()
 				assert.match(error.message, /disabled/);
 				return true;
 			});
-		else {
-			const [result] = await updateUnifiedAlert(context, 0);
-			assert.equal(result.outcome, 'rejected');
-			assert.doesNotMatch(JSON.stringify(result.errors), /private-ticket-metadata/);
-		}
+		else
+			await assert.rejects(updateUnifiedAlert(context, 0), (error) => {
+				assert.ok(error instanceof NodeApiError);
+				assert.doesNotMatch(error.message, /private-ticket-metadata/);
+				assert.doesNotMatch(JSON.stringify(error.context.errors), /private-ticket-metadata/);
+				assert.match(error.context.errors[0].errorMessage, /Cannot set/);
+				return true;
+			});
 	}
 });
 function discovery(disabled = false) {
@@ -133,27 +137,35 @@ test('Disabling verification performs discovery and mutation only', async () => 
 	assert.equal(calls, 2);
 	assert.equal(result.verificationStatus, 'skipped');
 });
-test('Explicit rejection skips readback and reports rejection', async () => {
+test('Explicit rejection throws NodeApiError with skipped verification context', async () => {
 	let calls = 0;
-	const [result] = await updateUnifiedAlert(
-		updateContext((body) => {
-			calls++;
-			return body.query.includes('SentinelOneAvailableAlertActions')
-				? discovery()
-				: {
-						data: {
-							alertTriggerActions: {
-								__typename: 'TriggerActionsError',
-								errors: [{ errorMessage: 'Action rejected' }],
+	await assert.rejects(
+		updateUnifiedAlert(
+			updateContext((body) => {
+				calls++;
+				return body.query.includes('SentinelOneAvailableAlertActions')
+					? discovery()
+					: {
+							data: {
+								alertTriggerActions: {
+									__typename: 'TriggerActionsError',
+									errors: [{ errorMessage: 'Action rejected' }],
+								},
 							},
-						},
-					};
-		}),
-		0,
+						};
+			}),
+			0,
+		),
+		(error) => {
+			assert.ok(error instanceof NodeApiError);
+			assert.equal(error.httpCode, '400');
+			assert.equal(error.context.mutationAcknowledged, false);
+			assert.equal(error.context.verificationStatus, 'skipped');
+			assert.equal(error.context.errors[0].errorMessage, 'Action rejected');
+			return true;
+		},
 	);
 	assert.equal(calls, 2);
-	assert.equal(result.outcome, 'rejected');
-	assert.equal(result.verificationStatus, 'skipped');
 });
 test('Disabled actions expose the supplied permission explanation', async () => {
 	await assert.rejects(
@@ -289,22 +301,109 @@ test('An explicitly null ticket value is a known mismatch', async () => {
 	assert.equal(result.verification.ticketId.verified, false);
 });
 
-test('Authentication and GraphQL validation rejections skip verification', async () => {
+test('Authentication and GraphQL validation rejections throw with their HTTP code', async () => {
 	for (const rejection of [401, 403, 'GRAPHQL_VALIDATION_FAILED']) {
 		let calls = 0;
-		const result = await updateUnifiedAlert(
-			updateContext((body) => {
-				calls++;
-				if (body.query.includes('SentinelOneAvailableAlertActions')) return discovery();
-				if (typeof rejection === 'number') throw { statusCode: rejection };
-				return { errors: [{ message: 'Not echoed', extensions: { code: rejection } }] };
-			}),
-			0,
+		await assert.rejects(
+			updateUnifiedAlert(
+				updateContext((body) => {
+					calls++;
+					if (body.query.includes('SentinelOneAvailableAlertActions')) return discovery();
+					if (typeof rejection === 'number') throw { statusCode: rejection };
+					return { errors: [{ message: 'Not echoed', extensions: { code: rejection } }] };
+				}),
+				0,
+			),
+			(error) => {
+				assert.ok(error instanceof NodeApiError);
+				assert.equal(error.httpCode, typeof rejection === 'number' ? String(rejection) : '400');
+				assert.equal(error.context.verificationStatus, 'skipped');
+				return true;
+			},
 		);
 		assert.equal(calls, 2);
-		assert.equal(result[0].outcome, 'rejected');
-		assert.equal(result[0].verificationStatus, 'skipped');
 	}
+});
+
+test('Unknown mutation outcome carries the HTTP status', async () => {
+	const [result] = await updateUnifiedAlert(
+		updateContext(
+			(body) => {
+				if (body.query.includes('SentinelOneAvailableAlertActions')) return discovery();
+				throw { statusCode: 503 };
+			},
+			{ verifyUpdate: false },
+		),
+		0,
+	);
+	assert.equal(result.outcome, 'unknown');
+	assert.equal(result.httpCode, '503');
+});
+
+test('Unknown mutation outcome carries a statusless transport error code', async () => {
+	const [result] = await updateUnifiedAlert(
+		updateContext(
+			(body) => {
+				if (body.query.includes('SentinelOneAvailableAlertActions')) return discovery();
+				throw Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' });
+			},
+			{ verifyUpdate: false },
+		),
+		0,
+	);
+	assert.equal(result.outcome, 'unknown');
+	assert.equal(result.errorCode, 'ETIMEDOUT');
+	assert.equal(result.httpCode, undefined);
+});
+
+test('Partial mutation outcome carries service error codes', async () => {
+	const [result] = await updateUnifiedAlert(
+		updateContext(
+			(body) => {
+				if (body.query.includes('SentinelOneAvailableAlertActions')) return discovery();
+				return {
+					data: {
+						alertTriggerActions: {
+							__typename: 'ActionsTriggered',
+							actions: [
+								{
+									actionId: 'status',
+									success: [],
+									skip: [],
+									failure: [{ id: 'alert-demo', errorType: 'ACTION_DENIED' }],
+								},
+							],
+						},
+					},
+				};
+			},
+			{ verifyUpdate: false },
+		),
+		0,
+	);
+	assert.equal(result.outcome, 'partial');
+	assert.equal(result.mayHaveCommitted, true);
+	assert.deepEqual(result.errorCodes, ['ACTION_DENIED']);
+});
+
+test('An unset Analyst Verdict does not add a verdict update', async () => {
+	const {
+		description,
+	} = require('../../dist/nodes/SentinelOnePlatform/actions/alert/update.operation');
+	const [fields] = description.filter((property) => property.name === 'updateFields');
+	const verdict = fields.options.find((property) => property.name === 'analystVerdict');
+	assert.equal(verdict.default, '');
+	assert.deepEqual(verdict.options[0], { name: '- Select -', value: '' });
+
+	const [result] = await updateUnifiedAlert(
+		updateContext((body) => {
+			if (body.query.includes('SentinelOneAvailableAlertActions')) return discovery();
+			if (body.query.includes('SentinelOneUpdateAlert')) return accepted();
+			return { data: { alert: { id: 'alert-demo', status: 'RESOLVED' } } };
+		}),
+		0,
+	);
+	assert.deepEqual(result.requested, { status: 'RESOLVED' });
 });
 
 test('Invalid update values and keys are never echoed into errors', async () => {

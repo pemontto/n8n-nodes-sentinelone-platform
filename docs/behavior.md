@@ -4,13 +4,15 @@
 
 Alert Get/Update and note Get Many/Create target IDs, without management-scope controls or legacy fallback. Get Many and triggers use optional Account, Site, and Group selections; empty means accessible data. Get Many ignores hidden child selections; triggers reject Group selections without a selected Site. Common alert fields always remain present. Options > Additional Alert Fields adds extras, empty by default. Raw Data and large enrichments are opt-in. This useful common response deliberately exceeds the n8n ten-field simplification recommendation.
 
-Update supports status, analyst verdict, and non-empty ticket ID. All supported enum values are offered. Ticket strings remain unchanged and objects/arrays serialize once, without implicit merging. Advanced JSON is additive, enabled only by its toggle, and duplicate fields fail before requests. Severity and clearing remain unsupported.
+Update supports status, analyst verdict, and non-empty ticket ID. All supported enum values are offered, and Status and Analyst Verdict require an explicit choice. Ticket strings remain unchanged and objects/arrays serialize once, without implicit merging. Advanced JSON is additive, enabled only by its toggle, and duplicate fields fail before requests. Severity and clearing remain unsupported.
 
 ## Requests and outcomes
 
 Native authenticated helpers handle network access. Shared read transport retries transient network errors and HTTP 429/500/502/503/504 with bounded deadlines and backoff. Retry decisions read status, Retry-After and network codes through wrapped error causes, and each attempt receives a share of the remaining deadline, floored at 15 seconds so a slow read is not cut short while a timed-out attempt can still retry. A scheduled trigger poll passes the host's poll budget to the transport as a deadline: no attempt starts after it, attempt timeouts are capped to it, and a transient failure whose retry no longer fits is reported as a budget stop that carries the blocked status. Permission and other permanent failures are never reported as budget stops. Mutations are submitted once. Reject whole-node Retry On Fail for mutation operations before any requests. Permission and GraphQL validation failures are not retried. Debug is a node Setting, uses Info level, and logs only redacted query structure and timing; logging cannot affect execution.
 
 Error messages distinguish configuration, permission, disabled/absent actions, rate limits, service failures, rejection, partial results, and uncertainty. Disabled actions show bounded sanitized service reasons. An absent action is not proof of denied permission. Never include credentials, write payloads, or response bodies in errors.
+
+Alert Update rejections throw `NodeApiError` with the HTTP status and skipped verification details in error context. Continue On Fail returns a linked error item; Continue (using error output) routes that item to the error output. Unknown outcomes include `httpCode` when an HTTP response supplied a status, or `errorCode` for a statusless network failure. Partial outcomes include safe service error codes when available. Uncertain and partial mutations are not replayed automatically.
 
 ## Update verification
 
