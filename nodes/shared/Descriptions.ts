@@ -68,9 +68,7 @@ export function additionalAlertFields(projection: AlertProjection): INodePropert
 	};
 }
 
-export function managementScopeFields(
-	displayOptions?: INodeProperties['displayOptions'],
-): INodeProperties[] {
+export function managementScopeFields(): INodeProperties[] {
 	return [
 		{
 			displayName: 'Account Names or IDs',
@@ -79,7 +77,6 @@ export function managementScopeFields(
 			default: [],
 			hint: 'Optional. Leave empty for all credential-visible accounts.',
 			typeOptions: { loadOptionsMethod: 'getAccounts' },
-			...(displayOptions ? { displayOptions } : {}),
 			description:
 				'Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>',
 		},
@@ -88,9 +85,9 @@ export function managementScopeFields(
 			name: 'siteIds',
 			type: 'multiOptions',
 			default: [],
-			hint: 'Optional. Leave empty to keep the account scope; otherwise choose accessible sites.',
+			displayOptions: { show: { accountIds: [{ _cnd: { exists: true } }] } },
+			hint: 'Optional. Leave empty to keep the account scope.',
 			typeOptions: { loadOptionsMethod: 'getSites', loadOptionsDependsOn: ['accountIds'] },
-			...(displayOptions ? { displayOptions } : {}),
 			description:
 				'Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>',
 		},
@@ -99,14 +96,11 @@ export function managementScopeFields(
 			name: 'groupIds',
 			type: 'multiOptions',
 			default: [],
+			displayOptions: { show: { siteIds: [{ _cnd: { exists: true } }] } },
 			hint: 'Optional. Leave empty to use the selected sites.',
 			typeOptions: {
 				loadOptionsMethod: 'getGroups',
 				loadOptionsDependsOn: ['accountIds', 'siteIds'],
-			},
-			displayOptions: {
-				...displayOptions,
-				show: { ...displayOptions?.show, siteIds: [{ _cnd: { exists: true } }] },
 			},
 			description:
 				'Choose from the list, or specify IDs using an <a href="https://docs.n8n.io/code/expressions/">expression</a>',
@@ -132,17 +126,14 @@ export function managementScopeOption(): INodeProperties {
 		siteIds: {
 			typeOptions: {
 				loadOptionsMethod: 'getSites',
-				loadOptionsDependsOn: ['options.scope.selection.accountIds'],
+				loadOptionsDependsOn: ['&accountIds'],
 			},
 		},
 		groupIds: {
-			hint: 'Select sites before choosing groups. Leave empty to use the selected sites.',
+			hint: 'Optional. Leave empty to use the selected sites.',
 			typeOptions: {
 				loadOptionsMethod: 'getGroups',
-				loadOptionsDependsOn: [
-					'options.scope.selection.accountIds',
-					'options.scope.selection.siteIds',
-				],
+				loadOptionsDependsOn: ['&accountIds', '&siteIds'],
 			},
 		},
 	};
@@ -150,7 +141,6 @@ export function managementScopeOption(): INodeProperties {
 		(field): INodeProperties => ({
 			...field,
 			...descriptors[field.name],
-			displayOptions: undefined,
 		}),
 	);
 
@@ -158,8 +148,8 @@ export function managementScopeOption(): INodeProperties {
 		displayName: 'Scope',
 		name: 'scope',
 		type: 'fixedCollection',
-		default: {},
-		placeholder: 'Select Scope',
+		default: { selection: { accountIds: [], siteIds: [], groupIds: [] } },
+		placeholder: 'Add Scope',
 		description:
 			'Optional account, site and group restrictions. Empty selections use all accessible accounts.',
 		options: [{ displayName: 'Selection', name: 'selection', values: fields }],

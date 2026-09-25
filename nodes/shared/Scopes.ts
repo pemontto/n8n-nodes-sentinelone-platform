@@ -8,7 +8,7 @@ import type {
 	INodePropertyOptions,
 } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
-import { requestWithRetry } from './transport/request';
+import { PollBudgetError, requestWithRetry } from './transport/request';
 
 export type ScopeType = 'ACCOUNT' | 'SITE' | 'GROUP';
 export type ManagementScopeType = ScopeType;
@@ -217,6 +217,8 @@ export async function loadScopeOptions(
 		);
 		if (!result.ok) {
 			const error = result.error;
+			// A spent poll budget keeps its own message; the scope loader must not relabel it.
+			if (error instanceof PollBudgetError) throw error;
 			if (Date.now() - startedAt >= MAX_MANAGEMENT_SCOPE_LOAD_MS) {
 				throw new ManagementScopeResponseError(
 					`SentinelOne ${path} scope loading exceeded ${MAX_MANAGEMENT_SCOPE_LOAD_MS / 1000} seconds. Narrow the accessible management scope or try again later.`,
@@ -301,6 +303,20 @@ async function options(
 	);
 }
 
+/** Dependent scope fields render before their parent is chosen; a placeholder keeps n8n from caching an unfiltered list. */
+export function scopeParentPlaceholder(scopeType: ScopeType): INodePropertyOptions[] {
+	return [
+		{ name: scopeType === 'SITE' ? 'Select an Account First' : 'Select a Site First', value: '' },
+	];
+}
+
+/** A selected placeholder carries an empty value and is not a scope selection. */
+function withoutPlaceholders(value: unknown): unknown {
+	return Array.isArray(value)
+		? value.filter((entry) => !(typeof entry === 'string' && entry.trim() === ''))
+		: value;
+}
+
 export function readManagementScopeIds(
 	context: ILoadOptionsFunctions | IPollFunctions | IExecuteFunctions,
 	name: 'accountIds' | 'siteIds' | 'groupIds',
@@ -322,9 +338,9 @@ export function readManagementScopeIds(
 		if (!selection || typeof selection !== 'object' || Array.isArray(selection))
 			throw new Error('Scope selection must be an object.');
 		const value = (selection as IDataObject)[name];
-		return scopeIds(value === undefined ? [] : value);
+		return scopeIds(withoutPlaceholders(value === undefined ? [] : value));
 	}
-	return scopeIds(get(name, []));
+	return scopeIds(withoutPlaceholders(get(name, [])));
 }
 
 export async function loadListScopeOptions(
@@ -334,7 +350,8 @@ export async function loadListScopeOptions(
 	try {
 		const accountIds = readManagementScopeIds(context, 'accountIds');
 		const siteIds = readManagementScopeIds(context, 'siteIds');
-		if (scopeType === 'GROUP' && siteIds.length === 0) return [];
+		if (scopeType === 'SITE' && accountIds.length === 0) return scopeParentPlaceholder('SITE');
+		if (scopeType === 'GROUP' && siteIds.length === 0) return scopeParentPlaceholder('GROUP');
 		return await options(
 			context,
 			scopeType,
@@ -427,6 +444,9 @@ export async function discoverVisibleScopes(
 		if (accounts.length)
 			return { scopeType: 'ACCOUNT', scopeIds: accounts.map((option) => String(option.value)) };
 	} catch (error) {
+		// A spent poll budget keeps its own message; the trigger boundary wraps it with node context.
+		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+		if (error instanceof PollBudgetError) throw error;
 		if (!isScopePermissionError(error))
 			throw new NodeOperationError(
 				node,
@@ -479,6 +499,7 @@ export async function activityAccountIds(
 						}),
 					{ timeoutMs: remainingMs },
 				);
+				if (!result.ok && result.error instanceof PollBudgetError) throw result.error;
 				if (!result.ok)
 					throw Object.assign(
 						new Error(requestFailureMessage(kind === 'sites' ? 'SITE' : 'GROUP', result.error)),

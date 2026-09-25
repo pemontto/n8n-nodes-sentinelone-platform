@@ -1,6 +1,7 @@
 import { sleep as workflowSleep, type IDataObject } from 'n8n-workflow';
 import type { AuthenticatedRequest } from './SentinelOneTriggerHelpers';
-import { responseStatus } from '../shared/transport/retry';
+import { isRetryableReadError, responseStatus } from '../shared/transport/retry';
+import { PollBudgetError } from '../shared/transport/request';
 
 export const ACTIVITY_FEED_LIMIT = 1000;
 export const ACTIVITY_FEED_INLINE_BYTES = 5 * 1024 * 1024;
@@ -418,11 +419,18 @@ async function readActivityFeedRun(
 		const remaining = () => {
 			const milliseconds = expires - now();
 			if (milliseconds <= 0) {
-				if (lastPollStatus === 429) throw requestFailure('polling', { statusCode: 429 });
+				// Rate limits that outlast one query's lifecycle fail it; ones that reach the whole read's deadline end the read at its completed prefix.
+				if (lastPollStatus === 429 && now() < deadline)
+					throw requestFailure('polling', { statusCode: 429 });
 				throw new ActivityFeedBudgetError('exceeded the query deadline');
 			}
 			return Math.max(1, Math.min(milliseconds, 30_000));
 		};
+		// A request the poll budget stopped, or a transient failure once the deadline has passed, ends the read at its completed prefix; permanent failures still fail it.
+		const stopped = (stage: 'launch' | 'polling', error: unknown): Error =>
+			error instanceof PollBudgetError || (now() >= deadline && isRetryableReadError(error))
+				? new ActivityFeedBudgetError('exceeded the query deadline')
+				: requestFailure(stage, error);
 		try {
 			const queryBody = {
 				queryType: 'LOG',
@@ -449,7 +457,7 @@ async function readActivityFeedRun(
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify(queryBody),
 				}).catch((error: unknown) => {
-					throw requestFailure('launch', error);
+					throw stopped('launch', error);
 				}),
 			);
 			if (typeof payload?.id !== 'string' || !payload.id.trim())
@@ -510,11 +518,12 @@ async function readActivityFeedRun(
 					(error: unknown) => ({ value: undefined, error }),
 				);
 				if (result.error !== undefined) {
+					if (result.error instanceof PollBudgetError) throw stopped('polling', result.error);
 					const errorResponse = record(record(result.error)?.response);
 					if (errorResponse?.headers) captureRouting(errorResponse);
 					lastPollStatus = responseStatus(result.error);
 					if (lastPollStatus === 404 || lastPollStatus === 429) continue;
-					throw requestFailure('polling', result.error);
+					throw stopped('polling', result.error);
 				}
 				lastPollStatus = null;
 				payload = unwrap(result.value);

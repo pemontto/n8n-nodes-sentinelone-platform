@@ -101,7 +101,8 @@ test('action node description exposes the intended v1 resources, operations, and
 	assert.deepEqual(description.inputs, ['main']);
 	assert.deepEqual(description.outputs, ['main']);
 	assert.deepEqual(description.credentials, [{ name: 'sentinelOnePlatformApi', required: true }]);
-	assert.equal(description.usableAsTool, true);
+	// Tool exposure is deferred until the mutation surface has been reviewed for agent use.
+	assert.equal(description.usableAsTool, undefined);
 	assert.equal(
 		actionMetadata.resources.primaryDocumentation[0].url,
 		'https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/actions.md',

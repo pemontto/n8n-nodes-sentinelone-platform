@@ -83,7 +83,8 @@ test('loads every account page through the SentinelOne credential and sorts by n
 		assert.equal(call.receiver, fixture.context);
 		assert.equal(call.options.method, 'GET');
 		assert.equal(call.options.url, 'https://tenant.example/web/api/v2.1/accounts');
-		assert.equal(call.options.timeout, 30_000);
+		// Per-attempt timeout is a share of the 30-second deadline, floored so a slow read is not cut short.
+		assert.equal(call.options.timeout, 15_000);
 		assert.equal(call.options.json, true);
 		assert.equal(call.options.sendCredentialsOnCrossOriginRedirect, false);
 		assert.equal(call.options.qs.limit, 1000);

@@ -2,7 +2,7 @@
 
 ## Alert
 
-Get requires an Alert ID. Get Many supports optional Account, Site, and Group selections under Options > Scope, plus filters and pagination. Empty hierarchy selections include accessible records.
+Get requires an Alert ID. Get Many supports optional Account, Site, and Group selections under Options > Scope, plus filters and pagination. Empty hierarchy selections include accessible records. Site and Group lists stay empty until their parent is selected: they offer a single Select an Account First or Select a Site First placeholder, which never becomes a scope selection.
 
 Options > Additional Alert Fields adds supported extras without removing common fields. Large enrichments remain opt-in. Get also accepts selection-only Additional GraphQL Fields, including nested selections. It does not accept a complete query or mutation; follow the input's syntax restrictions.
 

@@ -13,7 +13,6 @@ const {
 	alertListSelection,
 	additionalAlertFieldOptions,
 } = require('../../dist/nodes/shared/AlertFields.js');
-const { OCSF_QUERY } = require('../../dist/nodes/SentinelOnePlatformTrigger/Ocsf.js');
 const { ALERT_QUERY } = require('../../dist/nodes/SentinelOnePlatformTrigger/ActivityNotePoll.js');
 const {
 	pollSentinelOne,
@@ -38,9 +37,8 @@ for (const fixture of ['console-a.graphql', 'console-b.graphql']) {
 			valid(getManyAlertsDocument(alertListSelection(fields)));
 		valid('query Readback($id:ID!){alert(id:$id){id status analystVerdict ticketId}}');
 	});
-	test(`${fixture}: note-parent and OCSF documents are valid`, () => {
+	test(`${fixture}: the note-parent document is valid`, () => {
 		valid(ALERT_QUERY);
-		valid(OCSF_QUERY);
 	});
 	test(`${fixture}: the actual trigger sends a valid expanded polling document`, async () => {
 		let requests = 0;

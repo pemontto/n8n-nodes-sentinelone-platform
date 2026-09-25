@@ -1,8 +1,8 @@
 import type { IDataObject, IHttpRequestOptions } from 'n8n-workflow';
 import type { ScopeType } from '../shared/Scopes';
 import { alertFieldSelection, additionalAlertOutput } from '../shared/AlertFields';
-import { fetchOcsfDetail } from './Ocsf';
 import type { ActivityCondition } from './ActivityConditions';
+import { PollBudgetError } from '../shared/transport/request';
 
 export type TriggerEvent = 'alert.new' | 'alert.updated' | 'alert.activity';
 export type PollMode = 'manual' | 'scheduled';
@@ -11,6 +11,8 @@ export const MAX_SEEN_ALERT_IDS = 20_000;
 export const MAX_SEEN_ALERT_VERSIONS = 40_000;
 export const MANUAL_RESULT_LIMIT = 10;
 export const MAX_SCOPE_IDS_PER_QUERY = 500;
+/** Alerts sharing one timestamp are excluded by ID when that timestamp is read again; more than this fails visibly. */
+export const MAX_TIE_IDS = 5_000;
 
 import { compileExclusions, matchesExclusion, type ExclusionPatterns } from './Exclusions';
 
@@ -33,7 +35,6 @@ export interface TriggerConfig extends ExclusionPatterns {
 	advancedFilters?: unknown;
 	simplifyOutput: boolean;
 	additionalAlertFields?: string[];
-	includeOcsf?: boolean;
 	debug: boolean;
 	debugLog?: (message: string, details?: IDataObject) => void;
 	warnLog?: (message: string, details?: IDataObject) => void;
@@ -42,12 +43,26 @@ export interface TriggerConfig extends ExclusionPatterns {
 	requestTimeoutMs: number;
 	alertPageSize: number;
 	maxAlertPages: number;
+	/** Absolute epoch time at which the n8n poll budget runs out. The transport enforces it; poll helpers only reserve time for steps that follow a read. */
+	pollDeadlineMs?: number;
+}
+
+/** Per stream and scope batch: the latest timestamp read, the alert IDs already processed at exactly that time, and where an overlap re-read that stopped early resumes. */
+export interface AlertCursor extends IDataObject {
+	throughMs: number;
+	ids: string[];
+	resumeMs?: number;
 }
 
 export interface TriggerState extends IDataObject {
 	configFingerprint?: string;
 	initialized?: boolean;
+	/** The earliest cursor; kept for diagnostics and for state saved before per-unit cursors existed. */
 	checkpointMs?: number;
+	/** Poll start of the first scheduled poll; alerts created or updated before it are recorded, never emitted. */
+	activationMs?: number;
+	alertCursors?: Record<string, AlertCursor>;
+	/** Seen alert IDs, each followed by a NUL and its creation time so it retires once every cursor has left its overlap. */
 	seenAlertIds?: string[];
 	seenAlertVersions?: string[];
 	seenActivityIds?: string[];
@@ -86,8 +101,8 @@ interface GraphQlEnvelope {
 }
 
 const ALERTS_QUERY = `
-query PollAlerts($first: Int!, $after: String, $scope: ScopeSelectorInput!, $filters: [FilterInput!], $orFilter: OrFilterSelectionInput, $sortBy: String!) {
-  alerts(first: $first, after: $after, scope: $scope, viewType: ALL, sort: { by: $sortBy, order: DESC }, filters: $filters, orFilter: $orFilter) {
+query PollAlerts($first: Int!, $after: String, $scope: ScopeSelectorInput!, $filters: [FilterInput!], $orFilter: OrFilterSelectionInput, $sortBy: String!, $sortOrder: SortOrderType!) {
+  alerts(first: $first, after: $after, scope: $scope, viewType: ALL, sort: { by: $sortBy, order: $sortOrder }, filters: $filters, orFilter: $orFilter) {
     edges {
       node {
         id
@@ -238,6 +253,7 @@ async function mapWithConcurrency<T, R>(
 	let nextIndex = 0;
 	let stopped = false;
 	let firstFailure: unknown;
+	let budgetFailure: PollBudgetError | undefined;
 	const requestedConcurrency = Number.isFinite(concurrency) ? Math.trunc(concurrency) : 1;
 	const workerCount = Math.max(1, Math.min(requestedConcurrency, items.length));
 	await Promise.all(
@@ -248,7 +264,9 @@ async function mapWithConcurrency<T, R>(
 					results[currentIndex] = await worker(items[currentIndex], currentIndex);
 				} catch (error) {
 					stopped = true;
-					firstFailure ??= error;
+					// A permanent failure outranks a budget stop, so denied access is never reported as a partial delivery.
+					if (error instanceof PollBudgetError) budgetFailure ??= error;
+					else firstFailure ??= error;
 				}
 			}
 		}),
@@ -258,6 +276,7 @@ async function mapWithConcurrency<T, R>(
 			firstFailure instanceof Error ? firstFailure.message : 'SentinelOne request failed',
 		);
 	}
+	if (budgetFailure) throw budgetFailure;
 	return results;
 }
 
@@ -294,16 +313,6 @@ export function fingerprintConfig(config: TriggerConfig): string {
 				: { excludeNoteAuthorName: '', noteDetection: null }),
 		}),
 	);
-}
-
-function boundedUnique(previous: string[], current: string[], limit: number): string[] {
-	const values = new Map<string, true>();
-	for (const value of previous) values.set(value, true);
-	for (const value of current) {
-		values.delete(value);
-		values.set(value, true);
-	}
-	return [...values.keys()].slice(-limit);
 }
 
 function assertStateCapacity(values: string[], limit: number, label: string): void {
@@ -355,6 +364,7 @@ function buildFilters(
 	fieldId: 'createdAt' | 'updatedAt',
 	start: number,
 	end: number,
+	excludeIds: string[] = [],
 ): IDataObject[] {
 	const filters: IDataObject[] = [
 		{
@@ -371,96 +381,122 @@ function buildFilters(
 	if (config.alertName.trim()) {
 		filters.push({ fieldId: 'alertName', match: { values: [config.alertName.trim()] } });
 	}
+	if (excludeIds.length > 0) {
+		filters.push({ fieldId: 'id', isNegated: true, stringIn: { values: excludeIds } });
+	}
 	return filters;
 }
 
-async function fetchAlerts(
+interface AlertPageRead {
+	/** Every validated alert on the page, in the order the API returned them. */
+	nodes: Alert[];
+	/** The nodes that pass the name exclusions. */
+	kept: Alert[];
+	pageInfo: PageInfo;
+}
+
+async function requestAlertPage(
 	request: AuthenticatedRequest,
 	config: TriggerConfig,
 	fieldId: 'createdAt' | 'updatedAt',
 	start: number,
 	end: number,
-	maxItems?: number,
+	first: number,
+	after: string | undefined,
+	sortOrder: 'ASC' | 'DESC',
+	excludeIds: string[],
+): Promise<AlertPageRead> {
+	const exclusions = compileExclusions(config);
+	const selection = advancedFilterSelection(
+		buildFilters(config, fieldId, start, end, excludeIds),
+		config.advancedFilters,
+	);
+	const response = await request({
+		method: 'POST',
+		url: `${config.baseUrl}/web/api/v2.1/unifiedalerts/graphql`,
+		timeout: config.requestTimeoutMs,
+		body: {
+			query: ALERTS_QUERY.replace(
+				'        id',
+				`        ${alertFieldSelection(config.additionalAlertFields)}\n        id`,
+			),
+			variables: {
+				first,
+				after: after ?? null,
+				scope: { scopeType: config.scopeType, scopeIds: config.scopeIds },
+				filters: selection.filters,
+				orFilter: selection.orFilter,
+				sortBy: fieldId,
+				sortOrder,
+			},
+		},
+		json: true,
+	});
+	const connection = graphQlData(response).alerts;
+	if (
+		!connection?.pageInfo ||
+		typeof connection.pageInfo.hasNextPage !== 'boolean' ||
+		!Array.isArray(connection.edges)
+	) {
+		throw new Error(
+			`SentinelOne returned an incomplete ${fieldId} alert page. Try again after the service is available.`,
+		);
+	}
+	const nodes: Alert[] = [];
+	const kept: Alert[] = [];
+	for (const edge of connection.edges) {
+		const alert = edge?.node;
+		if (!alert?.id) {
+			throw new Error(`SentinelOne returned a ${fieldId} alert without an ID.`);
+		}
+		if (typeof alert[fieldId] !== 'string' || Number.isNaN(Date.parse(String(alert[fieldId])))) {
+			throw new Error(
+				`SentinelOne returned alert ${alert.id} without a usable ${fieldId} timestamp; state was not advanced.`,
+			);
+		}
+		nodes.push(alert);
+		const scope = asRecord(asRecord(alert.realTime)?.scope);
+		if (
+			matchesExclusion(exclusions.account, asRecord(scope?.account)?.name) ||
+			matchesExclusion(exclusions.site, asRecord(scope?.site)?.name) ||
+			matchesExclusion(exclusions.group, asRecord(scope?.group)?.name)
+		)
+			continue;
+		kept.push(alert);
+	}
+	return { nodes, kept, pageInfo: connection.pageInfo };
+}
+
+/** Newest-first read for manual previews: stops at the result limit and splits dense ranges at the page cap. */
+async function fetchAlertsNewestFirst(
+	request: AuthenticatedRequest,
+	config: TriggerConfig,
+	fieldId: 'createdAt' | 'updatedAt',
+	start: number,
+	end: number,
+	maxItems: number,
 	splitDepth = 0,
 	excludeUpdatedIds?: ReadonlySet<string>,
 ): Promise<Alert[]> {
 	const alerts: Alert[] = [];
-	const exclusions = compileExclusions(config);
 	const seenCursors = new Set<string>();
 	let after: string | undefined;
 	for (let pageNumber = 1; pageNumber <= config.maxAlertPages; pageNumber++) {
-		const remaining = maxItems === undefined ? undefined : maxItems - alerts.length;
-		if (remaining !== undefined && remaining <= 0) return alerts.slice(0, maxItems);
-		const first =
-			remaining === undefined ? config.alertPageSize : Math.min(config.alertPageSize, remaining);
-		const selection = advancedFilterSelection(
-			buildFilters(config, fieldId, start, end),
-			config.advancedFilters,
+		const remaining = maxItems - alerts.length;
+		if (remaining <= 0) return alerts.slice(0, maxItems);
+		const page = await requestAlertPage(
+			request,
+			config,
+			fieldId,
+			start,
+			end,
+			Math.min(config.alertPageSize, remaining),
+			after,
+			'DESC',
+			[],
 		);
-		debugLog(config, 'Requesting Unified Alerts page', {
-			fieldId,
-			pageNumber,
-			first,
-			hasCursor: after !== undefined,
-			scopeType: config.scopeType,
-			scopeCount: config.scopeIds.length,
-			filterMode: selection.orFilter ? 'orFilter' : 'filters',
-		});
-		const response = await request({
-			method: 'POST',
-			url: `${config.baseUrl}/web/api/v2.1/unifiedalerts/graphql`,
-			timeout: config.requestTimeoutMs,
-			body: {
-				query: ALERTS_QUERY.replace(
-					'        id',
-					`        ${alertFieldSelection(config.additionalAlertFields)}\n        id`,
-				),
-				variables: {
-					first,
-					after: after ?? null,
-					scope: { scopeType: config.scopeType, scopeIds: config.scopeIds },
-					filters: selection.filters,
-					orFilter: selection.orFilter,
-					sortBy: fieldId,
-				},
-			},
-			json: true,
-		});
-		const connection = graphQlData(response).alerts;
-		if (
-			!connection?.pageInfo ||
-			typeof connection.pageInfo.hasNextPage !== 'boolean' ||
-			!Array.isArray(connection.edges)
-		) {
-			throw new Error(
-				`SentinelOne returned an incomplete ${fieldId} alert page. Try again after the service is available.`,
-			);
-		}
-		debugLog(config, 'Received Unified Alerts page', {
-			fieldId,
-			pageNumber,
-			itemCount: connection.edges?.length ?? 0,
-			hasNextPage: connection.pageInfo.hasNextPage,
-		});
-		for (const edge of connection.edges ?? []) {
-			const alert = edge?.node;
-			if (!alert?.id) {
-				throw new Error(`SentinelOne returned a ${fieldId} alert without an ID.`);
-			}
-			if (typeof alert[fieldId] !== 'string' || Number.isNaN(Date.parse(String(alert[fieldId])))) {
-				throw new Error(
-					`SentinelOne returned alert ${alert.id} without a usable ${fieldId} timestamp; state was not advanced.`,
-				);
-			}
-			const scope = asRecord(asRecord(alert.realTime)?.scope);
+		for (const alert of page.kept) {
 			if (
-				matchesExclusion(exclusions.account, asRecord(scope?.account)?.name) ||
-				matchesExclusion(exclusions.site, asRecord(scope?.site)?.name) ||
-				matchesExclusion(exclusions.group, asRecord(scope?.group)?.name)
-			)
-				continue;
-			if (
-				maxItems !== undefined &&
 				fieldId === 'updatedAt' &&
 				config.events.length === 1 &&
 				config.events[0] === 'alert.updated' &&
@@ -470,14 +506,10 @@ async function fetchAlerts(
 			if (fieldId === 'updatedAt' && excludeUpdatedIds?.has(alert.id)) continue;
 			alerts.push(alert);
 		}
-		if (maxItems !== undefined && alerts.length >= maxItems) {
+		if (alerts.length >= maxItems) {
 			return alerts.slice(0, maxItems);
 		}
-		const nextCursor = requireRelayCursor(
-			connection.pageInfo,
-			seenCursors,
-			`${fieldId} alert query`,
-		);
+		const nextCursor = requireRelayCursor(page.pageInfo, seenCursors, `${fieldId} alert query`);
 		if (!nextCursor) return alerts;
 		after = nextCursor;
 	}
@@ -490,7 +522,7 @@ async function fetchAlerts(
 				splitDepth,
 				rangeWidthMs: rangeWidth,
 			});
-			const newer = await fetchAlerts(
+			const newer = await fetchAlertsNewestFirst(
 				request,
 				config,
 				fieldId,
@@ -500,14 +532,14 @@ async function fetchAlerts(
 				splitDepth + 1,
 				excludeUpdatedIds,
 			);
-			if (maxItems !== undefined && newer.length >= maxItems) return newer.slice(0, maxItems);
-			const older = await fetchAlerts(
+			if (newer.length >= maxItems) return newer.slice(0, maxItems);
+			const older = await fetchAlertsNewestFirst(
 				request,
 				config,
 				fieldId,
 				start,
 				midpoint,
-				maxItems === undefined ? undefined : maxItems - newer.length,
+				maxItems - newer.length,
 				splitDepth + 1,
 				excludeUpdatedIds,
 			);
@@ -519,41 +551,36 @@ async function fetchAlerts(
 	);
 }
 
-async function fetchAlertStreams(
+/** Scope batches in a stable order, so a batch keeps its cursor while its membership is unchanged. */
+function scopeBatches(config: TriggerConfig): string[][] {
+	const sorted = [...config.scopeIds].sort();
+	const chunks: string[][] = [];
+	for (let index = 0; index < sorted.length; index += MAX_SCOPE_IDS_PER_QUERY) {
+		chunks.push(sorted.slice(index, index + MAX_SCOPE_IDS_PER_QUERY));
+	}
+	return chunks;
+}
+
+async function fetchManualAlertStreams(
 	request: AuthenticatedRequest,
 	config: TriggerConfig,
-	createdNeeded: boolean,
 	updatedNeeded: boolean,
-	createdStart: number,
-	updatedStart: number,
 	end: number,
-	maxItems?: number,
+	maxItems: number,
 ): Promise<{ createdAlerts: Alert[]; updatedAlerts: Alert[] }> {
-	const chunks: string[][] = [];
-	for (let index = 0; index < config.scopeIds.length; index += MAX_SCOPE_IDS_PER_QUERY) {
-		chunks.push(config.scopeIds.slice(index, index + MAX_SCOPE_IDS_PER_QUERY));
-	}
-	debugLog(config, 'Starting scoped alert query batches', {
-		scopeCount: config.scopeIds.length,
-		batchCount: chunks.length,
-		batchSize: MAX_SCOPE_IDS_PER_QUERY,
-	});
-	if (
-		maxItems !== undefined &&
-		config.events.includes('alert.new') &&
-		config.events.includes('alert.updated')
-	) {
+	const chunks = scopeBatches(config);
+	if (config.events.includes('alert.new') && config.events.includes('alert.updated')) {
 		// Classify preview creations first so they do not consume the update result limit.
 		const createdAlerts = (
 			await mapWithConcurrency(
 				chunks,
 				Math.min(config.concurrentRequests, 5),
 				async (scopeIds) =>
-					await fetchAlerts(
+					await fetchAlertsNewestFirst(
 						request,
 						{ ...config, scopeIds },
 						'createdAt',
-						createdStart,
+						0,
 						end,
 						maxItems,
 					),
@@ -565,11 +592,11 @@ async function fetchAlertStreams(
 				chunks,
 				Math.min(config.concurrentRequests, 5),
 				async (scopeIds) =>
-					await fetchAlerts(
+					await fetchAlertsNewestFirst(
 						request,
 						{ ...config, scopeIds },
 						'updatedAt',
-						updatedStart,
+						0,
 						end,
 						maxItems,
 						0,
@@ -585,11 +612,9 @@ async function fetchAlertStreams(
 		async (scopeIds) => {
 			const scopedConfig = { ...config, scopeIds };
 			const [createdAlerts, updatedAlerts] = await Promise.all([
-				createdNeeded
-					? fetchAlerts(request, scopedConfig, 'createdAt', createdStart, end, maxItems)
-					: Promise.resolve<Alert[]>([]),
+				fetchAlertsNewestFirst(request, scopedConfig, 'createdAt', 0, end, maxItems),
 				updatedNeeded
-					? fetchAlerts(request, scopedConfig, 'updatedAt', updatedStart, end, maxItems)
+					? fetchAlertsNewestFirst(request, scopedConfig, 'updatedAt', 0, end, maxItems)
 					: Promise.resolve<Alert[]>([]),
 			]);
 			return { createdAlerts, updatedAlerts };
@@ -599,6 +624,128 @@ async function fetchAlertStreams(
 		createdAlerts: batchResults.flatMap((result) => result.createdAlerts),
 		updatedAlerts: batchResults.flatMap((result) => result.updatedAlerts),
 	};
+}
+
+/** One oldest-first read of a stream for one scope batch. */
+interface UnitRead {
+	/** Alerts that pass the name exclusions. */
+	alerts: Alert[];
+	/** Every alert fetched, for the tie set at the boundary. */
+	fetched: Alert[];
+	/** The range end when complete, otherwise the last timestamp fetched (below the range start when nothing was). */
+	throughMs: number;
+	complete: boolean;
+	stopped?: PollBudgetError;
+}
+
+/**
+ * Reads a scheduled range and hands over every page read. Under a poll budget it reads oldest first and pages until the range ends or the budget stops it, and a descending timestamp is a hard error.
+ * Without a budget it requests, pages and splits dense ranges exactly as hosts without a budget always did.
+ */
+async function readAlertsOldestFirst(
+	request: AuthenticatedRequest,
+	config: TriggerConfig,
+	fieldId: 'createdAt' | 'updatedAt',
+	start: number,
+	end: number,
+	excludeIds: string[],
+	splitDepth = 0,
+): Promise<UnitRead> {
+	const budgeted = config.pollDeadlineMs !== undefined;
+	const alerts: Alert[] = [];
+	const fetched: Alert[] = [];
+	const seenCursors = new Set<string>();
+	let after: string | undefined;
+	let previousMs: number | undefined;
+	const finish = (complete: boolean, stopped?: PollBudgetError): UnitRead => {
+		const throughMs = complete
+			? end
+			: fetched.length
+				? timeValue(fetched[fetched.length - 1][fieldId])
+				: start - 1;
+		debugLog(config, 'Read Unified Alerts range', {
+			fieldId,
+			start,
+			end,
+			throughMs,
+			fetchedCount: fetched.length,
+			complete,
+			scopeCount: config.scopeIds.length,
+			excludedIdCount: excludeIds.length,
+		});
+		return { alerts, fetched, throughMs, complete, stopped };
+	};
+	for (let pageNumber = 1; budgeted || pageNumber <= config.maxAlertPages; pageNumber++) {
+		let page: AlertPageRead;
+		try {
+			page = await requestAlertPage(
+				request,
+				config,
+				fieldId,
+				start,
+				end,
+				config.alertPageSize,
+				after,
+				budgeted ? 'ASC' : 'DESC',
+				excludeIds,
+			);
+		} catch (error) {
+			if (error instanceof PollBudgetError) return finish(false, error);
+			// The trigger boundary wraps these failures with its node context.
+			// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+			throw error;
+		}
+		const keptIds = new Set(page.kept.map((alert) => alert.id));
+		for (const alert of page.nodes) {
+			const ms = timeValue(alert[fieldId]);
+			if (ms < start || ms > end) continue;
+			if (budgeted && previousMs !== undefined && ms < previousMs)
+				throw new Error(
+					`SentinelOne returned ${fieldId} alerts out of ascending order at ${new Date(ms).toISOString()}; state was not advanced.`,
+				);
+			previousMs = ms;
+			fetched.push(alert);
+			if (keptIds.has(alert.id)) alerts.push(alert);
+		}
+		const nextCursor = requireRelayCursor(page.pageInfo, seenCursors, `${fieldId} alert query`);
+		if (!nextCursor) return finish(true);
+		after = nextCursor;
+	}
+	const rangeWidth = end - start;
+	if (splitDepth < 48 && rangeWidth >= 1) {
+		const midpoint = Math.floor(start + rangeWidth / 2);
+		if (midpoint >= start && midpoint < end) {
+			const halves = [
+				await readAlertsOldestFirst(
+					request,
+					config,
+					fieldId,
+					midpoint + 1,
+					end,
+					excludeIds,
+					splitDepth + 1,
+				),
+				await readAlertsOldestFirst(
+					request,
+					config,
+					fieldId,
+					start,
+					midpoint,
+					excludeIds,
+					splitDepth + 1,
+				),
+			];
+			return {
+				alerts: halves.flatMap((half) => half.alerts),
+				fetched: halves.flatMap((half) => half.fetched),
+				throughMs: end,
+				complete: true,
+			};
+		}
+	}
+	throw new Error(
+		`The ${fieldId} alert query exceeded the configured page limit inside an indivisible time range. Narrow the scope or filters; state was not advanced.`,
+	);
 }
 
 function timeValue(value: unknown): number {
@@ -678,63 +825,6 @@ function alertOutput(
 	};
 }
 
-async function enrichOcsfItems(
-	request: AuthenticatedRequest,
-	config: TriggerConfig,
-	items: IDataObject[],
-): Promise<IDataObject[]> {
-	if (!config.includeOcsf || items.length === 0) return items;
-	const exclusions = compileExclusions(config);
-	const alerts = new Map<string, { id: string; scopeId: string }>();
-	for (const item of items) {
-		if (item.eventType === 'alert.activity') continue;
-		const id = config.simplifyOutput ? item.alertId : asRecord(item.alert)?.id;
-		const scopeId = asRecord(item.scope)?.id;
-		if (typeof id !== 'string' || typeof scopeId !== 'string' || !scopeId)
-			throw new Error(
-				'An alert is missing its actual scope ID; cannot safely retrieve OCSF detail. State was not advanced.',
-			);
-		alerts.set(id, { id, scopeId });
-	}
-	const details = new Map(
-		await mapWithConcurrency(
-			[...alerts.values()],
-			Math.min(config.concurrentRequests, 5),
-			async ({ id, scopeId }): Promise<[string, IDataObject | null]> => {
-				const detail = await fetchOcsfDetail(
-					request,
-					config.baseUrl,
-					id,
-					config.scopeType,
-					[scopeId],
-					config.requestTimeoutMs,
-				);
-				const scope = alertScopeContext(config, detail as Alert);
-				if (scope.id === null)
-					throw new Error(
-						'SentinelOne returned OCSF detail without its scope ID; state was not advanced.',
-					);
-				if (
-					scope.id !== scopeId ||
-					matchesExclusion(exclusions.account, asRecord(scope.account)?.name) ||
-					matchesExclusion(exclusions.site, asRecord(scope.site)?.name) ||
-					matchesExclusion(exclusions.group, asRecord(scope.group)?.name)
-				)
-					return [id, null];
-				return [id, detail];
-			},
-		),
-	);
-	return items.flatMap((item) => {
-		if (item.eventType === 'alert.activity') return [item];
-		const id = String(config.simplifyOutput ? item.alertId : asRecord(item.alert)?.id);
-		const detail = details.get(id);
-		return detail
-			? [{ ...item, ocsf: detail.ocsf ?? null, ocsfAlertUpdatedAt: detail.updatedAt ?? null }]
-			: [];
-	});
-}
-
 function unionById(alerts: Alert[]): Alert[] {
 	const byId = new Map<string, Alert>();
 	for (const alert of alerts) {
@@ -751,6 +841,187 @@ function sortAlertsBy(alerts: Alert[], fieldId: 'createdAt' | 'updatedAt'): Aler
 		if (difference !== 0) return difference;
 		return left.id.localeCompare(right.id);
 	});
+}
+
+/** One fetched alert's place in a poll: what it records and, when emitted, its output item. */
+interface AlertRecord {
+	fieldId: 'createdAt' | 'updatedAt';
+	alertId: string;
+	timeMs: number;
+	seenId?: string;
+	version?: string;
+	item?: IDataObject;
+}
+
+function classifyAlerts(
+	config: TriggerConfig,
+	mode: PollMode,
+	previousAlertIds: ReadonlySet<string>,
+	previousVersions: ReadonlySet<string>,
+	createdAlerts: Alert[],
+	updatedAlerts: Alert[],
+	activationMs: number,
+): AlertRecord[] {
+	const needsNew = config.events.includes('alert.new');
+	const needsUpdated = config.events.includes('alert.updated');
+	const records: AlertRecord[] = [];
+	const emittedAsNew = new Set<string>();
+	const latestAlertById = new Map(
+		unionById([...createdAlerts, ...updatedAlerts]).map((alert) => [alert.id, alert]),
+	);
+	for (const alert of sortAlertsBy(unionById(createdAlerts), 'createdAt')) {
+		const record: AlertRecord = {
+			fieldId: 'createdAt',
+			alertId: alert.id,
+			timeMs: timeValue(alert.createdAt),
+			seenId: seenEntry(alert.id, String(alert.createdAt)),
+		};
+		// Alerts created before activation are recorded, never replayed as new.
+		if (needsNew && record.timeMs >= activationMs && !previousAlertIds.has(alert.id)) {
+			const emitted = latestAlertById.get(alert.id) ?? alert;
+			record.item = alertOutput(config, 'alert.new', emitted);
+			emittedAsNew.add(alert.id);
+			// The emitted state is the delivered version, so a later poll does not repeat it as an update.
+			if (needsUpdated && emitted.updatedAt)
+				record.version = `${emitted.id}\u0000${emitted.updatedAt}`;
+		}
+		records.push(record);
+	}
+	if (needsUpdated) {
+		for (const alert of sortAlertsBy(unionById(updatedAlerts), 'updatedAt')) {
+			if (!alert.updatedAt) continue;
+			const version = `${alert.id}\u0000${alert.updatedAt}`;
+			const record: AlertRecord = {
+				fieldId: 'updatedAt',
+				alertId: alert.id,
+				timeMs: timeValue(alert.updatedAt),
+				version,
+			};
+			// Only a revision counts as an update, and an alert already emitted as new in this poll is not emitted twice.
+			const isRevision = timeValue(alert.updatedAt) > timeValue(alert.createdAt);
+			if (
+				record.timeMs >= activationMs &&
+				isRevision &&
+				!emittedAsNew.has(alert.id) &&
+				!previousVersions.has(version)
+			) {
+				record.item = alertOutput(config, 'alert.updated', alert);
+			}
+			records.push(record);
+		}
+	}
+	return records.sort((left, right) => {
+		const difference = left.timeMs - right.timeMs;
+		if (difference !== 0) return difference;
+		return stableStringify(left.item ?? left.alertId).localeCompare(
+			stableStringify(right.item ?? right.alertId),
+		);
+	});
+}
+
+function readCursor(value: unknown, key: string): AlertCursor | undefined {
+	if (value === undefined) return undefined;
+	const cursor = asRecord(value);
+	if (
+		!cursor ||
+		typeof cursor.throughMs !== 'number' ||
+		!Number.isFinite(cursor.throughMs) ||
+		!Array.isArray(cursor.ids) ||
+		cursor.ids.some((id) => typeof id !== 'string') ||
+		(cursor.resumeMs !== undefined && typeof cursor.resumeMs !== 'number')
+	)
+		throw new Error(`The saved alert cursor ${key} is invalid; state was not advanced.`);
+	return {
+		throughMs: cursor.throughMs,
+		ids: cursor.ids as string[],
+		...(typeof cursor.resumeMs === 'number' ? { resumeMs: cursor.resumeMs } : {}),
+	};
+}
+
+/** Keeps the entries still inside a replay window, oldest first; entries with no known time retire first when the limit is reached, and a window that needs more than the limit fails visibly. */
+function retainSeen(
+	previous: string[],
+	current: string[],
+	timeOf: (entry: string) => number | undefined,
+	retireBeforeMs: number,
+	limit: number,
+	label: string,
+): string[] {
+	const ordered = new Map<string, true>();
+	for (const entry of [...previous, ...current]) {
+		ordered.delete(entry);
+		ordered.set(entry, true);
+	}
+	const entries = [...ordered.keys()].filter((entry) => {
+		const time = timeOf(entry);
+		return time === undefined || time >= retireBeforeMs;
+	});
+	const timeless = entries.filter((entry) => timeOf(entry) === undefined);
+	const excess = entries.length - limit;
+	if (excess > timeless.length)
+		throw new Error(
+			`The overlap window holds ${entries.length - timeless.length} ${label}, which exceeds the safe state limit of ${limit}. Narrow the scope or filters; state was not advanced.`,
+		);
+	if (excess <= 0) return entries;
+	const retire = new Set(timeless.slice(0, excess));
+	return entries.filter((entry) => !retire.has(entry));
+}
+
+interface Unit {
+	key: string;
+	fieldId: 'createdAt' | 'updatedAt';
+	scopeIds: string[];
+	previous?: AlertCursor;
+	start: number;
+	read?: UnitRead;
+	next?: AlertCursor;
+}
+
+/** Reads a unit from its resume point or overlap start. The tie set is excluded only up to the cursor's own timestamp (an excluded alert cannot appear earlier in its stream), so a delivered alert revised later is read again through its new timestamp. */
+async function readUnit(
+	request: AuthenticatedRequest,
+	config: TriggerConfig,
+	unit: Unit,
+	end: number,
+): Promise<UnitRead> {
+	const tie = unit.previous;
+	const segments: Array<[number, number, string[]]> =
+		tie && tie.ids.length > 0 && tie.throughMs >= unit.start && tie.throughMs < end
+			? [
+					[unit.start, tie.throughMs, tie.ids],
+					[tie.throughMs + 1, end, []],
+				]
+			: [[unit.start, end, tie?.ids ?? []]];
+	const total: UnitRead = { alerts: [], fetched: [], throughMs: unit.start - 1, complete: true };
+	for (const [start, stop, excludeIds] of segments) {
+		const read = await readAlertsOldestFirst(
+			request,
+			{ ...config, scopeIds: unit.scopeIds },
+			unit.fieldId,
+			start,
+			stop,
+			excludeIds,
+		);
+		total.alerts.push(...read.alerts);
+		total.fetched.push(...read.fetched);
+		if (read.fetched.length > 0 || read.complete) total.throughMs = read.throughMs;
+		if (!read.complete) return { ...total, complete: false, stopped: read.stopped };
+	}
+	return total;
+}
+
+/** Seen entries carry their timestamp after a NUL; entries saved before that have none. */
+function seenEntry(id: string, time: string): string {
+	return `${id} ${time}`;
+}
+function seenId(entry: string): string {
+	const separator = entry.indexOf(' ');
+	return separator < 0 ? entry : entry.slice(0, separator);
+}
+function seenTime(entry: string): number | undefined {
+	const separator = entry.indexOf(' ');
+	const time = separator < 0 ? NaN : Date.parse(entry.slice(separator + 1));
+	return Number.isNaN(time) ? undefined : time;
 }
 
 export async function pollSentinelOne(
@@ -772,28 +1043,14 @@ export async function pollSentinelOne(
 	const fingerprint = fingerprintConfig(config);
 	const stateMatches =
 		previousState.configFingerprint === fingerprint && previousState.initialized === true;
-	const isBaseline = mode === 'scheduled' && !stateMatches;
-	const checkpointMs =
-		stateMatches && typeof previousState.checkpointMs === 'number'
-			? previousState.checkpointMs
-			: undefined;
-	const defaultOverlapStart = Math.max(0, pollStartMs - config.overlapSeconds * 1000);
-	const overlapStart =
-		checkpointMs === undefined
-			? defaultOverlapStart
-			: Math.max(0, checkpointMs - config.overlapSeconds * 1000);
-	const needsNew = config.events.includes('alert.new');
 	const needsUpdated = config.events.includes('alert.updated');
-
-	const alertEventStart = mode === 'manual' ? 0 : overlapStart;
-	const manualFetchLimit = mode === 'manual' ? MANUAL_RESULT_LIMIT : undefined;
-	const createdQueryStart = alertEventStart;
-	const updatedQueryStart = alertEventStart;
-	const queryCreated = needsNew || needsUpdated;
-	const queryUpdated = needsUpdated;
+	const streams: Array<'createdAt' | 'updatedAt'> = needsUpdated
+		? ['createdAt', 'updatedAt']
+		: ['createdAt'];
+	const overlapMs = config.overlapSeconds * 1000;
 	debugLog(config, 'Starting SentinelOne poll', {
 		mode,
-		isBaseline,
+		isBaseline: mode === 'scheduled' && !stateMatches,
 		scopeType: config.scopeType,
 		scopeCount: config.scopeIds.length,
 		events: config.events,
@@ -803,93 +1060,193 @@ export async function pollSentinelOne(
 		overlapSeconds: config.overlapSeconds,
 	});
 
-	const { createdAlerts, updatedAlerts } = await fetchAlertStreams(
-		request,
-		config,
-		queryCreated,
-		queryUpdated,
-		createdQueryStart,
-		updatedQueryStart,
-		pollStartMs,
-		manualFetchLimit,
-	);
-	debugLog(config, 'Completed alert candidate queries', {
-		createdCandidateCount: createdAlerts.length,
-		updatedCandidateCount: updatedAlerts.length,
-	});
-
-	const useDurableDedupe = mode === 'scheduled' && stateMatches;
-	const previousAlertIds = new Set(useDurableDedupe ? (previousState.seenAlertIds ?? []) : []);
-	const previousVersions = new Set(useDurableDedupe ? (previousState.seenAlertVersions ?? []) : []);
-	const currentAlertIds: string[] = [];
-	const currentVersions: string[] = [];
-	const items: IDataObject[] = [];
-	const newInThisPoll = new Set<string>();
-	const latestAlertById = new Map(
-		unionById([...createdAlerts, ...updatedAlerts]).map((alert) => [alert.id, alert]),
-	);
-	const createdEventAlerts = sortAlertsBy(
-		unionById(createdAlerts).filter(
-			(alert) =>
-				timeValue(alert.createdAt) >= alertEventStart && timeValue(alert.createdAt) <= pollStartMs,
-		),
-		'createdAt',
-	);
-	const updatedEventAlerts = sortAlertsBy(
-		unionById(updatedAlerts).filter(
-			(alert) =>
-				timeValue(alert.updatedAt) >= alertEventStart && timeValue(alert.updatedAt) <= pollStartMs,
-		),
-		'updatedAt',
-	);
-
-	if (needsNew || needsUpdated) {
-		for (const alert of createdEventAlerts) {
-			currentAlertIds.push(alert.id);
-			const isNewForClassification =
-				mode === 'manual'
-					? needsNew || timeValue(alert.updatedAt) <= timeValue(alert.createdAt)
-					: !previousAlertIds.has(alert.id);
-			if (isNewForClassification) {
-				newInThisPoll.add(alert.id);
-			}
-			if (needsNew && !isBaseline && !previousAlertIds.has(alert.id)) {
-				items.push(alertOutput(config, 'alert.new', latestAlertById.get(alert.id) ?? alert));
-			}
-		}
-	}
-
-	if (needsUpdated) {
-		for (const alert of updatedEventAlerts) {
-			if (!alert.updatedAt) continue;
-			const version = `${alert.id}\u0000${alert.updatedAt}`;
-			currentVersions.push(version);
-			if (!isBaseline && !newInThisPoll.has(alert.id) && !previousVersions.has(version)) {
-				items.push(alertOutput(config, 'alert.updated', alert));
-			}
-		}
-	}
-
 	if (mode === 'manual') {
-		const manualItems = await enrichOcsfItems(
+		const { createdAlerts, updatedAlerts } = await fetchManualAlertStreams(
 			request,
 			config,
-			sortOutputs(items).slice(-MANUAL_RESULT_LIMIT),
+			needsUpdated,
+			pollStartMs,
+			MANUAL_RESULT_LIMIT,
 		);
+		debugLog(config, 'Completed alert candidate queries', {
+			createdCandidateCount: createdAlerts.length,
+			updatedCandidateCount: updatedAlerts.length,
+		});
+		const records = classifyAlerts(
+			config,
+			mode,
+			new Set(),
+			new Set(),
+			createdAlerts,
+			updatedAlerts,
+			0,
+		);
+		const manualItems = records
+			.flatMap((record) => (record.item ? [record.item] : []))
+			.slice(-MANUAL_RESULT_LIMIT);
 		debugLog(config, 'Completed manual SentinelOne poll', {
 			outputCount: manualItems.length,
 			outputLimit: MANUAL_RESULT_LIMIT,
 		});
 		return { items: manualItems };
 	}
+
+	// Each stream and scope batch keeps one forward-only cursor: the last timestamp read and the alerts already processed at exactly that time. Every read restarts at the overlap before it, or where the last overlap re-read stopped, and the seen sets deduplicate the re-read.
+	// State saved before the activation watermark existed suppresses nothing.
+	const activationMs = stateMatches ? (previousState.activationMs ?? 0) : pollStartMs;
+	const firstStartMs = stateMatches ? (previousState.activationMs ?? pollStartMs) : pollStartMs;
+	const savedCursors = stateMatches ? (asRecord(previousState.alertCursors) ?? {}) : {};
+	// State saved before per-unit cursors existed carries one checkpoint; it becomes every unit's cursor once.
+	const legacyCheckpoint: AlertCursor | undefined =
+		stateMatches &&
+		previousState.alertCursors === undefined &&
+		typeof previousState.checkpointMs === 'number'
+			? { throughMs: previousState.checkpointMs, ids: [] }
+			: undefined;
+	const units: Unit[] = [];
+	for (const scopeIds of scopeBatches(config)) {
+		for (const fieldId of streams) {
+			const key = `${fieldId}:${simpleHash(scopeIds.join(' '))}`;
+			// A batch whose membership changed takes the slowest saved cursor of its stream, so nothing that cursor had not reached is skipped and it can never save an earlier one.
+			const saved = [
+				...Object.entries(savedCursors)
+					.filter(([savedKey]) => savedKey.startsWith(`${fieldId}:`))
+					.map(([savedKey, value]) => readCursor(value, savedKey)!.throughMs),
+				...(legacyCheckpoint ? [legacyCheckpoint.throughMs] : []),
+			];
+			const previous =
+				readCursor(savedCursors[key], key) ??
+				(saved.length ? { throughMs: Math.min(...saved), ids: [] } : undefined);
+			const start = previous
+				? (previous.resumeMs ?? Math.max(0, previous.throughMs - overlapMs))
+				: Math.max(0, firstStartMs - overlapMs);
+			units.push({ key, fieldId, scopeIds, previous, start });
+		}
+	}
+	// Lagging units read first, so a batch behind the others cannot be starved by those ahead of it.
+	units.sort((left, right) => left.start - right.start);
+	const batchOrder = [...new Set(units.map((unit) => unit.scopeIds))];
+	await mapWithConcurrency(batchOrder, Math.min(config.concurrentRequests, 5), async (scopeIds) => {
+		await Promise.all(
+			units
+				.filter((unit) => unit.scopeIds === scopeIds)
+				.map(async (unit) => {
+					unit.read = await readUnit(request, config, unit, pollStartMs);
+				}),
+		);
+	});
+	const unitOfAlert = new Map<string, Unit>();
+	for (const unit of units) {
+		const read = unit.read!;
+		for (const alert of read.alerts) unitOfAlert.set(`${unit.fieldId}:${alert.id}`, unit);
+		const previous = unit.previous;
+		const idsAt = (time: number) =>
+			read.fetched
+				.filter((alert) => timeValue(alert[unit.fieldId]) === time)
+				.map((alert) => alert.id);
+		// The cursor only moves forward. A read that stopped before reaching it remembers where to resume the overlap re-read; its alerts still count through the seen sets.
+		if (read.complete) unit.next = { throughMs: read.throughMs, ids: idsAt(read.throughMs) };
+		else if (read.fetched.length === 0) unit.next = previous;
+		else if (previous === undefined || read.throughMs > previous.throughMs)
+			unit.next = { throughMs: read.throughMs, ids: idsAt(read.throughMs) };
+		else if (read.throughMs === previous.throughMs)
+			unit.next = {
+				throughMs: previous.throughMs,
+				ids: [...new Set([...previous.ids, ...idsAt(previous.throughMs)])],
+			};
+		else unit.next = { throughMs: previous.throughMs, ids: previous.ids, resumeMs: read.throughMs };
+		if (unit.next && unit.next.ids.length > MAX_TIE_IDS)
+			throw new Error(
+				`More than ${MAX_TIE_IDS} alerts share the ${unit.fieldId} timestamp ${new Date(unit.next.throughMs).toISOString()}. Narrow the scope or filters; state was not advanced.`,
+			);
+	}
+	const createdAlerts = units
+		.filter((unit) => unit.fieldId === 'createdAt')
+		.flatMap((unit) => unit.read!.alerts);
+	const updatedAlerts = units
+		.filter((unit) => unit.fieldId === 'updatedAt')
+		.flatMap((unit) => unit.read!.alerts);
+	debugLog(config, 'Completed alert candidate queries', {
+		createdCandidateCount: createdAlerts.length,
+		updatedCandidateCount: updatedAlerts.length,
+		stoppedUnitCount: units.filter((unit) => unit.read!.stopped).length,
+	});
+
+	const previousSeenIds = stateMatches ? (previousState.seenAlertIds ?? []) : [];
+	const previousSeenVersions = stateMatches ? (previousState.seenAlertVersions ?? []) : [];
+	const previousAlertIds = new Set(previousSeenIds.map(seenId));
+	const previousVersions = new Set(previousSeenVersions);
+	const records = classifyAlerts(
+		config,
+		mode,
+		previousAlertIds,
+		previousVersions,
+		createdAlerts,
+		updatedAlerts,
+		activationMs,
+	);
+	const currentAlertIds = records.flatMap((record) => (record.seenId ? [record.seenId] : []));
+	const currentVersions = records.flatMap((record) => (record.version ? [record.version] : []));
 	assertStateCapacity(currentAlertIds, MAX_SEEN_ALERT_IDS, 'alert IDs');
 	assertStateCapacity(currentVersions, MAX_SEEN_ALERT_VERSIONS, 'alert versions');
-	const outputItems = isBaseline ? [] : await enrichOcsfItems(request, config, sortOutputs(items));
+
+	// Every unit whose read stopped must have moved its cursor or contributed something unseen; otherwise the poll fails, naming the stream and the position it could not get past.
+	const contributed = new Set<Unit>();
+	for (const record of records) {
+		const unseen =
+			(record.seenId !== undefined && !previousAlertIds.has(record.alertId)) ||
+			(record.version !== undefined && !previousVersions.has(record.version));
+		if (unseen) contributed.add(unitOfAlert.get(`${record.fieldId}:${record.alertId}`)!);
+	}
+	for (const unit of units) {
+		const stopped = unit.read!.stopped;
+		if (!stopped || contributed.has(unit)) continue;
+		const { previous, next } = unit;
+		const moved =
+			next !== undefined &&
+			(previous === undefined ||
+				next.throughMs !== previous.throughMs ||
+				next.ids.length !== previous.ids.length ||
+				next.resumeMs !== previous.resumeMs);
+		if (moved) continue;
+		throw new Error(
+			`The ${unit.fieldId} stream could not get past ${new Date(next?.throughMs ?? unit.start).toISOString()} before it had to stop (${stopped.message}) and processed nothing new; state was not advanced.`,
+		);
+	}
+	const outputItems = sortOutputs(records.flatMap((record) => (record.item ? [record.item] : [])));
+	const alertCursors: Record<string, AlertCursor> = {};
+	for (const unit of units) if (unit.next) alertCursors[unit.key] = unit.next;
+	const slowest = (fieldId: 'createdAt' | 'updatedAt') =>
+		Math.min(
+			pollStartMs,
+			...units.filter((unit) => unit.fieldId === fieldId).map((unit) => unit.next!.throughMs),
+		);
+	const checkpointMs = Math.min(slowest('createdAt'), slowest('updatedAt'));
+	// Identities retire once every cursor of their stream has left their overlap; the current poll's entries replace any timeless ones saved for the same alert.
+	const currentIds = new Set(currentAlertIds.map(seenId));
+	const seenAlertIds = retainSeen(
+		previousSeenIds.filter((entry) => !currentIds.has(seenId(entry))),
+		currentAlertIds,
+		seenTime,
+		slowest('createdAt') - overlapMs,
+		MAX_SEEN_ALERT_IDS,
+		'alert IDs',
+	);
+	const seenAlertVersions = retainSeen(
+		previousSeenVersions,
+		currentVersions,
+		seenTime,
+		(needsUpdated ? slowest('updatedAt') : slowest('createdAt')) - overlapMs,
+		MAX_SEEN_ALERT_VERSIONS,
+		'alert versions',
+	);
 	debugLog(config, 'Completed scheduled SentinelOne poll', {
 		outputCount: outputItems.length,
 		checkpointAdvanced: true,
-		seenAlertIdCount: currentAlertIds.length,
-		seenAlertVersionCount: currentVersions.length,
+		checkpointMs,
+		budgetStopped: units.some((unit) => unit.read!.stopped),
+		seenAlertIdCount: seenAlertIds.length,
+		seenAlertVersionCount: seenAlertVersions.length,
 	});
 
 	return {
@@ -897,17 +1254,11 @@ export async function pollSentinelOne(
 		nextState: {
 			configFingerprint: fingerprint,
 			initialized: true,
-			checkpointMs: pollStartMs,
-			seenAlertIds: boundedUnique(
-				stateMatches ? (previousState.seenAlertIds ?? []) : [],
-				currentAlertIds,
-				MAX_SEEN_ALERT_IDS,
-			),
-			seenAlertVersions: boundedUnique(
-				stateMatches ? (previousState.seenAlertVersions ?? []) : [],
-				currentVersions,
-				MAX_SEEN_ALERT_VERSIONS,
-			),
+			checkpointMs,
+			activationMs,
+			alertCursors,
+			seenAlertIds,
+			seenAlertVersions,
 		},
 	};
 }

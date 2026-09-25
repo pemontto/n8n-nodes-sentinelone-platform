@@ -579,6 +579,7 @@ test('Update rejects unknown, duplicate, and clearing advanced fields before mut
 		['duplicate key', {}, '{"status":"NEW","status":"RESOLVED"}', /duplicate key/i],
 		['guided collision', { status: 'NEW' }, '{"status":"RESOLVED"}', /duplicated/i],
 		['ticket clear', {}, '{"ticketId":""}', /cannot be empty or cleared/i],
+		['unselected status', { status: '' }, '{}', /Status cannot be empty or cleared/i],
 	]) {
 		await t.test(name, async () => {
 			let mutationCalls = 0;

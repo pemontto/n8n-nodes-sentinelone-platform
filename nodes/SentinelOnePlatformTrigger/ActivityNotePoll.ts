@@ -16,9 +16,12 @@ import {
 import { compileExclusions, matchesExclusion } from './Exclusions';
 import { matchesActivityConditions } from './ActivityConditions';
 import { responseStatus } from '../shared/transport/retry';
+import { PollBudgetError } from '../shared/transport/request';
 
 // SDL rejects Unix epoch dates; use a verified historical query boundary.
 const PREVIEW_START_MS = Date.UTC(2020, 0, 1);
+/** Poll budget kept back from the feed read for the current alert lookup that follows it. */
+const ALERT_LOOKUP_RESERVE_MS = 10_000;
 
 export const ACTIVITY_STATE_LIMIT = 40_000;
 export const ALERT_QUERY = `query ActivityAlerts($first: Int!, $after: String, $scope: ScopeSelectorInput!, $filters: [FilterInput!]) {
@@ -85,6 +88,9 @@ async function pages(
 				}),
 			);
 		} catch (error) {
+			// The lookup keeps the batches that completed; the poll cuts its window before the first activity still waiting.
+			// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+			if (error instanceof PollBudgetError) throw error;
 			const status = responseStatus(error);
 			throw fail(
 				`current alert lookup failed${status ? ` (HTTP ${status})` : ''}. Check alert read permissions and service availability`,
@@ -138,6 +144,8 @@ interface AlertLookup {
 	alerts: Map<string, IDataObject>;
 	unresolvedIds: Set<string>;
 	ineligibleIds: Set<string>;
+	/** Alert IDs whose lookup the poll budget cut short; nothing is known about them yet. */
+	pendingIds: Set<string>;
 }
 
 async function currentAlerts(
@@ -149,6 +157,7 @@ async function currentAlerts(
 	const accounts =
 		config.activityAccountIds ?? (config.scopeType === 'ACCOUNT' ? config.scopeIds : []);
 	if (!accounts.length) throw fail('requires resolved account IDs');
+	const pendingIds = new Set<string>();
 	async function lookup(
 		wanted: string[],
 		scopeType: 'ACCOUNT' | 'SITE' | 'GROUP',
@@ -172,14 +181,23 @@ async function currentAlerts(
 						filters.push({ fieldId: 'status', stringIn: { values: config.statuses } });
 					filters.push({ fieldId: 'alertName', match: { values: [config.alertName.trim()] } });
 				}
-				const found = await pages(
-					request,
-					config,
-					ALERT_QUERY,
-					{ first: 200, filters, scope: { scopeType, scopeIds: scopes } },
-					'alerts',
-					config.maxAlertPages,
-				);
+				let found: IDataObject[];
+				try {
+					found = await pages(
+						request,
+						config,
+						ALERT_QUERY,
+						{ first: 200, filters, scope: { scopeType, scopeIds: scopes } },
+						'alerts',
+						config.maxAlertPages,
+					);
+				} catch (error) {
+					// The trigger boundary wraps lookup failures with its node context.
+					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+					if (!(error instanceof PollBudgetError)) throw error;
+					for (const id of chunk) pendingIds.add(id);
+					return [];
+				}
 				for (const alert of found) {
 					if (!stringId(alert.id) || !chunk.includes(alert.id))
 						throw fail('received an unrequested alert');
@@ -194,7 +212,7 @@ async function currentAlerts(
 	}
 	const found = await lookup(ids, 'ACCOUNT', accounts, false);
 	const alerts = new Map<string, IDataObject>();
-	const unresolvedIds = new Set(ids);
+	const unresolvedIds = new Set(ids.filter((id) => !pendingIds.has(id)));
 	const ineligibleIds = new Set<string>();
 	const eligible = (alert: IDataObject) => {
 		const scope = scopeOf(config, alert);
@@ -224,6 +242,10 @@ async function currentAlerts(
 			]),
 		);
 		for (const id of alerts.keys()) {
+			if (pendingIds.has(id)) {
+				alerts.delete(id);
+				continue;
+			}
 			const alert = filtered.get(id);
 			if (alert && !stringId(scopeOf(config, alert).id)) {
 				throw fail('could not resolve current alert scope from a returned alert');
@@ -235,7 +257,7 @@ async function currentAlerts(
 			}
 		}
 	}
-	return { alerts, unresolvedIds, ineligibleIds };
+	return { alerts, unresolvedIds, ineligibleIds, pendingIds };
 }
 
 function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEvent): IDataObject {
@@ -323,7 +345,6 @@ export async function pollAlertActivities(
 			!Number.isFinite(activation) ||
 			typeof checkpoint !== 'number' ||
 			!Number.isFinite(checkpoint) ||
-			activation > checkpoint ||
 			checkpoint > pollStartMs)
 	)
 		throw fail('has an invalid activation checkpoint');
@@ -346,6 +367,8 @@ export async function pollAlertActivities(
 				const lookup = await currentAlerts(request, config, [
 					...new Set(candidates.map((event) => event.alertId)),
 				]);
+				if (lookup.pendingIds.size)
+					throw fail('ran out of the n8n poll time budget during the current alert lookup');
 				dropped += expiredMissingActivities(config, candidates, lookup, pollStartMs);
 				const eligible = candidates.filter((event) => lookup.alerts.has(event.alertId));
 				eligible.sort((a, b) =>
@@ -378,39 +401,40 @@ export async function pollAlertActivities(
 		if (previous.size > ACTIVITY_STATE_LIMIT) throw fail('exceeded the activity state capacity');
 	}
 	const baseline = mode === 'scheduled' && !matches;
-	const result = baseline
-		? {
-				events: await readActivityFeed(
-					request,
-					config.baseUrl,
-					Math.max(0, Math.floor(start)),
-					pollStartMs,
-					accountIds,
-					timing,
-					undefined,
-					config.includeRawActivity,
-					config.activityTypeIds,
-				),
-				completedThroughMs: pollStartMs,
-			}
-		: await readActivityFeedPrefix(request, {
-				baseUrl: config.baseUrl,
-				startMs: Math.max(0, Math.floor(start)),
-				endMs: pollStartMs,
-				accountIds,
-				timing,
-				checkpointMs: Number(checkpoint),
-				activityTypeIds: config.activityTypeIds,
-			});
-	const activities = result.events;
-	const end = result.completedThroughMs;
-	if (!baseline && end <= Number(checkpoint))
+	// The feed stops early enough to leave the lookup its reserve; the transport enforces the budget itself.
+	const feedTiming: ActivityFeedTiming | undefined =
+		config.pollDeadlineMs === undefined
+			? timing
+			: {
+					...timing,
+					deadlineMs: Math.max(
+						1,
+						Math.min(
+							timing?.deadlineMs ?? 300_000,
+							Math.floor(config.pollDeadlineMs - ALERT_LOOKUP_RESERVE_MS - Date.now()),
+						),
+					),
+				};
+	// A baseline reads through the same resumable prefix, so a budget stop saves its progress and the activation time instead of restarting activation.
+	const startMs = Math.max(0, Math.floor(start));
+	const result = await readActivityFeedPrefix(request, {
+		baseUrl: config.baseUrl,
+		startMs,
+		endMs: pollStartMs,
+		accountIds,
+		timing: feedTiming,
+		checkpointMs: baseline ? startMs : Number(checkpoint),
+		activityTypeIds: config.activityTypeIds,
+	});
+	let activities = result.events;
+	let end = result.completedThroughMs;
+	if (end <= (baseline ? startMs : Number(checkpoint)))
 		throw fail('did not complete a forward checkpoint window within the query budget');
 	if (activities.length > ACTIVITY_STATE_LIMIT) throw fail('exceeded the activity state capacity');
 	let items: IDataObject[] = [];
 	let dropped = 0;
 	if (!baseline) {
-		const candidates = activities.filter(
+		let candidates = activities.filter(
 			(event) =>
 				!previous.has(event.activityId) &&
 				selected(event) &&
@@ -419,6 +443,19 @@ export async function pollAlertActivities(
 		const lookup = await currentAlerts(request, config, [
 			...new Set(candidates.map((event) => event.alertId)),
 		]);
+		// A lookup the poll budget cut short ends this poll's window at the first activity still waiting on it; every earlier activity, including ones in the same millisecond, is delivered and retained, so the next poll starts past them.
+		const waiting = candidates.find((event) => lookup.pendingIds.has(event.alertId));
+		if (waiting) {
+			end = Number(BigInt(waiting.timestampNs) / BigInt(1000000));
+			const before = (event: ActivityFeedEvent) =>
+				BigInt(event.timestampNs) < BigInt(waiting.timestampNs);
+			activities = activities.filter(before);
+			candidates = candidates.filter(before);
+			if (end <= Number(checkpoint) && candidates.every((event) => previous.has(event.activityId)))
+				throw fail(
+					'ran out of the n8n poll time budget before the current alert lookup completed a forward window',
+				);
+		}
 		dropped = expiredMissingActivities(config, candidates, lookup, pollStartMs);
 		items = candidates.flatMap((event) => {
 			const alert = lookup.alerts.get(event.alertId);

@@ -44,6 +44,8 @@ function safeFailureOutput(error: NodeApiError | NodeOperationError): IDataObjec
 	return output;
 }
 
+// Tool exposure is deferred until the alert update mutation has been reviewed for agent use; the type has no false value, so the property is omitted.
+// eslint-disable-next-line @n8n/community-nodes/node-usable-as-tool
 export class SentinelOnePlatform implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'SentinelOne Platform',
@@ -69,7 +71,6 @@ export class SentinelOnePlatform implements INodeType {
 			},
 		],
 		properties: sentinelOneProperties,
-		usableAsTool: true,
 	};
 
 	methods = {

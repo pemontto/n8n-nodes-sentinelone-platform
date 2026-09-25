@@ -161,6 +161,48 @@ test('nested scope option loaders use the visible selected parents', async () =>
 	assert.equal(calls[1].qs.siteIds, 'new-site');
 });
 
+test('nested scope loaders wait for the parent selection before listing children', async () => {
+	const loaderContext = (parameters, request) => {
+		const context = fixture(parameters, request);
+		context.getNodeParameter = (name, fallback) => context.getNode().parameters[name] ?? fallback;
+		return context;
+	};
+	const empty = loaderContext({ options: { scope: { selection: {} } } }, async () => {
+		assert.fail('A missing parent selection must not request scopes');
+	});
+	assert.deepEqual(await loadListScopeOptions(empty, 'SITE'), [
+		{ name: 'Select an Account First', value: '' },
+	]);
+	assert.deepEqual(await loadListScopeOptions(empty, 'GROUP'), [
+		{ name: 'Select a Site First', value: '' },
+	]);
+
+	const calls = [];
+	const selected = loaderContext(
+		{ options: { scope: { selection: { accountIds: ['a'], siteIds: ['s'] } } } },
+		async (request) => {
+			calls.push(request);
+			return request.url.endsWith('/sites') ? { data: { sites: [] } } : { data: [] };
+		},
+	);
+	await loadListScopeOptions(selected, 'SITE');
+	await loadListScopeOptions(selected, 'GROUP');
+	assert.equal(calls[0].qs.accountIds, 'a');
+	assert.equal(calls[0].qs.siteIds, undefined);
+	assert.equal(calls[1].qs.accountIds, 'a');
+	assert.equal(calls[1].qs.siteIds, 's');
+});
+
+test('a selected placeholder never reaches the scope IDs', async () => {
+	const { readManagementScopeIds } = require('../../dist/nodes/shared/Scopes');
+	const context = fixture({
+		options: { scope: { selection: { accountIds: ['a'], siteIds: [''], groupIds: [''] } } },
+	});
+	assert.deepEqual(readManagementScopeIds(context, 'siteIds', 0), []);
+	assert.deepEqual(readManagementScopeIds(context, 'groupIds', 0), []);
+	assert.deepEqual(readManagementScopeIds(fixture({ siteIds: ['', 's'] }), 'siteIds', 0), ['s']);
+});
+
 test('new Get Many scope rejects groups without sites before any request', async () => {
 	let requests = 0;
 	const context = fixture(

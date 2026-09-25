@@ -11,6 +11,7 @@ import {
 	readManagementScopeIds,
 	discoverVisibleScopes,
 	isScopePermissionError,
+	scopeParentPlaceholder,
 	type ScopeDiscoveryFilters,
 	type ScopeType,
 } from '../shared/Scopes';
@@ -45,7 +46,7 @@ import {
 	mitigationActivityStatusOptions,
 } from './ActivityConditions';
 import { debugSetting, logGraphqlRequest, logGraphqlResult } from '../shared/Debug';
-import { requestWithRetry } from '../shared/transport/request';
+import { PollBudgetError, requestWithRetry } from '../shared/transport/request';
 import { responseStatus, isRetryableReadError, retryAfterMs } from '../shared/transport/retry';
 
 const activityFields: INodeProperties[] = [
@@ -196,6 +197,18 @@ const activityFields: INodeProperties[] = [
 
 const activePollKeys = new Set<string>();
 
+/** Declared by n8n 2.38.0 and later; older hosts omit it and keep their existing limits. */
+type PollBudgetFunctions = { getPollBudgetMs?: () => number };
+
+/** Absolute time at which a scheduled poll must stop reading, or undefined when the host sets no budget or the poll is a manual preview. */
+function pollDeadline(context: IPollFunctions): number | undefined {
+	if (context.getMode() === 'manual') return undefined;
+	const { getPollBudgetMs } = context as IPollFunctions & PollBudgetFunctions;
+	if (typeof getPollBudgetMs !== 'function') return undefined;
+	const budgetMs = Number(getPollBudgetMs.call(context));
+	return Number.isFinite(budgetMs) ? Date.now() + Math.max(0, budgetMs) : undefined;
+}
+
 function normalizeBaseUrl(value: unknown): string {
 	return String(value ?? '')
 		.trim()
@@ -221,6 +234,7 @@ function credentialIdentity(context: IPollFunctions): IDataObject {
 function authenticatedRequest(
 	context: IPollFunctions | ILoadOptionsFunctions,
 	debug = false,
+	deadline?: number,
 ): AuthenticatedRequest {
 	return async (options) =>
 		requestWithRetry(
@@ -238,7 +252,7 @@ function authenticatedRequest(
 					const response = await context.helpers.httpRequestWithAuthentication.call(
 						context,
 						'sentinelOnePlatformApi',
-						{ ...options, timeout: timeoutMs },
+						{ ...options, timeout: timeoutMs, sendCredentialsOnCrossOriginRedirect: false },
 					);
 					received = true;
 					if (document)
@@ -262,9 +276,12 @@ function authenticatedRequest(
 				// Scope loading and SDL polling own their bounded retry loops.
 				attempts: options.url.includes('/unifiedalerts/graphql') ? 3 : 1,
 				timeoutMs: options.timeout,
+				deadline,
 			},
 		).then((result) => {
 			if (result.ok) return result.value;
+			// Poll helpers recognise this class to keep a completed prefix; poll() wraps it with node context.
+			if (result.error instanceof PollBudgetError) throw result.error;
 			const error = result.error;
 			const status = responseStatus(error);
 			const message =
@@ -285,12 +302,21 @@ async function scopeOptions(
 	context: IPollFunctions | ILoadOptionsFunctions,
 	scopeType: ScopeType,
 	filters: ScopeDiscoveryFilters = {},
+	deadline?: number,
 ): Promise<INodePropertyOptions[]> {
 	const credentials = await context.getCredentials('sentinelOnePlatformApi');
 	const baseUrl = normalizeBaseUrl(credentials.baseUrl);
 	try {
-		return await loadScopeOptions(authenticatedRequest(context), baseUrl, scopeType, filters);
+		return await loadScopeOptions(
+			authenticatedRequest(context, false, deadline),
+			baseUrl,
+			scopeType,
+			filters,
+		);
 	} catch (error) {
+		// A spent poll budget is not a permission problem; poll() wraps it with node context.
+		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+		if (error instanceof PollBudgetError) throw error;
 		throw new NodeOperationError(
 			context.getNode(),
 			`Unable to load SentinelOne ${scopeType.toLowerCase()} scopes. Check the credential permissions and try again. ${(error as Error).message}`,
@@ -303,8 +329,9 @@ async function validateSelectedScopes(
 	scopeType: ScopeType,
 	selectedIds: string[],
 	filters: ScopeDiscoveryFilters,
+	deadline?: number,
 ): Promise<void> {
-	const options = await scopeOptions(context, scopeType, filters);
+	const options = await scopeOptions(context, scopeType, filters, deadline);
 	const visibleIds = new Set(options.map((option) => String(option.value)));
 	const missingIds = selectedIds.filter((id) => !visibleIds.has(id));
 	if (missingIds.length === 0) return;
@@ -382,9 +409,18 @@ export class SentinelOnePlatformTrigger implements INodeType {
 			{
 				displayName: 'Operation',
 				name: 'operation',
-				type: 'hidden',
+				type: 'options',
+				noDataExpression: true,
 				default: 'occurred',
 				displayOptions: { show: { resource: ['alertActivity'] } },
+				options: [
+					{
+						name: 'Occurred',
+						value: 'occurred',
+						description: 'Emit an alert activity once when it is first found',
+						action: 'Trigger on alert activity',
+					},
+				],
 			},
 			...activityFields,
 			...legacyManagementScopeFields(),
@@ -440,14 +476,6 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						placeholder: 'demo|test',
 						description:
 							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See the README for supported syntax.',
-					},
-					{
-						displayName: 'Include SentinelOne OCSF',
-						name: 'includeOcsf',
-						type: 'boolean',
-						default: false,
-						description:
-							'Whether to add the documented SentinelOne OCSF field subset as an ocsf object. Requires an extra detail request per alert. This is not a complete standard OCSF event.',
 					},
 					{
 						displayName: 'Severity',
@@ -603,12 +631,13 @@ export class SentinelOnePlatformTrigger implements INodeType {
 			},
 			async getSites(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const accountIds = readStringArray(this, 'accountIds');
+				if (accountIds.length === 0) return scopeParentPlaceholder('SITE');
 				return await scopeOptions(this, 'SITE', { accountIds });
 			},
 			async getGroups(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const accountIds = readStringArray(this, 'accountIds');
 				const siteIds = readStringArray(this, 'siteIds');
-				if (siteIds.length === 0) return [];
+				if (siteIds.length === 0) return scopeParentPlaceholder('GROUP');
 				return await scopeOptions(this, 'GROUP', { accountIds, siteIds });
 			},
 		},
@@ -622,10 +651,12 @@ export class SentinelOnePlatformTrigger implements INodeType {
 			return null;
 		}
 		activePollKeys.add(pollKey);
+		const deadline = pollDeadline(this);
 		try {
 			const credentials = await this.getCredentials('sentinelOnePlatformApi');
 			const options = this.getNodeParameter('options', {}) as IDataObject;
 			const nodeDebug = this.getNodeParameter('nodeDebug', false) === true;
+			const request = authenticatedRequest(this, nodeDebug, deadline);
 			const staticData = this.getWorkflowStaticData('node');
 			const previousState = (staticData.sentinelOneTrigger as TriggerState | undefined) ?? {};
 
@@ -636,12 +667,14 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					'operation',
 					resource === 'alertActivity' ? 'occurred' : 'new',
 				) as 'occurred' | 'new' | 'newOrUpdated' | 'updated';
-				// n8n retains the old operation when switching resources to a hidden operation.
+				// n8n retains the operation selected for the other resource when the resource changes.
 				const operation =
 					resource === 'alertActivity' &&
 					['new', 'newOrUpdated', 'updated'].includes(savedOperation)
 						? 'occurred'
-						: savedOperation;
+						: resource === 'alert' && savedOperation === 'occurred'
+							? 'new'
+							: savedOperation;
 				if (
 					(resource !== 'alert' && resource !== 'alertActivity') ||
 					(resource === 'alertActivity' && operation !== 'occurred') ||
@@ -672,17 +705,19 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				const allVisibleAccounts =
 					accountIds.length === 0 && siteIds.length === 0 && groupIds.length === 0;
 				if (accountIds.length > 0) {
-					await validateSelectedScopes(this, 'ACCOUNT', accountIds, { accountIds });
+					await validateSelectedScopes(this, 'ACCOUNT', accountIds, { accountIds }, deadline);
 				}
 				if (siteIds.length > 0) {
-					await validateSelectedScopes(this, 'SITE', siteIds, { accountIds, siteIds });
+					await validateSelectedScopes(this, 'SITE', siteIds, { accountIds, siteIds }, deadline);
 				}
 				if (groupIds.length > 0) {
-					await validateSelectedScopes(this, 'GROUP', groupIds, {
-						accountIds,
-						siteIds,
+					await validateSelectedScopes(
+						this,
+						'GROUP',
 						groupIds,
-					});
+						{ accountIds, siteIds, groupIds },
+						deadline,
+					);
 				}
 				let scopeType: ScopeType;
 				let scopeIds: string[];
@@ -696,11 +731,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					scopeType = 'ACCOUNT';
 					scopeIds = accountIds;
 				} else {
-					({ scopeType, scopeIds } = await discoverVisibleScopes(
-						authenticatedRequest(this, nodeDebug),
-						baseUrl,
-						node,
-					));
+					({ scopeType, scopeIds } = await discoverVisibleScopes(request, baseUrl, node));
 				}
 				if (scopeIds.length === 0) {
 					throw new NodeOperationError(
@@ -715,12 +746,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					scopeIds,
 					activityAccountIds:
 						resource === 'alertActivity'
-							? await activityAccountIds(
-									authenticatedRequest(this, nodeDebug),
-									baseUrl,
-									scopeType,
-									scopeIds,
-								)
+							? await activityAccountIds(request, baseUrl, scopeType, scopeIds)
 							: undefined,
 					allVisibleAccounts,
 					events,
@@ -755,7 +781,6 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					excludeActorName:
 						resource === 'alertActivity' ? String(options.excludeActorName ?? '') : '',
 					simplifyOutput: options.simplifyOutput !== false,
-					includeOcsf: resource === 'alert' && options.includeOcsf === true,
 					debug: nodeDebug,
 					warnLog: (message, details = {}) =>
 						this.logger.warn(
@@ -772,9 +797,10 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					requestTimeoutMs: 30_000,
 					alertPageSize: 200,
 					maxAlertPages: 25,
+					pollDeadlineMs: deadline,
 				};
 				const result = await (resource === 'alertActivity' ? pollAlertActivities : pollSentinelOne)(
-					authenticatedRequest(this, nodeDebug),
+					request,
 					config,
 					previousState,
 					this.getMode() === 'manual' ? 'manual' : 'scheduled',

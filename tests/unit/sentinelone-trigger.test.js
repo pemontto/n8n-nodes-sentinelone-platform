@@ -149,7 +149,8 @@ test('scope discovery drains REST cursors and parses each envelope', async () =>
 	]);
 	assert.equal(accountCalls[0].qs.limit, 1000);
 	assert.equal(accountCalls[0].qs.states, 'active');
-	assert.equal(accountCalls[0].timeout, 30_000);
+	// Per-attempt timeout is a share of the 30-second deadline, floored so a slow read is not cut short.
+	assert.equal(accountCalls[0].timeout, 15_000);
 	assert.equal(accountCalls[1].qs.cursor, 'account-next');
 
 	let siteRequest;
@@ -394,7 +395,10 @@ test('first scheduled poll creates a bounded baseline without output', async () 
 
 	assert.deepEqual(result.items, []);
 	assert.equal(result.nextState.initialized, true);
-	assert.deepEqual(result.nextState.seenAlertIds, ['baseline-alert']);
+	assert.deepEqual(
+		result.nextState.seenAlertIds.map((entry) => entry.split('\u0000')[0]),
+		['baseline-alert'],
+	);
 	assert.equal(observedVariables.filters[0].dateTimeRange.start, NOW - 300_000);
 	assert.deepEqual(observedVariables.filters.slice(1), [
 		{ fieldId: 'severity', stringIn: { values: ['CRITICAL', 'HIGH'] } },
@@ -493,7 +497,10 @@ test('updated-only mode skips a new alert and emits its later version', async ()
 
 	const first = await pollSentinelOne(request, triggerConfig, state, 'scheduled', NOW);
 	assert.deepEqual(first.items, []);
-	assert.deepEqual(first.nextState.seenAlertIds, ['updated-only']);
+	assert.deepEqual(
+		first.nextState.seenAlertIds.map((entry) => entry.split('\u0000')[0]),
+		['updated-only'],
+	);
 	state = first.nextState;
 
 	current = alert('updated-only', '2026-08-26T11:59:00.000Z', '2026-08-26T12:01:00.000Z');
@@ -501,6 +508,42 @@ test('updated-only mode skips a new alert and emits its later version', async ()
 	assert.deepEqual(
 		second.items.map((item) => item.eventType),
 		['alert.updated'],
+	);
+});
+
+test('updated-only mode emits an alert revised after creation on the first poll', async () => {
+	const triggerConfig = config({ events: ['alert.updated'] });
+	const revised = alert('revised-alert', '2026-08-26T11:59:00.000Z', '2026-08-26T11:59:05.000Z');
+	const request = async () => alertResponse([revised]);
+
+	const first = await pollSentinelOne(
+		request,
+		triggerConfig,
+		initializedState(triggerConfig),
+		'scheduled',
+		NOW,
+	);
+	assert.deepEqual(
+		first.items.map((item) => item.eventType),
+		['alert.updated'],
+	);
+});
+
+test('new and updated mode emits a revised new alert once as new', async () => {
+	const triggerConfig = config({ events: ['alert.new', 'alert.updated'] });
+	const revised = alert('revised-alert', '2026-08-26T11:59:00.000Z', '2026-08-26T11:59:05.000Z');
+	const request = async () => alertResponse([revised]);
+
+	const first = await pollSentinelOne(
+		request,
+		triggerConfig,
+		initializedState(triggerConfig),
+		'scheduled',
+		NOW,
+	);
+	assert.deepEqual(
+		first.items.map((item) => item.eventType),
+		['alert.new'],
 	);
 });
 
@@ -620,7 +663,10 @@ test('configuration change fully rebaselines without historical output', async (
 	);
 
 	assert.deepEqual(result.items, []);
-	assert.deepEqual(result.nextState.seenAlertIds, ['resolved-alert']);
+	assert.deepEqual(
+		result.nextState.seenAlertIds.map((entry) => entry.split('\u0000')[0]),
+		['resolved-alert'],
+	);
 	assert.equal(result.nextState.configFingerprint, fingerprintConfig(newConfig));
 });
 
@@ -791,28 +837,43 @@ test('alert Relay connection drains every page', async () => {
 	);
 });
 
-test('dense alert ranges split into non-overlapping time windows at the page cap', async () => {
-	const triggerConfig = config({ maxAlertPages: 1 });
+test('without a poll budget the page cap splits the range exactly as before', async () => {
+	const alerts = [
+		'2026-08-26T11:58:00.000Z',
+		'2026-08-26T11:58:30.000Z',
+		'2026-08-26T11:59:00.000Z',
+	];
 	const ranges = [];
-	const result = await pollSentinelOne(
-		async (options) => {
-			const range = queryVariables(options).filters[0].dateTimeRange;
-			ranges.push([range.start, range.end]);
-			if (ranges.length === 1) {
-				return alertResponse([], { hasNextPage: true, endCursor: 'split-required' });
-			}
-			return alertResponse([alert(`range-${range.start}`, new Date(range.end).toISOString())]);
-		},
-		triggerConfig,
-		initializedState(triggerConfig),
+	const request = async (options) => {
+		const { after, filters } = queryVariables(options);
+		const range = filters[0].dateTimeRange;
+		ranges.push([range.start, range.end]);
+		const page = alerts
+			.filter((time) => Date.parse(time) >= range.start && Date.parse(time) <= range.end)
+			.map((time) => alert(`alert-${time}`, time))
+			.reverse();
+		const offset = after ? Number(after) : 0;
+		return alertResponse(page.slice(offset, offset + 2), {
+			hasNextPage: offset + 2 < page.length,
+			endCursor: offset + 2 < page.length ? String(offset + 2) : null,
+		});
+	};
+	const legacyConfig = config({ maxAlertPages: 1 });
+	const legacy = await pollSentinelOne(
+		request,
+		legacyConfig,
+		initializedState(legacyConfig, { checkpointMs: NOW - 600_000 }),
 		'scheduled',
 		NOW,
 	);
-
-	assert.equal(ranges.length, 3);
-	const [, newer, older] = ranges;
-	assert.equal(older[1] + 1, newer[0]);
-	assert.equal(result.items.length, 2);
+	assert.deepEqual(
+		legacy.items.map((item) => item.alert.id),
+		alerts.map((time) => `alert-${time}`),
+	);
+	assert.equal(legacy.nextState.checkpointMs, NOW);
+	assert.ok(ranges.length > 1, 'the capped range was split');
+	assert.equal(ranges[1][1], NOW, 'the newer half is read first, as before');
+	assert.ok(ranges[1][0] > ranges[0][0]);
 });
 
 test('pagination failure does not mutate or replace prior state', async () => {
@@ -832,12 +893,10 @@ test('pagination failure does not mutate or replace prior state', async () => {
 	assert.deepEqual(previous, snapshot);
 });
 
-test('increasing a page cap resumes from the existing checkpoint', async () => {
+test('a page cap inside an indivisible range fails without advancing', async () => {
 	const cappedConfig = config({ maxAlertPages: 1 });
-	const resumedConfig = config({ maxAlertPages: 2 });
 	const previous = initializedState(cappedConfig);
-	assert.equal(fingerprintConfig(cappedConfig), fingerprintConfig(resumedConfig));
-
+	const snapshot = structuredClone(previous);
 	await assert.rejects(
 		pollSentinelOne(
 			async () =>
@@ -852,24 +911,7 @@ test('increasing a page cap resumes from the existing checkpoint', async () => {
 		),
 		/exceeded the configured page limit/,
 	);
-
-	const result = await pollSentinelOne(
-		async (options) =>
-			queryVariables(options).after === null
-				? alertResponse([alert('pending-alert')], {
-						hasNextPage: true,
-						endCursor: 'page-2',
-					})
-				: alertResponse([]),
-		resumedConfig,
-		previous,
-		'scheduled',
-		NOW,
-	);
-	assert.deepEqual(
-		result.items.map((item) => item.alert.id),
-		['pending-alert'],
-	);
+	assert.deepEqual(previous, snapshot);
 });
 
 test('GraphQL errors fail the poll', async () => {
@@ -982,9 +1024,7 @@ test('debug logging captures sanitized request stages without credentials or res
 		entries.map((entry) => entry.message),
 		[
 			'Starting SentinelOne poll',
-			'Starting scoped alert query batches',
-			'Requesting Unified Alerts page',
-			'Received Unified Alerts page',
+			'Read Unified Alerts range',
 			'Completed alert candidate queries',
 			'Completed scheduled SentinelOne poll',
 		],
@@ -997,7 +1037,7 @@ test('poll fails before emission when one overlap exceeds the alert state capaci
 	const triggerConfig = config();
 	const alerts = Array.from({ length: MAX_SEEN_ALERT_IDS + 1 }, (_, index) =>
 		alert(`alert-${index}`, new Date(NOW - index).toISOString()),
-	);
+	).reverse();
 	const previous = initializedState(triggerConfig);
 	for (const pollStart of [NOW, NOW + 60_000]) {
 		await assert.rejects(
@@ -1059,13 +1099,8 @@ test('optional scopes stay together under Options while legacy roots are hidden'
 			fields.map((p) => p.name),
 			['accountIds', 'siteIds', 'groupIds'],
 		);
-		assert.deepEqual(fields[1].typeOptions.loadOptionsDependsOn, [
-			'options.scope.selection.accountIds',
-		]);
-		assert.deepEqual(fields[2].typeOptions.loadOptionsDependsOn, [
-			'options.scope.selection.accountIds',
-			'options.scope.selection.siteIds',
-		]);
+		assert.deepEqual(fields[1].typeOptions.loadOptionsDependsOn, ['&accountIds']);
+		assert.deepEqual(fields[2].typeOptions.loadOptionsDependsOn, ['&accountIds', '&siteIds']);
 	}
 });
 
@@ -1078,12 +1113,16 @@ test('trigger UI uses resource, operation, and resource-specific options', () =>
 
 	assert.match(source, /displayName: 'Resource'[\s\S]*?name: 'resource'/);
 	assert.match(source, /resource: \['alert'\][\s\S]*?value: 'newOrUpdated'/);
-	assert.equal(
-		node.description.properties.find(
-			(p) => p.name === 'operation' && p.displayOptions.show.resource.includes('alertActivity'),
-		).type,
-		'hidden',
+	const activityOperation = node.description.properties.find(
+		(p) => p.name === 'operation' && p.displayOptions.show.resource.includes('alertActivity'),
 	);
+	assert.equal(activityOperation.type, 'options');
+	assert.equal(activityOperation.default, 'occurred');
+	assert.deepEqual(
+		activityOperation.options.map((option) => option.value),
+		['occurred'],
+	);
+	assert.equal(activityOperation.options[0].action, 'Trigger on alert activity');
 	assert.match(source, /displayName: 'Options'[\s\S]*?resource: \['alert'\]/);
 	assert.match(source, /displayName: 'Options'[\s\S]*?resource: \['alertActivity'\]/);
 	assert.doesNotMatch(source, /previewLookbackMinutes/);
@@ -1446,140 +1485,6 @@ test('unknown field expressions cannot become GraphQL source and output selectio
 	);
 });
 
-test('OCSF enrichment runs only for emitted previews and is bounded to five requests', async () => {
-	const cfg = config({ includeOcsf: true });
-	let details = 0,
-		active = 0,
-		maxActive = 0;
-	const request = async (options) => {
-		if (!options.body.query.includes('AlertOcsf'))
-			return alertResponse(Array.from({ length: 25 }, (_, i) => alert(`a${i}`)));
-		details++;
-		active++;
-		maxActive = Math.max(active, maxActive);
-		assert.deepEqual(options.body.variables.scope, {
-			scopeType: 'ACCOUNT',
-			scopeIds: ['account-1'],
-		});
-		await new Promise((resolve) => setTimeout(resolve, 2));
-		active--;
-		return {
-			data: {
-				alert: { ...alert(options.body.variables.id), ocsf: { action: 'Observed', actionId: 3 } },
-			},
-		};
-	};
-	const baseline = await pollSentinelOne(request, cfg, {}, 'scheduled', NOW);
-	assert.equal(baseline.items.length, 0);
-	assert.equal(details, 0);
-	const preview = await pollSentinelOne(request, cfg, {}, 'manual', NOW);
-	assert.equal(details, 10);
-	assert.equal(preview.items.length, 10);
-	assert.equal(maxActive, 5);
-	assert.equal(preview.items[0].ocsf.actionId, 3);
-	assert.equal(preview.nextState, undefined);
-	assert.equal(fingerprintConfig(cfg), fingerprintConfig(config()));
-});
-
-test('OCSF preserves null and native fields with either output shape', async () => {
-	for (const simplifyOutput of [true, false]) {
-		for (const ocsf of [null, { startTimeDt: '2026-08-26T00:00:00Z', evidences: [] }]) {
-			const cfg = config({ includeOcsf: true, simplifyOutput });
-			const result = await pollSentinelOne(
-				async (r) =>
-					r.body.query.includes('AlertOcsf')
-						? { data: { alert: { ...alert('a'), ocsf } } }
-						: alertResponse([alert('a')]),
-				cfg,
-				{},
-				'manual',
-				NOW,
-			);
-			assert.deepEqual(result.items[0].ocsf, ocsf);
-			assert.equal(result.items[0].eventType, 'alert.new');
-		}
-	}
-});
-
-test('OCSF errors or missing identity and scope reject without changing scheduled state', async () => {
-	const cfg = config({ includeOcsf: true });
-	const state = initializedState(cfg);
-	const before = JSON.stringify(state);
-	for (const detailResponse of [
-		{ errors: [{ message: 'sensitive upstream details' }] },
-		{ data: { alert: { ...alert('a') } } },
-		{ data: { alert: { ...alert('wrong'), ocsf: {} } } },
-		{ data: { alert: { ...alert('a'), ocsf: 'invalid' } } },
-		{ data: { alert: { id: 'a', ocsf: {} } } },
-	]) {
-		await assert.rejects(
-			() =>
-				pollSentinelOne(
-					async (r) =>
-						r.body.query.includes('AlertOcsf') ? detailResponse : alertResponse([alert('a')]),
-					cfg,
-					state,
-					'scheduled',
-					NOW,
-				),
-			(error) => {
-				assert.doesNotMatch(error.message, /sensitive upstream details/);
-				return true;
-			},
-		);
-		assert.equal(JSON.stringify(state), before);
-	}
-});
-
-test('OCSF scope and name exclusions are rechecked on detail retrieval', async () => {
-	for (const moved of [true, false]) {
-		const cfg = config({ includeOcsf: true, excludeSiteName: 'demo' });
-		const detail = { ...alert('a'), ocsf: {} };
-		if (moved) detail.realTime.scope.account.id = 'another-account';
-		else detail.realTime.scope.site.name = 'DEMO';
-		const result = await pollSentinelOne(
-			async (r) =>
-				r.body.query.includes('AlertOcsf')
-					? { data: { alert: detail } }
-					: alertResponse([alert('a')]),
-			cfg,
-			{},
-			'manual',
-			NOW,
-		);
-		assert.deepEqual(result.items, []);
-	}
-});
-
-test('OCSF failures do not log a completed poll or advanced checkpoint', async () => {
-	const logs = [];
-	const cfg = config({
-		includeOcsf: true,
-		debug: true,
-		debugLog: (message, details) => logs.push({ message, details }),
-	});
-	await assert.rejects(() =>
-		pollSentinelOne(
-			async (r) => {
-				if (r.body.query.includes('AlertOcsf')) throw new Error('detail unavailable');
-				return alertResponse([alert('a')]);
-			},
-			cfg,
-			initializedState(cfg),
-			'scheduled',
-			NOW,
-		),
-	);
-	assert.equal(
-		logs.some((entry) => entry.details.checkpointAdvanced === true),
-		false,
-	);
-	assert.equal(
-		logs.some((entry) => entry.message === 'Completed scheduled SentinelOne poll'),
-		false,
-	);
-});
-
 test('credential uses the same Bearer token for SDL, GraphQL, and management REST', async () => {
 	const {
 		SentinelOnePlatformApi,
@@ -1748,7 +1653,6 @@ test('removed note resource and unsupported operation pairs fail before requests
 	for (const params of [
 		{ resource: 'alertNote', operation: 'created' },
 		{ resource: 'alertActivity', operation: 'created' },
-		{ resource: 'alert', operation: 'occurred' },
 	]) {
 		const context = createNodeContext(params, async () =>
 			assert.fail('Unsupported configuration must not request data'),
@@ -1759,6 +1663,42 @@ test('removed note resource and unsupported operation pairs fail before requests
 		);
 		assert.equal(context.staticData.sentinelOneTrigger, undefined);
 	}
+});
+
+test('an alert resource treats a retained activity operation as the alert default', async () => {
+	const { NodeHelpers } = require('n8n-workflow');
+	const node = new SentinelOnePlatformTrigger();
+	const fingerprints = [];
+	for (const savedOperation of ['occurred', 'new']) {
+		const params = NodeHelpers.getNodeParameters(
+			node.description.properties,
+			{
+				resource: 'alert',
+				operation: savedOperation,
+				options: { scope: { selection: { accountIds: ['account-1'] } } },
+			},
+			true,
+			false,
+			{ typeVersion: 1 },
+			node.description,
+		);
+		assert.equal(params.operation, savedOperation, 'n8n retains the prior resource operation');
+		let alertQueries = 0;
+		const context = createNodeContext(
+			params,
+			async (request) => {
+				if (request.method === 'GET') return { data: [{ id: 'account-1', name: 'Account One' }] };
+				assert.match(request.url, /\/unifiedalerts\/graphql$/);
+				alertQueries++;
+				return alertResponse([]);
+			},
+			'trigger',
+		);
+		assert.equal(await node.poll.call(context), null);
+		assert.ok(alertQueries > 0, 'the alert resource must query alerts');
+		fingerprints.push(context.staticData.sentinelOneTrigger.configFingerprint);
+	}
+	assert.equal(fingerprints[0], fingerprints[1]);
 });
 
 test('snapshot triggers preserve their pre-activity-upgrade fingerprints', () => {
@@ -1883,7 +1823,7 @@ test('nested trigger scopes override hidden legacy values and keep the group gua
 	}
 });
 
-test('resource switches with retained snapshot operations dispatch the hidden activity operation', async () => {
+test('resource switches with retained snapshot operations dispatch the activity operation', async () => {
 	const { NodeHelpers } = require('n8n-workflow');
 	const node = new SentinelOnePlatformTrigger();
 	for (const savedOperation of ['new', 'newOrUpdated', 'updated']) {
