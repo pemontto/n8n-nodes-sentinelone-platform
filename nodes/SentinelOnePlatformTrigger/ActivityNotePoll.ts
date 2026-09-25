@@ -1,4 +1,5 @@
 import type { IDataObject } from 'n8n-workflow';
+import { NodeApiError } from 'n8n-workflow';
 import { fingerprintConfig } from './SentinelOneTriggerHelpers';
 import type {
 	AuthenticatedRequest,
@@ -91,10 +92,13 @@ async function pages(
 			// The lookup keeps the batches that completed; the poll cuts its window before the first activity still waiting.
 			// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 			if (error instanceof PollBudgetError) throw error;
+			// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+			if (error instanceof NodeApiError) throw error;
 			const status = responseStatus(error);
-			throw fail(
+			const failure = fail(
 				`current alert lookup failed${status ? ` (HTTP ${status})` : ''}. Check alert read permissions and service availability`,
 			);
+			throw Object.assign(failure, { cause: error, statusCode: status ?? undefined });
 		}
 		if (
 			response?.errors !== undefined &&
@@ -417,19 +421,36 @@ export async function pollAlertActivities(
 				};
 	// A baseline reads through the same resumable prefix, so a budget stop saves its progress and the activation time instead of restarting activation.
 	const startMs = Math.max(0, Math.floor(start));
-	const result = await readActivityFeedPrefix(request, {
-		baseUrl: config.baseUrl,
-		startMs,
-		endMs: pollStartMs,
-		accountIds,
-		timing: feedTiming,
-		checkpointMs: baseline ? startMs : Number(checkpoint),
-		activityTypeIds: config.activityTypeIds,
-	});
+	let result;
+	try {
+		result = await readActivityFeedPrefix(request, {
+			baseUrl: config.baseUrl,
+			startMs,
+			endMs: pollStartMs,
+			accountIds,
+			timing: feedTiming,
+			checkpointMs: baseline ? startMs : Number(checkpoint),
+			activityTypeIds: config.activityTypeIds,
+		});
+	} catch (error) {
+		if (error instanceof Error && /exceeded the query budget or deadline/i.test(error.message)) {
+			const position = baseline ? startMs : Number(checkpoint);
+			throw fail(
+				`activity stream is stuck at checkpoint ${position} because its query budget ended before a forward window completed`,
+			);
+		}
+		// Transport failures keep their identity for the trigger boundary to report.
+		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+		throw error;
+	}
 	let activities = result.events;
 	let end = result.completedThroughMs;
-	if (end <= (baseline ? startMs : Number(checkpoint)))
-		throw fail('did not complete a forward checkpoint window within the query budget');
+	if (end <= (baseline ? startMs : Number(checkpoint))) {
+		const position = baseline ? startMs : Number(checkpoint);
+		throw fail(
+			`activity stream is stuck at checkpoint ${position} and did not complete a forward window within the query budget`,
+		);
+	}
 	if (activities.length > ACTIVITY_STATE_LIMIT) throw fail('exceeded the activity state capacity');
 	let items: IDataObject[] = [];
 	let dropped = 0;
@@ -446,14 +467,14 @@ export async function pollAlertActivities(
 		// A lookup the poll budget cut short ends this poll's window at the first activity still waiting on it; every earlier activity, including ones in the same millisecond, is delivered and retained, so the next poll starts past them.
 		const waiting = candidates.find((event) => lookup.pendingIds.has(event.alertId));
 		if (waiting) {
-			end = Number(BigInt(waiting.timestampNs) / BigInt(1000000));
+			end = Math.max(Number(checkpoint), Number(BigInt(waiting.timestampNs) / BigInt(1000000)));
 			const before = (event: ActivityFeedEvent) =>
 				BigInt(event.timestampNs) < BigInt(waiting.timestampNs);
 			activities = activities.filter(before);
 			candidates = candidates.filter(before);
 			if (end <= Number(checkpoint) && candidates.every((event) => previous.has(event.activityId)))
 				throw fail(
-					'ran out of the n8n poll time budget before the current alert lookup completed a forward window',
+					`activity stream is stuck at checkpoint ${Number(checkpoint)} because the n8n poll time budget ended before the current alert lookup completed a forward window`,
 				);
 		}
 		dropped = expiredMissingActivities(config, candidates, lookup, pollStartMs);

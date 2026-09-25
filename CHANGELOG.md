@@ -29,6 +29,7 @@
 - Add SentinelOne icons to the node editor and package README.
 - Throw typed errors for rejected Alert Updates, retain status or service codes for uncertain and partial outcomes, and require explicit Status and Analyst Verdict choices.
 - Breaking: replace the Alert Note > Created trigger with Alert Activity > Occurred, without a compatibility alias. Note actions and Alert snapshot triggers remain unchanged.
+- Preserve HTTP failure status in trigger errors and keep activity checkpoints forward-only when an alert lookup reaches the poll budget.
 - Support seven verified activity types, unknown alert-linked types, and a builder for recorded transition and value conditions.
 - Emit one generic envelope per activity, with optional raw activity and current alert enrichment.
 - Deduplicate by activity ID without monitoring later revisions; reset migrated note triggers to a fresh scheduled baseline.

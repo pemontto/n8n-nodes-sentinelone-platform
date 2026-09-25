@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const { existsSync, readFileSync } = require('node:fs');
 const { join, resolve } = require('node:path');
 const test = require('node:test');
+const { NodeApiError } = require('n8n-workflow');
 
 const packageRoot = resolve('.');
 const builtHelpers = join(
@@ -129,6 +130,65 @@ function createNodeContext(params, request, mode = 'manual') {
 		getWorkflow: () => ({ id: 'workflow-1' }),
 	};
 }
+
+test('trigger polling preserves sanitised HTTP status and distinguishes authentication from permission errors', async () => {
+	const node = new SentinelOnePlatformTrigger();
+	const messages = new Map();
+	for (const statusCode of [401, 403, 429]) {
+		const now = Date.now();
+		const context = createNodeContext(
+			{
+				resource: 'alertActivity',
+				operation: 'occurred',
+				activityTypes: ['16007'],
+				accountIds: ['account-1'],
+			},
+			async (request) => {
+				if (request.url.includes('/sdl/v2/api/queries'))
+					return {
+						id: 'job',
+						stepsCompleted: 1,
+						stepsTotal: 1,
+						data: {
+							matches: [
+								{
+									timestamp: String(BigInt(now - 1000) * 1000000n),
+									values: {
+										activity_id: 'event',
+										activity_type: '16007',
+										created_at: new Date(now - 1000).toISOString(),
+										'data.alert.id': 'example-alert',
+										'data.payload.note_text': 'private note',
+									},
+								},
+							],
+						},
+					};
+				if (request.method === 'GET')
+					return { data: [{ id: 'account-1', name: 'Account' }], pagination: { nextCursor: null } };
+				throw {
+					statusCode,
+					message: 'private response with token secret-token',
+					response: { status: statusCode, data: { message: 'private response secret-body' } },
+				};
+			},
+		);
+		await assert.rejects(node.poll.call(context), (error) => {
+			assert.ok(
+				error instanceof NodeApiError,
+				`${error.constructor.name}: ${error.message}; cause=${error.cause?.constructor?.name} api=${error.cause instanceof NodeApiError} http=${error.cause?.httpCode}`,
+			);
+			assert.equal(error.httpCode, String(statusCode));
+			assert.equal(error.statusCode, statusCode);
+			assert.doesNotMatch(error.message, /secret-token|secret-body/);
+			messages.set(statusCode, error.message);
+			return true;
+		});
+	}
+	assert.notEqual(messages.get(401), messages.get(403));
+	assert.match(messages.get(401), /authentication/);
+	assert.match(messages.get(403), /denied access/);
+});
 
 test('scope discovery drains REST cursors and parses each envelope', async () => {
 	const accountCalls = [];

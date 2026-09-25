@@ -26,7 +26,7 @@ import type {
 	INodeTypeDescription,
 	IPollFunctions,
 } from 'n8n-workflow';
-import { NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
 
 import {
 	pollSentinelOne,
@@ -286,12 +286,23 @@ function authenticatedRequest(
 			const error = result.error;
 			const status = responseStatus(error);
 			const message =
-				status === 401 || status === 403
-					? 'SentinelOne denied access. Check the credential permissions.'
-					: status === 429
-						? 'SentinelOne rate limit reached. Try again after the service delay.'
-						: `SentinelOne request failed${status ? ` (HTTP ${status})` : ''}. Check service availability.`;
-			throw Object.assign(new NodeOperationError(context.getNode(), message), {
+				status === 401
+					? 'SentinelOne authentication failed. Check the credential.'
+					: status === 403
+						? 'SentinelOne denied access. Check the credential permissions.'
+						: status === 429
+							? 'SentinelOne rate limit reached. Try again after the service delay.'
+							: `SentinelOne request failed${status ? ` (HTTP ${status})` : ''}. Check service availability.`;
+			const apiError = new NodeApiError(
+				context.getNode(),
+				{ message },
+				{
+					message,
+					description: status ? `SentinelOne returned HTTP ${status}.` : undefined,
+					httpCode: status ? String(status) : undefined,
+				},
+			);
+			throw Object.assign(apiError, {
 				statusCode: status,
 				retryable: isRetryableReadError(error),
 				retryAfterMs: retryAfterMs(error),
@@ -812,10 +823,14 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				if (result.items.length === 0) return null;
 				return [this.helpers.returnJsonArray(result.items)];
 			} catch (error) {
-				throw new NodeOperationError(
+				// Preserve typed n8n errors and their status, description and cause.
+				// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+				if (error instanceof NodeApiError || error instanceof NodeOperationError) throw error;
+				const operationError = new NodeOperationError(
 					this.getNode(),
 					`Unable to poll SentinelOne Unified Alerts. ${(error as Error).message}`,
 				);
+				throw Object.assign(operationError, { cause: error });
 			}
 		} finally {
 			activePollKeys.delete(pollKey);

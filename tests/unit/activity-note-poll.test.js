@@ -6,6 +6,7 @@ const {
 const {
 	fingerprintConfig,
 } = require('../../dist/nodes/SentinelOnePlatformTrigger/SentinelOneTriggerHelpers.js');
+const { PollBudgetError } = require('../../dist/nodes/shared/transport/request.js');
 const PREVIEW_START = Date.UTC(2020, 0, 1);
 const NOW = 1788776400000;
 const cfg = (extra = {}) => ({
@@ -740,6 +741,73 @@ test('an incomplete first slice fails without advancing the saved checkpoint', a
 	);
 	assert.deepEqual(previous, before);
 });
+
+test('no-progress errors identify the activity stream and saved checkpoint position', async () => {
+	const c = cfg();
+	const checkpoint = NOW - 3600000;
+	await assert.rejects(
+		() =>
+			pollAlertActivities(
+				async (r) => {
+					const body = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
+					const start = Date.parse(body.startTime);
+					return logFeed(
+						feed(Array.from({ length: 1000 }, (_, i) => ['stuck-' + i, start + i, 'note'])),
+					);
+				},
+				c,
+				state(c, { checkpointMs: checkpoint, activityActivationMs: checkpoint - 1000 }),
+				'scheduled',
+				NOW,
+				{ maxQueries: 1 },
+			),
+		(error) => {
+			assert.match(error.message, /activity stream/);
+			assert.match(error.message, new RegExp(String(checkpoint)));
+			return true;
+		},
+	);
+});
+
+test('a budget cut inside the overlap keeps the checkpoint and deduplicates the completed prefix', async () => {
+	const c = cfg();
+	const checkpoint = NOW - 1000;
+	const previous = state(c, {
+		checkpointMs: checkpoint,
+		activityActivationMs: checkpoint - 300000,
+	});
+	const events = Array.from({ length: 201 }, (_, index) => [
+		`activity-${index}`,
+		NOW - 250000 + index * 1240,
+		`note-${index}`,
+	]);
+	const alertIds = events.map((_, index) => `alert-${String(index).padStart(3, '0')}`);
+	const makeFeed = () => {
+		const source = logFeed(feed(events));
+		for (const [index, match] of source.data.matches.entries())
+			match.values['data.alert.id'] = alertIds[index];
+		return source;
+	};
+	let cutLookup = true;
+	const read = async (r) => {
+		if (r.url.includes('/sdl/')) return makeFeed();
+		const ids = r.body.variables.filters[0].stringIn.values;
+		if (cutLookup && ids.includes(alertIds.at(-1))) throw new PollBudgetError();
+		return page(ids.map((id) => Object.assign(alert(), { id })));
+	};
+	const first = await pollAlertActivities(read, c, previous, 'scheduled', NOW);
+	assert.equal(first.nextState.checkpointMs, checkpoint);
+	assert.equal(first.items.length, 200);
+	assert.equal(new Set(first.items.map((item) => item.activityId)).size, 200);
+	cutLookup = false;
+	const second = await pollAlertActivities(read, c, first.nextState, 'scheduled', NOW + 1000);
+	assert.deepEqual(
+		second.items.map((item) => item.activityId),
+		['activity-200'],
+	);
+	assert.ok(second.nextState.checkpointMs >= first.nextState.checkpointMs);
+});
+
 test('backlog prefix drops expired missing activity using wall clock age and retains slice overlap identities', async () => {
 	const checkpoint = NOW - 3600000;
 	const eventTime = checkpoint + 1000;
