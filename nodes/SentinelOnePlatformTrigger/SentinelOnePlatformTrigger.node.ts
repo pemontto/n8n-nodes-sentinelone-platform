@@ -483,7 +483,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See the README for supported syntax.',
+							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Exclude Group Name',
@@ -492,7 +492,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See the README for supported syntax.',
+							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Exclude Site Name',
@@ -501,7 +501,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See the README for supported syntax.',
+							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Severity',
@@ -579,7 +579,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See the README for supported syntax.',
+							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Exclude Actor IDs',
@@ -596,7 +596,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						default: '',
 						placeholder: 'automation|integration',
 						description:
-							'Case-insensitive exclusion regex for the SDL user name. Leave empty to disable. Missing names are kept. See the README for supported syntax.',
+							'Case-insensitive exclusion regex for the SDL user name. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Exclude Group Name',
@@ -605,7 +605,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See the README for supported syntax.',
+							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Exclude Site Name',
@@ -614,7 +614,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See the README for supported syntax.',
+							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Include Current Alert',

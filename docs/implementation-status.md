@@ -1,24 +1,13 @@
-# Foundation implementation status
+# Implementation status
 
-Live mutation testing and npm publication are outside this handoff.
+Version 0.1.0 contains the public Alert, Alert Note, and SDL Query actions and the SentinelOne Platform Trigger. The supported operations and behaviours are documented in [Actions](actions.md), [Triggers](trigger.md), and the [behavior contract](behavior.md).
 
-| Work                                              | Implementation | Verification                                                                                                           |
-| ------------------------------------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Fresh platform source and identifiers             | Implemented    | New entry points load from a clean installation; old project preserved                                                 |
-| Operation modules and shared transport            | Implemented    | Action, transport, and item-pairing tests pass                                                                         |
-| Shared controls, fields, and scope behavior       | Implemented    | Catalog/schema tests and actual editor checks pass                                                                     |
-| Errors and bounded update verification            | Implemented    | Backoff, deadlines, unavailable reads, numeric precision, rejection, and redaction covered                             |
-| SDL organization                                  | Implemented    | Existing lifecycle, cleanup, precision, and output tests pass                                                          |
-| Generic documentation and four inactive workflows | Implemented    | Workflow guards tested; four workflows loaded locally without activation                                               |
-| Privacy audit                                     | Implemented    | Source and package checks pass; SVG icons visually checked in the editor                                               |
-| Build, lint, formatting, and schema checks        | Implemented    | Full suite: 216 tests pass; both schema fixtures validated                                                             |
-| Community-node scanner                            | Implemented    | Source and clean installed package pass                                                                                |
-| Independent Astra medium review                   | Completed      | Required findings resolved; source and supplied editor screenshots accepted                                            |
-| Fresh public repository                           | Created        | Source pushed; [GitHub CI passed](https://github.com/pemontto/n8n-nodes-sentinelone-platform/actions/runs/34327384666) |
-| Local testing handoff                             | Prepared       | Dev server running; user must enter the new credential token before testing                                            |
+| Area                    | Current support                                                                                                                                |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Alert actions           | Get, Get Many, and Update. Common fields are returned by default, optional fields are opt-in, and Return All is capped at 10,000 alerts.       |
+| Alert Note actions      | Get Many and Create by alert ID. Create submits once and reports whether the created note could be identified from before-and-after snapshots. |
+| SDL Query action        | Execute with tenant or selected-account scope, Rows or Table output, and bounded output, row, polling, and timeout settings.                   |
+| Alert snapshot triggers | New, Updated, or New or Updated, with scope, filters, exclusions, and resumable polling state.                                                 |
+| Alert Activity trigger  | Occurred, with recorded-event conditions, current-parent filters, exclusions, and optional raw/current-alert output.                           |
 
-The local credential entry contains the console URL but no copied secret. Public workflow exports contain no credential references or tenant identifiers. The user performs all live write tests on the designated demo account, including any test-data cleanup.
-
-Automated privacy patterns are supplemented by manual review for customer and personal names. Passing local scans does not imply official n8n verification approval.
-
-No npm publication or release tags have been created. Existing publishing secrets and the old project remain unchanged.
+Activity delivery depends on source retention and bounded checkpoint state. It does not promise exactly-once downstream processing. Alert Activity establishes a baseline on first scheduled use and does not replay earlier events. Alert Update and Alert Note Create mutations are submitted once; inspect uncertain results before retrying.

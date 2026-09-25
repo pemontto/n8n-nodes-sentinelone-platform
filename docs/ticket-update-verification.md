@@ -8,14 +8,14 @@ Verification permits at most three reads within 30 seconds. Failed transport att
 
 Each field has `verification.<field>.requested`, `observed`, and `verified`. Null verified means comparison was impossible.
 
-| verificationStatus | Meaning                                 |
-| ------------------ | --------------------------------------- |
-| verified           | Compared values match                   |
-| mismatch           | Readback succeeded but values differ    |
-| unavailable        | Readback could not establish values     |
-| skipped            | Disabled or unnecessary after rejection |
-| pending            | Action remains scheduled or incomplete  |
+| verificationStatus | Meaning                                                                                             |
+| ------------------ | --------------------------------------------------------------------------------------------------- |
+| verified           | Compared values match                                                                               |
+| mismatch           | Readback succeeded but values differ                                                                |
+| unavailable        | Readback could not establish values                                                                 |
+| skipped            | Disabled or unnecessary after rejection                                                             |
+| pending            | SentinelOne acknowledged a scheduled action, but readback has not yet observed the requested values |
 
-Inspect the mutation outcome alongside verificationStatus. Readback failure does not undo acknowledgement. A matching read after an uncertain response establishes current state, not which request caused it. Keep scheduled execution IDs and partial outcomes before deciding on another write.
+Inspect the mutation outcome alongside verificationStatus. `pending` means the scheduled action was acknowledged and verification read back values that do not yet match the request; it does not mean the write was rejected. Readback failure does not undo acknowledgement. A matching read after an uncertain response establishes current state, not which request caused it. Keep scheduled execution IDs and partial outcomes before deciding on another write.
 
 Ticket JSON comparison ignores object key order but preserves types and array order. Other strings compare exactly. Ticket updates replace the entire value without implicit merging. Whole-node Retry On Fail is rejected for mutation operations because it could repeat writes.

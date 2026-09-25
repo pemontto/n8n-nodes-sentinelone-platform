@@ -1,51 +1,13 @@
-# Alert activity verification
+# Alert Activity verification
 
-Verified on 2026-09-09 before delivery. All live checks were read-only. The note-creation and alert-update branches were not executed.
+Alert Activity > Occurred reads alert-linked activity through SDL V2 LOG and validates each candidate against its current parent alert. Normal and raw modes use the same feed selection. The output keeps recorded changes separate from current alert state.
 
-## Automated checks
+The automated suite covers the seven named activity types, unknown types, transition and assignment conditions, mitigation values, missing and null endpoints, baseline changes, overlap, late arrivals, unavailable parent alerts, duplicate conflicts, scope validation, query saturation, and budget exhaustion. It also checks parity between normal and raw output.
 
-The full build and test suite passed all 242 tests. Official node lint, the privacy scanner and the package-content check passed. Formatting passed for tracked files and the new implementation, tests and research documents. No package was published.
-
-Coverage includes all seven activity categories, unknown types, every shared status/severity/verdict enum and mitigation schema enum, From/To and any/all composition, missing/null/UNDEFINED values, equal endpoints, partial assignment, multiple changes, current-alert reopening, exact actor exclusions, baseline/configuration changes, overlap and late arrivals, unavailable alerts, incomplete scope, query saturation and budget exhaustion, and normal/raw parity. Duplicate tests cover all input orderings of a newer record and conflicting older records with the same ID and timestamp. Snapshot fingerprints retain their previous values.
-
-Independent review identified and verified fixes for custom-only ID selection, retired-resource rejection, snapshot fingerprint compatibility, unresolved scope during both alert lookup stages, and duplicate conflicts at older timestamps. No blocking findings remained after those fixes.
-
-## Live verification
-
-A direct V2 LOG probe returned 95 activities in a four-hour window, below the 1,000-row cap. The final compiled reader then queried a fixed four-hour window in normal and raw modes. Both returned the same 107 activities: 46 creations, five status changes, five verdict changes, 11 mitigation activities and 40 notes. Both requests used the current V2 LOG endpoint. Counts are observations from those windows, not coverage guarantees.
-
-The actual editor exposed all seven selections and the repeatable condition builder. The full analyst-verdict list rendered, assignment displayed previous/new email and destination-ID controls, and mitigation displayed its distinct activity-status values. The temporary verification condition was removed afterwards.
-
-The original local test workflow was re-read and migrated to Alert Activity > Occurred, filtered to Note Created (`16007`). Its credential, label, empty scope selections, options and inactive state were preserved. A manual trigger-only preview succeeded with 10 items containing the generic envelope, note details and `scope.source="current"`. No other node ran. The README screenshot shows that canvas without record contents.
-
-The migrated trigger uses a new configuration fingerprint. Its first scheduled poll establishes a fresh baseline rather than reusing note-only state or replaying history. The workflow remains inactive; activation was not part of verification.
-
-## Follow-up reviews
-
-Fresh standards, specification and critic reviews examined the published implementation. The specification review found no deviations. The standards review found that SDL launch/poll errors discarded actionable HTTP categories. The critic found that historical preview forgot newer activity revisions between windows and could return an older matching revision.
-
-Both findings were fixed and independently re-reviewed. SDL failures now retain sanitised authentication, permission, rate-limit, service and configuration categories. Preview retains newest-seen activity timestamps across historical windows and saturation splits. The two new regressions failed against the earlier build and passed after the fixes; the full suite passed 242 tests. The follow-up compiled build returned identical normal/raw selections for 109 activities, and its editor preview returned 10 note-created items with only the trigger running. The workflow remained inactive. Optional catalog consolidation and naming cleanup remain deferred.
-
-## Recovery follow-up
-
-The three trigger recovery fixes passed the full 264-test suite, official build and lint, package checks, formatting and privacy checks. Independent code and critic reviews found no remaining blockers after replacing a fixed per-invocation slice with a shared-budget chronological prefix.
-
-Regressions cover unavailable-parent expiry at the overlap boundary, mixed expired/recent failures, warning redaction and logger failure, malformed scopes, chronological catch-up with advancing five-minute through weekly schedules, repeated budget-limited progress, atomic event-cap rejection and saved Groups without Sites for both trigger resources. Existing manual-preview and snapshot behaviour remain covered.
-
-A read-only V2 check limited to two queries returned five activities and advanced the completed endpoint by 15 minutes while retaining the rest of a three-hour backlog. After the coordinated shared-server restart, the inactive note-activity test returned ten items with only its trigger running. Saved workflow configuration was unchanged. These checks do not replace the outstanding host-level scheduled-persistence acceptance tests.
+In the editor, Alert Activity exposes its single Occurred operation. Trigger On selects activity types, and Match Conditions appears when at least one recorded condition is configured. Activity Options include current-parent filters, account/site/group exclusions, actor-name regex and actor-ID exclusions, Include Raw Activity, and Include Current Alert.
 
 ## Delivery limits
 
-Delivery is once per activity ID within the bounded checkpoint/overlap model. It does not monitor later revisions or mitigation completion and does not guarantee exactly-once downstream processing. Events outside the overlap or source retention may be missed. Incomplete source data and malformed current alert scope fail without advancing state. Exhausted scan budgets can save only a fully completed forward prefix; otherwise they fail. Unavailable parent alerts are retried within the overlap window and then skipped with a sanitised warning. Backlogs are processed in bounded chronological slices. Manual search retains the January 2020 lower boundary and returns at most ten newest matches from its first nonempty matching window; a finite budget can prevent completing that search.
+The scheduled trigger records a baseline on first use or after a relevant configuration change; it does not replay history from before that baseline. Later polling deduplicates by activity ID within retained checkpoint and overlap state, but source retention, late arrivals, and bounded state mean downstream delivery is not guaranteed exactly once. Later revisions of delivered activity IDs are not monitored, and mitigation activity does not prove that remediation completed.
 
-The subsequent shared-server setup uses community-package registration with hot reload disabled. A separate n8n 2.38.1 host probe exposed activation and concurrent-cursor persistence failures. The successful editor previews above do not resolve those scheduled-runtime acceptance gaps. See [development runtime checks](testing.md#development-runtime). No shared scheduler configuration or customer workflow was changed for this follow-up.
-
-## Alert context and control refinement
-
-The default activity output now leads with unified alert ID, name and source-provided external ID. Current status, severity and analyst verdict are separate from recorded changes. Note and mitigation details appear before the larger scope object. The parent lookup requests two additional scalar fields without adding requests.
-
-The refinement passed 273 tests, official build/lint, package, formatting and privacy checks, plus independent source and critic reviews. Research followed n8n's official UI design guidance; see [the design decisions](research/activity-output-and-controls.md).
-
-After a coordinated restart, the actual editor hid Occurred and the empty Match Conditions control, showed Trigger On, and grouped optional scopes under Options. A read-only preview using the user's existing analyst-verdict selection returned ten activities, each with a populated alert name and external ID plus current context. The migrated Site dropdown loaded under its saved account. Alert Get Many returned five items, all within its saved account restriction.
-
-Four inactive, unpublished workflows had nonempty legacy scope values moved into the new atomic Scope selection. Two archived workflows were restored to their original archive state after migration. Readback verified every node's other parameters and credentials, all connections/settings and activation/archive states. No eligible Platform node retained legacy root scope fields. No alert/note writes or workflow activations were performed.
+An unavailable parent alert is retried while its activity timestamp is within the overlap window. Older unresolved activities are skipped with a sanitised warning; recent lookup failures and malformed scope metadata fail the poll without advancing state. A finite poll budget can advance only through a fully completed prefix. See [trigger polling](trigger.md#polling-and-test-events) for checkpoint, capacity, and preview limits.

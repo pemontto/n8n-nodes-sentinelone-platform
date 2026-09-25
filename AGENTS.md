@@ -6,7 +6,7 @@ Read `docs/architecture.md` before changing module boundaries or adding operatio
 
 Keep operation descriptions beside their execution, shared controls in one definition, and item pairing in the node entry point. Use n8n authenticated request helpers. Keep trigger checkpoint logic together. Preserve read/mutation distinctions: uncertain mutations are not replayed automatically.
 
-This foundation release includes only Alert Get/Get Many/Update, Alert Note Get Many/Create, SDL Query Execute, and the existing alert/note triggers. New operations require a separate task. Its common alert response intentionally exceeds the n8n ten-field simplification guideline; optional extras add to that response.
+This release includes only Alert Get/Get Many/Update, Alert Note Get Many/Create, SDL Query Execute, and Alert snapshot plus Alert Activity triggers. New operations require a separate task. Its common alert response intentionally exceeds the n8n ten-field simplification guideline; optional extras add to that response.
 
 Customer names, real tenant/record IDs, credentials, private paths, internal links, and operational captures do not belong in this repository. Use synthetic fixtures and generic examples. Keep public publisher identity and licence attribution.
 

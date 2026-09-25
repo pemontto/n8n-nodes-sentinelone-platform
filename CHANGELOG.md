@@ -1,45 +1,14 @@
 # Changelog
 
-## Unreleased UI and output
-
-- Include alert name, source ID and explicitly current status, severity and verdict in activity output by default.
-- Show the single activity operation as a selectable Occurred operation, and show Match Conditions only when conditions exist.
-- Group optional alert scopes under Options > Scope while preserving legacy saved selections.
-
-## Unreleased removals
-
-- Remove the trigger's Include SentinelOne OCSF option and its per-alert detail requests. Saved workflows that set it still load and poll; the option is ignored. Fetch OCSF detail with a downstream Alert > Get node.
-
-## Unreleased fixes
-
-- Defer AI tool exposure: the action node is no longer usable as a tool while its mutation surface is reviewed for agent use.
-- Read retry status, Retry-After and network codes through the wrapped error cause, so rate limits and dropped connections retry again.
-- Cap the per-attempt read timeout at a share of the 30-second deadline with a 15-second floor, so a timed-out attempt still leaves room to retry without cutting a slow read short.
-- Emit Alert Updated only when the alert was revised after creation, instead of suppressing every alert first seen in the poll.
-- Retry unavailable activity parents within the overlap window, then skip with a sanitised warning.
-- Recover activity backlogs through bounded checkpoint slices.
-- Finish scheduled trigger polls within the n8n 2.38.0+ poll time budget: alert polls read oldest first in ascending order with one forward-only cursor per stream and scope batch, a budget stop hands over every page already read and resumes from its last timestamp, activity polls keep the completed feed slices and the activities whose parent lookup finished, and a stream that stops without progress fails visibly. Hosts without a budget now also request ascending order and page to the end of the range instead of splitting at a page cap.
-- Reject trigger Group selections when no Site is selected.
-- Preserve saved child scope selections at runtime, reject blank scope IDs, and allow site-scoped credentials to load Sites without account-list permission.
-- Keep the retained Occurred operation usable after switching the trigger resource back to Alert, instead of failing the poll.
-- List Sites and Groups only once their parent scope is selected, so an unfiltered site list is never cached against a later account selection.
-
 ## 0.1.0 (unreleased)
 
-- Add SentinelOne icons to the node editor and package README.
-- Throw typed errors for rejected Alert Updates, retain status or service codes for uncertain and partial outcomes, and require explicit Status and Analyst Verdict choices.
-- Drain budgeted alert backlogs from exact per-batch resume points and hold Updated reads behind each batch's New cursor.
-- Breaking: replace the Alert Note > Created trigger with Alert Activity > Occurred, without a compatibility alias. Note actions and Alert snapshot triggers remain unchanged.
-- Preserve HTTP failure status in trigger errors and keep activity checkpoints forward-only when an alert lookup reaches the poll budget.
-- Support seven verified activity types, unknown alert-linked types, and a builder for recorded transition and value conditions.
-- Emit one generic envelope per activity, with optional raw activity and current alert enrichment.
-- Deduplicate by activity ID without monitoring later revisions; reset migrated note triggers to a fresh scheduled baseline.
-- Preserve long historical test searches, returning up to 10 newest matches from the first matching window and reporting budget exhaustion.
+This first release provides n8n nodes for reading and updating SentinelOne alerts, managing alert notes, running SDL PowerQueries, and starting workflows from alert snapshots or alert activities. Use the `sentinelOnePlatformApi` credential with the new SentinelOne Platform and SentinelOne Platform Trigger nodes; saved workflows using the earlier package need migration.
 
-- Introduce SentinelOne Platform action, trigger, and credential identifiers.
-- Organize operations into focused modules with shared controls and transport.
-- Use common alert defaults and opt-in Additional Alert Fields.
-- Remove scope from ID-based operations.
-- Separate mutation acknowledgement and bounded readback verification.
-- Report service action reasons and provide redacted Debug logs.
-- Supply inactive acceptance workflows without credentials.
+- Alert Get returns common alert fields by default; Additional Alert Fields and Raw Data are opt-in. Alert Get Many supports filters, scope selection, and bounded pagination. Return All is capped at 10,000 alerts.
+- Alert Update supports status, analyst verdict, and ticket ID. It submits once, reports rejected updates as errors with their HTTP status when available, and verifies acknowledged changes with bounded readback by default. Unknown or partial results require inspection before retrying.
+- Alert Note Get Many and Create operate by alert ID. Note creation returns the observed notes and a best-effort identification of the new note.
+- SDL Query Execute runs bounded PowerQueries and emits rows or a table with result metadata. Output size, row count, polling interval, and timeout have configurable limits.
+- Alert snapshot triggers poll New, Updated, or New or Updated alerts. On hosts that provide a poll time budget, each stream and scope batch resumes from its own forward cursor. Updated reads follow New, and overlap is re-read only after a complete read. Hosts without a poll budget read descending and split ranges at the 25-page cap.
+- Alert Activity > Occurred emits alert-linked activity records with current parent-alert context. It supports recorded-event conditions, current-parent filters, exclusions, raw activity, and optional current-alert enrichment. First scheduled use establishes a baseline; bounded overlap and retained state do not guarantee exactly-once downstream delivery.
+- Alert Activity > Occurred replaces the earlier Alert Note > Created trigger without an alias. Use the Note created activity type (`16007`) for note events. Alert Note actions remain available.
+- The action node is not exposed as an AI tool. OCSF is not included by the trigger; use Alert > Get when alert details are needed.
