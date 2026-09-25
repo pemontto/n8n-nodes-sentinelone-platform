@@ -513,22 +513,37 @@ test('Cursors follow scope membership: reordering scopes keeps them, and a chang
 	assert.deepEqual(ids(third), ['new-scope', 'last-2', 'last-3']);
 });
 
-test('A stop that processes nothing fails loudly naming the timestamp and the blocked rate limit, and a descending page is a hard error', async () => {
+test('A budget stop with no progress fails after repeated stalls, and a descending page is a hard error', async () => {
 	const triggerConfig = config();
 	const previous = legacyState(triggerConfig);
 	const snapshot = structuredClone(previous);
+	let stalled = previous;
+	for (let poll = 0; poll < 9; poll += 1) {
+		const pollStart = NOW + poll * 60_000;
+		const result = await pollSentinelOne(
+			async () => {
+				throw new PollBudgetError({ statusCode: 429 });
+			},
+			{ ...triggerConfig, pollDeadlineMs: pollStart + 60_000 },
+			stalled,
+			'scheduled',
+			pollStart,
+		);
+		stalled = result.nextState;
+	}
+	assert.equal(Object.values(stalled.stalledAlertPolls)[0], 9);
 	await assert.rejects(
 		pollSentinelOne(
 			async () => {
 				throw new PollBudgetError({ statusCode: 429 });
 			},
-			{ ...triggerConfig, pollDeadlineMs: Date.now() + 60_000 },
-			previous,
+			{ ...triggerConfig, pollDeadlineMs: NOW + 9 * 60_000 + 60_000 },
+			stalled,
 			'scheduled',
-			NOW,
+			NOW + 9 * 60_000,
 		),
 		new RegExp(
-			`createdAt stream could not get past ${iso(CHECKPOINT)}.*HTTP 429.*state was not advanced`,
+			`createdAt stream in scope batch 1 remained stalled at ${iso(CHECKPOINT)} for 10 polls.*HTTP 429.*state was not advanced`,
 		),
 	);
 	assert.deepEqual(previous, snapshot);
@@ -977,19 +992,34 @@ test('A regrouped batch starts from the slowest saved cursor and can never save 
 	assert.deepEqual(ids(second), ['late-2', 'fresh']);
 });
 
-test('A first-ever poll whose only request is rate limited fails visibly instead of returning an empty success', async () => {
-	const triggerConfig = config({ pollDeadlineMs: Date.now() + 60_000 });
+test('A first-ever rate-limited stream records stalls and fails visibly after ten polls', async () => {
+	const triggerConfig = config();
+	let state = {};
+	for (let poll = 0; poll < 9; poll += 1) {
+		const pollStart = NOW + poll * 60_000;
+		const result = await pollSentinelOne(
+			async () => {
+				throw new PollBudgetError({ statusCode: 429 });
+			},
+			{ ...triggerConfig, pollDeadlineMs: pollStart + 60_000 },
+			state,
+			'scheduled',
+			pollStart,
+		);
+		state = result.nextState;
+	}
+	assert.deepEqual(Object.values(state.stalledAlertPolls), [9]);
 	await assert.rejects(
 		pollSentinelOne(
 			async () => {
 				throw new PollBudgetError({ statusCode: 429 });
 			},
-			triggerConfig,
-			{},
+			{ ...triggerConfig, pollDeadlineMs: NOW + 9 * 60_000 + 60_000 },
+			state,
 			'scheduled',
-			NOW,
+			NOW + 9 * 60_000,
 		),
-		/createdAt stream could not get past .*HTTP 429/,
+		/createdAt stream in scope batch 1 remained stalled at .*for 10 polls.*HTTP 429/,
 	);
 });
 
