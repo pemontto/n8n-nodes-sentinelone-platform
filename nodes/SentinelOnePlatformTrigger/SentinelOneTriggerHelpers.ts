@@ -1531,14 +1531,17 @@ export async function pollSentinelOne(
 		}
 	}
 	const stalledAlertPolls: Record<string, number> = {};
+	// A sibling counts as batch progress only when it fetched rows. A read that fetched nothing moves its cursor only when it completes, and a completed empty read must not hide a stalled sibling.
 	const progressedByBatch = new Map<string[], Unit[]>();
 	for (const candidate of units)
-		if (candidate.read && (candidate.read.complete || candidate.read.fetched.length > 0)) {
+		if (candidate.read && candidate.read.fetched.length > 0) {
 			const progressed = progressedByBatch.get(candidate.scopeIds) ?? [];
 			progressed.push(candidate);
 			progressedByBatch.set(candidate.scopeIds, progressed);
 		}
-	const pollAdvanced = progressedByBatch.size > 0;
+	const pollAdvanced = units.some(
+		(candidate) => candidate.read && (candidate.read.complete || candidate.read.fetched.length > 0),
+	);
 	for (const unit of units) {
 		const read = unit.read;
 		if (!read) {

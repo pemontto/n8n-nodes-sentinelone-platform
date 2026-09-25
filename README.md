@@ -41,6 +41,12 @@ Alert Activity > Occurred replaces the earlier trigger's Alert Note > Created re
 
 Activity output starts with the alert ID, name and source-provided external ID. Current status, severity and analyst verdict are included by default and clearly separated from recorded changes.
 
+### Known limits
+
+- Alert snapshot overlap exclusions are capped at 1,000 IDs per request.
+- On single-batch tenants under sustained load close to per-poll capacity, New alerts that become visible more than roughly 240 seconds after their `createdAt` (close to the 300-second overlap) can be missed.
+- These limits depend on SentinelOne behaviour to confirm on a live tenant: the request size limit for excluded IDs, real alert ID length, page latency at 200 rows for large scope batches, alert visibility lag, `updatedAt` ties from bulk actions, and cursor stability. See [delivery limits](docs/trigger.md).
+
 ## Migrating from n8n-nodes-sentinelone-alerts
 
 This package supersedes `n8n-nodes-sentinelone-alerts`. Install the new package and migrate workflows deliberately: its credential type is `sentinelOnePlatformApi` instead of `sentinelOneAlertsApi`, its action node type is `sentinelOnePlatform` instead of `sentinelOneAlerts`, and its trigger type is `sentinelOnePlatformTrigger` instead of `sentinelOneAlertsTrigger`. n8n can have both packages installed side by side while workflows are migrated.
