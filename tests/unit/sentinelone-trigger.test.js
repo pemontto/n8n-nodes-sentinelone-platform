@@ -559,7 +559,8 @@ test('updated-only mode skips a new alert and emits its later version', async ()
 	assert.deepEqual(first.items, []);
 	assert.deepEqual(
 		first.nextState.seenAlertIds.map((entry) => entry.split('\u0000')[0]),
-		['updated-only'],
+		[],
+		'Updated-only polling does not need or save createdAt identities',
 	);
 	state = first.nextState;
 
