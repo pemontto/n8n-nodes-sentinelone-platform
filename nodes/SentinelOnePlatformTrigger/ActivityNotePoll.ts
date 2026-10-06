@@ -361,7 +361,7 @@ function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEv
 			...(event.activityKind === 'noteCreated' && typeof event.noteText === 'string'
 				? { note: event.noteText }
 				: {}),
-			actorName: event.authorName,
+			actor: { id: event.authorId, name: event.authorName },
 			alertId: event.alertId,
 			alertName: alert.name ?? null,
 			alertStatus: alert.status ?? null,

@@ -1112,7 +1112,7 @@ test('simplified activities return flat current context, optional changes and no
 				? { change: { field: 'status', from: 'NEW', to: 'RESOLVED' } }
 				: {}),
 			...(activityType === '16007' ? { note: 'Exact SDL note text' } : {}),
-			actorName: 'Example Actor',
+			actor: { id: null, name: 'Example Actor' },
 			alertId: 'old-alert',
 			alertName: 'Old alert',
 			alertStatus: 'NEW',

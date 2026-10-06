@@ -46,7 +46,7 @@ Options > Scope groups the optional Account, Site, and Group selections that res
 
 ## Output
 
-Simplify is an activity Option that defaults to true. Simplified output is flat and contains `eventId`, `eventType`, `eventTime`, `activityKind`, `actorName`, `alertId`, `alertName`, `alertStatus`, `alertSeverity`, `alertAnalystVerdict`, `accountName`, `siteName`, and `groupName`. For status (`16001`), analyst verdict (`16002`), severity (`16003`), and assignee (`16004`) events, a supplied change is returned as `change: { field, from?, to? }`; the assignee field is `assignee` and its values are email addresses. If an old value was not supplied, `from` is omitted. Other activity types use `changes` with `oldValue` and `newValue` when supplied. `change` and `changes` are omitted when there is no change. `note` is a string included only for `noteCreated`, and mitigation details appear when supplied. Alert summary fields remain present as `null` when the lookup has no value. Include Raw Activity and Include Current Alert can add `rawActivity` and `currentAlert` in either output mode. The activity's external identifier, `activityId`, `activityTypeId`, `eventTimestamp`, nested actor, and full parent object are available in the full output when Simplify is disabled.
+Simplify is an activity Option that defaults to true. Simplified output is flat and contains `eventId`, `eventType`, `eventTime`, `activityKind`, `actor` (`id`, `name`), `alertId`, `alertName`, `alertStatus`, `alertSeverity`, `alertAnalystVerdict`, `accountName`, `siteName`, and `groupName`. For status (`16001`), analyst verdict (`16002`), severity (`16003`), and assignee (`16004`) events, a supplied change is returned as `change: { field, from?, to? }`; the assignee field is `assignee` and its values are email addresses. If an old value was not supplied, `from` is omitted. Other activity types use `changes` with `oldValue` and `newValue` when supplied. `change` and `changes` are omitted when there is no change. `note` is a string included only for `noteCreated`, and mitigation details appear when supplied. Alert summary fields remain present as `null` when the lookup has no value. Include Raw Activity and Include Current Alert can add `rawActivity` and `currentAlert` in either output mode. The activity's external identifier, `activityId`, `activityTypeId`, `eventTimestamp`, nested actor, and full parent object are available in the full output when Simplify is disabled.
 
 In full output, each recognised change appears in `changes[]` as `{field, oldValue?, newValue?}`. One activity can contain several changes. An empty array means no recognised changes were supplied; simplified output omits it. A missing endpoint stays absent; an explicit null stays null. Unknown types retain the generic envelope.
 
@@ -61,7 +61,7 @@ A simplified status change has this shape (all values are synthetic):
 	"eventTime": "2025-02-03T10:00:00Z",
 	"activityKind": "statusChanged",
 	"change": { "field": "status", "from": "NEW", "to": "IN_PROGRESS" },
-	"actorName": "analyst@example.test",
+	"actor": { "id": "1234567890", "name": "analyst@example.test" },
 	"alertId": "alert-123",
 	"alertName": "Example detection",
 	"alertStatus": "IN_PROGRESS",
