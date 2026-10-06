@@ -880,8 +880,14 @@ export class SentinelOnePlatformTrigger implements INodeType {
 
 				const fingerprint = `${fingerprintConfig(config)}${resource === 'alertActivity' ? ':sdl-activities-v1' : ''}`;
 				const scheduled = this.getMode() !== 'manual';
-				const pendingBaseline = pendingBaselines.get(pollKey);
 				const now = Date.now();
+
+				// Sweep every expired entry so workflows deactivated before committing do not linger.
+				for (const [key, entry] of pendingBaselines) {
+					if (now - entry.updatedAtMs > pendingBaselineTtlMs) pendingBaselines.delete(key);
+				}
+
+				const pendingBaseline = pendingBaselines.get(pollKey);
 
 				if (
 					pendingBaseline &&
