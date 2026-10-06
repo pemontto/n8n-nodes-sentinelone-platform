@@ -128,7 +128,7 @@ test('Other GraphQL errors retain their existing identity even with a null alert
 		const { execute } = await run(t, 'get', { errors: [error], data: { alert: null } });
 		await assert.rejects(execute(), (failure) => {
 			assert.equal(failure.httpCode, '400');
-			assert.equal(failure.message, 'SentinelOne GraphQL operation failed.');
+			assert.equal(failure.message, `SentinelOne GraphQL error: ${error.message}`);
 			return true;
 		});
 	}

@@ -4,6 +4,7 @@
 
 This first release adds n8n nodes for working with SentinelOne alerts, alert notes, and SDL PowerQueries, plus triggers for new and updated alerts and alert activity.
 
+- GraphQL errors now show SentinelOne's own error message instead of a generic failure; submitted note text is masked if echoed.
 - Alert Get, Get Many, and Update support common alert fields, filtering, optional scope selection, status and analyst verdict changes, and ticket IDs. Additional alert fields and raw data are optional.
 - Alert Get and Update report missing or inaccessible alerts as HTTP 404, including during discovery and verification.
 - Alert Update checks acknowledged changes by default. If SentinelOne returns an uncertain or partial result, inspect the alert before trying the update again.

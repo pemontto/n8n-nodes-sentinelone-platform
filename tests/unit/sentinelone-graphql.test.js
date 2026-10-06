@@ -251,7 +251,7 @@ test('HTTP 200 GraphQL errors fail even when partial data is present', async () 
 			0,
 		),
 		(error) => {
-			assert.match(error.message, /GraphQL operation failed/);
+			assert.match(error.message, /GraphQL error: Resolver failed/);
 			assert.doesNotMatch(error.message, new RegExp(secretText));
 			assert.equal(error.context.itemIndex, 0);
 			return true;
@@ -920,8 +920,9 @@ test('Create Note marks every HTTP-200 GraphQL mutation error unknown without ec
 				(error) => {
 					assert.equal(error.mayHaveCommitted, true);
 					assert.equal(error.outcome, 'unknown');
-					assert.match(error.message, /GraphQL operation failed/);
-					assert.doesNotMatch(error.message, /quoted|CASE-991|Rejected value/);
+					// SentinelOne's text is returned, but submitted note text is masked.
+					assert.match(error.message, /GraphQL error: Rejected value/);
+					assert.doesNotMatch(error.message, /quoted|CASE-991/);
 					return true;
 				},
 			);

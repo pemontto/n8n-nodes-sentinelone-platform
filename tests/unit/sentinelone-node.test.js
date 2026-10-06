@@ -314,8 +314,8 @@ test('Continue On Fail links an HTTP-200 GraphQL error to its input and continue
 
 	assert.equal(result[0].length, 2);
 	assert.deepEqual(result[0][0].pairedItem, { item: 0 });
-	assert.match(result[0][0].json.error, /GraphQL operation failed/);
-	assert.doesNotMatch(result[0][0].json.error, new RegExp(ALERT_ID));
+	assert.match(result[0][0].json.error, /GraphQL error: Access denied/);
+	assert.match(result[0][0].json.error, new RegExp(ALERT_ID));
 	assert.equal(result[0][0].error.context.itemIndex, 0);
 	assert.equal(result[0][1].json.id, secondAlertId);
 	assert.deepEqual(result[0][1].pairedItem, { item: 1 });

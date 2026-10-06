@@ -10,6 +10,8 @@ Update supports status, analyst verdict, and ticket ID. Choose a Status or Analy
 
 The normal output item includes `alertId`, `requested`, `outcome`, `mutationAcknowledged`, `verification`, and `verificationStatus`, plus fields for scheduled execution IDs, immediate action results, or safe error codes as applicable. Immediate action results have an `actionId`, a `status` of `success`, `skipped`, or `failed`, and sanitised `detail`. Scheduled and partial outcomes remain items. Rejected updates throw `NodeApiError` with the real HTTP status when available, otherwise the service error code when present. The error carries `alertId`, `requested`, `errors`, and `mutationAcknowledged: false`; it works with Continue On Fail and Continue (using error output). Unknown outcomes include `httpCode` for an HTTP failure or `errorCode` for a statusless network failure. Check the alert before retrying an uncertain or partial update. See [Update verification](ticket-update-verification.md).
 
+GraphQL errors return SentinelOne's own message text (up to five messages, each bounded) plus any error codes, so a failure says what went wrong. Values submitted by a mutation, such as note text, are masked if SentinelOne echoes them back. A missing alert is reported as `Alert <id> not found.` with HTTP 404.
+
 ## Alert Note
 
 Get Many takes an Alert ID and a Limit or Return All. Create takes an Alert ID, text, and Plain Text or Markdown format. Neither operation needs scope.

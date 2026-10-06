@@ -194,10 +194,44 @@ export async function graphQlRequest(
 			})
 			.filter(Boolean);
 
-		const description =
-			codes.length > 0 ? `SentinelOne error codes: ${[...new Set(codes)].join(', ')}.` : undefined;
+		// Return SentinelOne's own error text: it is what tells a user what went wrong.
+		// Mutation values (such as note text) are masked if SentinelOne echoes them back.
+		const submitted = mutation
+			? JSON.stringify(variables)
+					.match(/"(?:[^"\\]|\\.)*"/g)
+					?.map((value) => JSON.parse(value) as string)
+					.filter((value) => value.length >= 4)
+					.flatMap((value) => [JSON.stringify(value).slice(1, -1), value]) ?? []
+			: [];
 
-		const failure = envelopeFailure('SentinelOne GraphQL operation failed.', description);
+		const mask = (text: string) =>
+			submitted.reduce((masked, value) => masked.split(value).join('[submitted value]'), text);
+
+		const messages = [
+			...new Set(
+				errors.flatMap((entry) => {
+					const text =
+						isRecord(entry) && typeof entry.message === 'string' ? mask(entry.message.trim()) : '';
+
+					return text ? [text.length > 500 ? `${text.slice(0, 500)}…` : text] : [];
+				}),
+			),
+		].slice(0, 5);
+
+		const description =
+			[
+				messages.length > 0 ? messages.join(' | ') : '',
+				codes.length > 0 ? `SentinelOne error codes: ${[...new Set(codes)].join(', ')}.` : '',
+			]
+				.filter(Boolean)
+				.join(' ') || undefined;
+
+		const failure = envelopeFailure(
+			messages.length > 0
+				? `SentinelOne GraphQL error: ${messages[0].length > 200 ? `${messages[0].slice(0, 200)}…` : messages[0]}`
+				: 'SentinelOne GraphQL operation failed.',
+			description,
+		);
 
 		const rejectionCodes = new Set([
 			'GRAPHQL_VALIDATION_FAILED',
