@@ -4,6 +4,7 @@ import {
 	alertDetailFieldOptions,
 	type AlertProjection,
 } from './AlertFields';
+
 export const severityOptions = [
 	{ name: 'Critical', value: 'CRITICAL' },
 	{ name: 'High', value: 'HIGH' },
@@ -12,11 +13,13 @@ export const severityOptions = [
 	{ name: 'Medium', value: 'MEDIUM' },
 	{ name: 'Unknown', value: 'UNKNOWN' },
 ];
+
 export const statusOptions = [
 	{ name: 'In Progress', value: 'IN_PROGRESS' },
 	{ name: 'New', value: 'NEW' },
 	{ name: 'Resolved', value: 'RESOLVED' },
 ];
+
 export const analystVerdictOptions = [
 	{ name: 'False Positive: Benign', value: 'FALSE_POSITIVE_BENIGN' },
 	{
@@ -48,6 +51,7 @@ export const analystVerdictOptions = [
 	{ name: 'True Positive: Undefined', value: 'TRUE_POSITIVE_UNDEFINED' },
 	{ name: 'Undefined', value: 'UNDEFINED' },
 ];
+
 export const alertId: INodeProperties = {
 	displayName: 'Alert ID',
 	name: 'alertId',
@@ -123,6 +127,7 @@ export function managementScopeOption(): INodeProperties {
 			},
 		},
 	};
+
 	const fields = managementScopeFields().map(
 		(field): INodeProperties => ({
 			...field,

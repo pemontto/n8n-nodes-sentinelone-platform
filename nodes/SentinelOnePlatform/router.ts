@@ -31,13 +31,16 @@ export async function routeSentinelOneOperation(
 ): Promise<IDataObject[]> {
 	const resource = context.getNodeParameter('resource', itemIndex) as string;
 	const operation = context.getNodeParameter('operation', itemIndex) as string;
+
 	const resourceHandlers = Object.prototype.hasOwnProperty.call(handlers, resource)
 		? handlers[resource]
 		: undefined;
+
 	const handler =
 		resourceHandlers && Object.prototype.hasOwnProperty.call(resourceHandlers, operation)
 			? resourceHandlers[operation]
 			: undefined;
+
 	if (!handler) {
 		throw new NodeOperationError(
 			context.getNode(),
@@ -45,5 +48,6 @@ export async function routeSentinelOneOperation(
 			{ itemIndex },
 		);
 	}
+
 	return await handler(context, itemIndex);
 }

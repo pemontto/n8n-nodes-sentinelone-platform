@@ -4,8 +4,11 @@ import { isRetryableReadError, responseStatus } from '../shared/transport/retry'
 import { PollBudgetError } from '../shared/transport/request';
 
 export const ACTIVITY_FEED_LIMIT = 1000;
+
 export const ACTIVITY_FEED_INLINE_BYTES = 5 * 1024 * 1024;
+
 const ROUTING_HEADER = 'x-dataset-query-forward-tag';
+
 export const ACTIVITY_FEED_LOG_FILTER =
 	"dataSource.name='ActivityFeed' dataset='activityLog' data.alert.id=*";
 
@@ -62,16 +65,20 @@ function failure(message: string): Error {
 function validateQuality(payload: IDataObject): void {
 	for (const object of [payload, record(payload.data)]) {
 		if (!object) continue;
+
 		for (const key of ['errors', 'warnings']) {
 			const value = object[key];
+
 			if (value !== undefined && value !== null && (!Array.isArray(value) || value.length > 0))
 				throw failure('returned errors or warnings');
 		}
+
 		if (
 			object.partialResultsDueToTimeLimit !== undefined &&
 			object.partialResultsDueToTimeLimit !== false
 		)
 			throw failure('returned partial results');
+
 		for (const key of ['omittedEvents', 'discardedArrayItems']) {
 			if (object[key] !== undefined && object[key] !== 0)
 				throw failure('omitted or discarded query data');
@@ -94,6 +101,7 @@ function complete(payload: IDataObject): boolean {
 function requestFailure(stage: 'launch' | 'polling', error: unknown): Error {
 	const status = responseStatus(error);
 	let reason: string;
+
 	switch (status) {
 		case 400:
 			reason = 'bad request (HTTP 400); check the query configuration';
@@ -116,26 +124,33 @@ function requestFailure(stage: 'launch' | 'polling', error: unknown): Error {
 				reason = `request failed (HTTP ${status})`;
 			}
 	}
+
 	return failure(`SDL query ${stage} failed: ${reason}`);
 }
 
 function parseLogJson(text: string): unknown {
 	const parts: string[] = [];
 	let index = 0;
+
 	while (index < text.length) {
 		const start = index;
+
 		if (text[index] === '"') {
 			index++;
+
 			while (index < text.length) {
 				if (text[index] === '\\') {
 					index += 2;
 					continue;
 				}
+
 				if (text[index++] === '"') break;
 			}
+
 			parts.push(text.slice(start, index));
 		} else if (text[index] === '-' || /[0-9]/.test(text[index])) {
 			const token = text.slice(index).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/)?.[0];
+
 			if (!token) throw failure('returned invalid LOG JSON');
 			const value = Number(token);
 			parts.push(
@@ -148,6 +163,7 @@ function parseLogJson(text: string): unknown {
 			parts.push(text[index++]);
 		}
 	}
+
 	try {
 		return JSON.parse(parts.join('')) as unknown;
 	} catch {
@@ -161,6 +177,7 @@ function validateLogNumbers(value: unknown): void {
 		(!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER)
 	)
 		throw failure('received already-parsed unsafe LOG numbers; a text response is required');
+
 	if (Array.isArray(value)) for (const item of value) validateLogNumbers(item);
 	else if (record(value))
 		for (const item of Object.values(value as IDataObject)) validateLogNumbers(item);
@@ -168,28 +185,36 @@ function validateLogNumbers(value: unknown): void {
 
 function decodeLog(payload: IDataObject): ActivityFeedEvent[] {
 	const matches = record(payload.data)?.matches;
+
 	if (!Array.isArray(matches)) throw failure('returned an invalid LOG match list');
+
 	return matches.map((match) => {
 		const rawActivity = record(match);
 		const fields = record(rawActivity?.values);
+
 		const identifier = (value: unknown) =>
 			typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : value;
+
 		const activityId = identifier(fields?.activity_id);
 		const activityTypeId = identifier(fields?.activity_type);
 		const alertId = identifier(fields?.['data.alert.id']);
 		const createdAt = fields?.created_at;
 		const noteText = fields?.['data.payload.note_text'];
 		const userId = fields?.['data.user.id'];
+
 		const authorId =
 			typeof userId === 'number' && Number.isSafeInteger(userId)
 				? String(userId)
 				: (userId ?? null);
+
 		const authorName = fields?.['data.user.enriched_name'] ?? null;
 		const timestamp = rawActivity?.timestamp;
+
 		const timestampNs =
 			typeof timestamp === 'number' && Number.isSafeInteger(timestamp)
 				? String(timestamp)
 				: timestamp;
+
 		if (
 			!rawActivity ||
 			!fields ||
@@ -211,6 +236,7 @@ function decodeLog(payload: IDataObject): ActivityFeedEvent[] {
 		)
 			throw failure('returned invalid LOG activity identity, timestamps or note text');
 		const changes: ActivityChange[] = [];
+
 		for (const [field, source] of [
 			['status', 'status'],
 			['analystVerdict', 'analyst_verdict'],
@@ -219,24 +245,31 @@ function decodeLog(payload: IDataObject): ActivityFeedEvent[] {
 			['assigneeId', 'assignee_id'],
 		]) {
 			const change: ActivityChange = { field };
+
 			for (const [endpoint, property] of [
 				['old', 'oldValue'],
 				['new', 'newValue'],
 			] as const) {
 				if (source === 'assignee_id' && endpoint === 'old') continue;
 				const key = `data.payload.changes.${endpoint}_${source}`;
+
 				if (Object.prototype.hasOwnProperty.call(fields, key)) change[property] = fields[key];
 			}
+
 			if (Object.keys(change).length > 1) changes.push(change);
 		}
+
 		const mitigation: NonNullable<ActivityFeedEvent['mitigation']> = {};
+
 		for (const [source, target] of [
 			['mitigation_action_type', 'actionType'],
 			['mitigation_action_status', 'activityStatus'],
 		] as const) {
 			const key = `data.payload.${source}`;
+
 			if (Object.prototype.hasOwnProperty.call(fields, key)) mitigation[target] = fields[key];
 		}
+
 		return {
 			activityId,
 			activityTypeId,
@@ -257,11 +290,13 @@ function decodeLog(payload: IDataObject): ActivityFeedEvent[] {
 function canonical(value: unknown): string {
 	if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
 	const object = record(value);
+
 	if (object)
 		return `{${Object.keys(object)
 			.sort()
 			.map((key) => `${JSON.stringify(key)}:${canonical(object[key])}`)
 			.join(',')}}`;
+
 	return JSON.stringify(value) ?? 'undefined';
 }
 
@@ -358,6 +393,7 @@ async function readActivityFeedRun(
 			(!activityTypeIds.length || activityTypeIds.some((id) => !/^\d+$/.test(id))))
 	)
 		throw failure('requires a valid half-open time window, account IDs and activity selection');
+
 	if (
 		prefix &&
 		(!Number.isSafeInteger(prefix.checkpointMs) ||
@@ -374,6 +410,7 @@ async function readActivityFeedRun(
 	const lifecycleMs = timing.lifecycleMs ?? 100_000;
 	const maxQueries = timing.maxQueries ?? 128;
 	const inlineBytes = timing.inlineBytes ?? ACTIVITY_FEED_INLINE_BYTES;
+
 	if (
 		![deadlineMs, lifecycleMs, maxQueries, inlineBytes].every(
 			(value) => Number.isSafeInteger(value) && value > 0,
@@ -395,45 +432,58 @@ async function readActivityFeedRun(
 		let accepted = false;
 		let routingTag: string | undefined;
 		let lastPollStatus: number | null = null;
+
 		const captureRouting = (response: unknown): void => {
 			const wrapper = record(response);
 			const headers = record(wrapper?.headers);
+
 			const routingEntry = Object.entries(headers ?? {}).find(
 				([key]) => key.toLowerCase() === ROUTING_HEADER,
 			);
+
 			if (routingEntry) {
 				const tag = routingEntry[1];
+
 				if (typeof tag !== 'string' || !tag || tag.length > 1024 || !/^[\x20-\x7e]+$/.test(tag))
 					throw failure('returned an invalid routing header');
 				routingTag = tag;
 			}
 		};
+
 		const unwrap = (response: unknown): IDataObject | undefined => {
 			captureRouting(response);
 			const wrapper = record(response);
+
 			const body =
 				wrapper && Object.prototype.hasOwnProperty.call(wrapper, 'body') ? wrapper.body : response;
+
 			const payload = typeof body === 'string' ? parseLogJson(body) : body;
 			validateLogNumbers(payload);
+
 			return record(payload);
 		};
+
 		const routedHeaders = () => (routingTag ? { [ROUTING_HEADER]: routingTag } : {});
 
 		const remaining = () => {
 			const milliseconds = expires - now();
+
 			if (milliseconds <= 0) {
 				// Rate limits that outlast one query's lifecycle fail it; ones that reach the whole read's deadline end the read at its completed prefix.
 				if (lastPollStatus === 429 && now() < deadline)
 					throw requestFailure('polling', { statusCode: 429 });
 				throw new ActivityFeedBudgetError('deadline', 'exceeded the query deadline');
 			}
+
 			return Math.max(1, Math.min(milliseconds, 30_000));
 		};
+
 		// A request the poll budget stopped, or a transient failure once the deadline has passed, ends the read at its completed prefix; permanent failures still fail it.
 		const stopped = (stage: 'launch' | 'polling', error: unknown): Error =>
 			error instanceof PollBudgetError || (now() >= deadline && isRetryableReadError(error))
 				? new ActivityFeedBudgetError('deadline', 'exceeded the query deadline')
 				: requestFailure(stage, error);
+
 		try {
 			const queryBody = {
 				queryType: 'LOG',
@@ -449,6 +499,7 @@ async function readActivityFeedRun(
 				},
 				...(accountIds.length ? { tenant: false, accountIds } : { tenant: true }),
 			};
+
 			let payload = unwrap(
 				await request({
 					method: 'POST',
@@ -463,20 +514,25 @@ async function readActivityFeedRun(
 					throw stopped('launch', error);
 				}),
 			);
+
 			if (typeof payload?.id !== 'string' || !payload.id.trim())
 				throw failure('create response omitted its query ID');
 			id = payload.id;
+
 			while (true) {
 				if (!payload) throw failure('returned an invalid query response');
+
 				if (prefix) {
 					for (const key of ['stepsCompleted', 'stepsTotal']) {
 						const value = payload[key];
+
 						if (
 							value !== undefined &&
 							(typeof value !== 'number' || !Number.isFinite(value) || value < 0)
 						)
 							throw failure('returned invalid query completion counters');
 					}
+
 					if (
 						typeof payload.stepsCompleted === 'number' &&
 						typeof payload.stepsTotal === 'number' &&
@@ -485,29 +541,39 @@ async function readActivityFeedRun(
 					)
 						throw failure('returned invalid completed query data');
 				}
+
 				if (payload.id !== undefined && payload.id !== id)
 					throw failure('returned a mismatched query ID');
 				validateQuality(payload);
 				remaining();
 				let externalResult = false;
+
 				for (const part of [payload, record(payload.data)]) {
 					const url = part?.fullResultUrl;
+
 					if (url !== undefined && url !== null && url !== '') {
 						if (typeof url !== 'string') throw failure('returned an invalid full-result URL');
 						externalResult = true;
 					}
 				}
+
 				const bytes = new TextEncoder().encode(JSON.stringify(payload)).byteLength;
+
 				if (externalResult || bytes > Math.min(inlineBytes, ACTIVITY_FEED_INLINE_BYTES)) {
 					accepted = complete(payload);
+
 					return null;
 				}
+
 				if (complete(payload)) {
 					const rows = decodeLog(payload);
 					accepted = true;
+
 					return rows;
 				}
+
 				await sleep(Math.min(1500, remaining()));
+
 				const result = await request({
 					method: 'GET',
 					returnFullResponse: true,
@@ -520,14 +586,18 @@ async function readActivityFeedRun(
 					(value) => ({ value, error: undefined }),
 					(error: unknown) => ({ value: undefined, error }),
 				);
+
 				if (result.error !== undefined) {
 					if (result.error instanceof PollBudgetError) throw stopped('polling', result.error);
 					const errorResponse = record(record(result.error)?.response);
+
 					if (errorResponse?.headers) captureRouting(errorResponse);
 					lastPollStatus = responseStatus(result.error);
+
 					if (lastPollStatus === 404 || lastPollStatus === 429) continue;
 					throw stopped('polling', result.error);
 				}
+
 				lastPollStatus = null;
 				payload = unwrap(result.value);
 			}
@@ -549,13 +619,16 @@ async function readActivityFeedRun(
 	}
 
 	let previewComplete = false;
+
 	async function visit(start: number, end: number): Promise<void> {
 		if (previewComplete) return;
 		const rows = await queryWindow(start, end);
+
 		if (rows === null || rows.length >= ACTIVITY_FEED_LIMIT) {
 			if (end - start <= 1)
 				throw failure('hit a row, inline-byte or external-result limit inside one millisecond');
 			const middle = start + Math.floor((end - start) / 2);
+
 			if (previewWindow) {
 				await visit(middle, end);
 				await visit(start, middle);
@@ -563,11 +636,15 @@ async function readActivityFeedRun(
 				await visit(start, middle);
 				await visit(middle, end);
 			}
+
 			return;
 		}
+
 		const windowEvents = new Map<string, ActivityFeedEvent>();
+
 		for (const event of rows) {
 			const timestamp = BigInt(event.timestampNs);
+
 			if (
 				timestamp < BigInt(start) * BigInt(1_000_000) ||
 				timestamp >= BigInt(end) * BigInt(1_000_000)
@@ -576,37 +653,47 @@ async function readActivityFeedRun(
 			const identity = JSON.stringify([event.activityId, event.timestampNs]);
 			const payload = canonical(event.rawActivity?.values);
 			const observed = observedPayloads.get(identity);
+
 			if (observed !== undefined && observed !== payload)
 				throw failure('returned conflicting duplicate activity IDs at the same source timestamp');
 			observedPayloads.set(identity, payload);
 			const pending = windowEvents.get(event.activityId);
+
 			const previousTimestamp = pending
 				? BigInt(pending.timestampNs)
 				: newestTimestamps.get(event.activityId);
+
 			if (previousTimestamp !== undefined && timestamp <= previousTimestamp) continue;
 			windowEvents.set(event.activityId, event);
 		}
+
 		const acceptedRows = [...windowEvents.values()];
+
 		if (
 			prefix &&
 			collected.size + acceptedRows.filter((event) => !collected.has(event.activityId)).length >
 				Math.min(prefix.maxEvents, 40000)
 		)
 			throw new ActivityFeedBudgetError('event-count', 'exceeded the activity event budget');
+
 		for (const event of acceptedRows) {
 			newestTimestamps.set(event.activityId, BigInt(event.timestampNs));
 			collected.set(event.activityId, event);
 		}
+
 		completedThroughMs = end;
+
 		if (previewWindow) {
 			previewComplete = await previewWindow(acceptedRows);
 			collected.clear();
 		}
 	}
+
 	if (prefix) {
 		let start = startMs;
 		let end = Math.min(endMs, prefix.checkpointMs + 300000);
 		let width = 300000;
+
 		try {
 			while (start < endMs) {
 				await visit(start, end);
@@ -627,6 +714,7 @@ async function readActivityFeedRun(
 	} else if (previewWindow) {
 		let end = endMs;
 		let width = 86400000;
+
 		while (end > startMs && !previewComplete) {
 			const start = Math.max(startMs, end - width);
 			await visit(start, end);
@@ -636,10 +724,13 @@ async function readActivityFeedRun(
 	} else {
 		await visit(startMs, endMs);
 	}
+
 	const events = [...collected.values()].sort((left, right) => {
 		const a = BigInt(left.timestampNs),
 			b = BigInt(right.timestampNs);
+
 		return a < b ? -1 : a > b ? 1 : left.activityId.localeCompare(right.activityId);
 	});
+
 	return { events, completedThroughMs };
 }

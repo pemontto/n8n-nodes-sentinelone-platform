@@ -123,12 +123,14 @@ const activityFields: INodeProperties[] = [
 						(field): INodeProperties[] => {
 							const suffix =
 								field === 'analystVerdict' ? 'Verdict' : field === 'status' ? 'Status' : 'Severity';
+
 							const options =
 								field === 'analystVerdict'
 									? analystVerdictOptions
 									: field === 'status'
 										? statusOptions
 										: severityOptions;
+
 							return ['from', 'to'].map(
 								(endpoint): INodeProperties => ({
 									displayName: endpoint === 'from' ? 'From' : 'To',
@@ -200,12 +202,19 @@ const activePollKeys = new Set<string>();
 /** Declared by n8n 2.38.0 and later; older hosts omit it and keep their existing limits. */
 type PollBudgetFunctions = { getPollBudgetMs?: () => number };
 
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
 /** Absolute time at which a scheduled poll must stop reading, or undefined when the host sets no budget or the poll is a manual preview. */
 function pollDeadline(context: IPollFunctions): number | undefined {
 	if (context.getMode() === 'manual') return undefined;
+	// SAFETY: n8n 2.38.0+ adds getPollBudgetMs to poll functions; older hosts are checked below.
 	const { getPollBudgetMs } = context as IPollFunctions & PollBudgetFunctions;
+
 	if (typeof getPollBudgetMs !== 'function') return undefined;
 	const budgetMs = Number(getPollBudgetMs.call(context));
+
 	return Number.isFinite(budgetMs) ? Date.now() + Math.max(0, budgetMs) : undefined;
 }
 
@@ -223,8 +232,11 @@ function readStringArray(
 }
 
 function credentialIdentity(context: IPollFunctions): IDataObject {
+	// SAFETY: n8n credentials are exposed as a JSON object keyed by credential type.
 	const credentials = context.getNode().credentials as IDataObject | undefined;
+	// SAFETY: the selected SentinelOne API credential is a JSON object when configured.
 	const selected = credentials?.sentinelOnePlatformApi as IDataObject | undefined;
+
 	return {
 		type: 'sentinelOnePlatformApi',
 		id: selected?.id ?? null,
@@ -239,22 +251,28 @@ function authenticatedRequest(
 	return async (options) =>
 		requestWithRetry(
 			async (timeoutMs, attempt) => {
+				// SAFETY: request bodies passed to this helper are n8n JSON objects.
 				const body = options.body as IDataObject | undefined;
+
 				const document =
 					options.url.includes('/unifiedalerts/graphql') && typeof body?.query === 'string'
 						? body.query
 						: undefined;
+
 				if (document)
 					logGraphqlRequest(context.logger, debug, document, body?.variables, { attempt });
 				const startedAt = Date.now();
 				let received = false;
+
 				try {
 					const response = await context.helpers.httpRequestWithAuthentication.call(
 						context,
 						'sentinelOnePlatformApi',
 						{ ...options, timeout: timeoutMs, sendCredentialsOnCrossOriginRedirect: false },
 					);
+
 					received = true;
+
 					if (document)
 						logGraphqlResult(context.logger, debug, {
 							attempt,
@@ -262,6 +280,7 @@ function authenticatedRequest(
 							outcome: 'received',
 							graphqlErrorCount: Array.isArray(response?.errors) ? response.errors.length : 0,
 						});
+
 					return response;
 				} finally {
 					if (document && !received)
@@ -280,10 +299,12 @@ function authenticatedRequest(
 			},
 		).then((result) => {
 			if (result.ok) return result.value;
+
 			// Poll helpers recognise this class to keep a completed prefix; poll() wraps it with node context.
 			if (result.error instanceof PollBudgetError) throw result.error;
 			const error = result.error;
 			const status = responseStatus(error);
+
 			const message =
 				status === 401
 					? 'SentinelOne authentication failed. Check the credential.'
@@ -292,6 +313,7 @@ function authenticatedRequest(
 						: status === 429
 							? 'SentinelOne rate limit reached. Try again after the service delay.'
 							: `SentinelOne request failed${status ? ` (HTTP ${status})` : ''}. Check service availability.`;
+
 			const apiError = new NodeApiError(
 				context.getNode(),
 				{ message },
@@ -301,6 +323,7 @@ function authenticatedRequest(
 					httpCode: status ? String(status) : undefined,
 				},
 			);
+
 			throw Object.assign(apiError, {
 				statusCode: status,
 				retryable: isRetryableReadError(error),
@@ -317,6 +340,7 @@ async function scopeOptions(
 ): Promise<INodePropertyOptions[]> {
 	const credentials = await context.getCredentials('sentinelOnePlatformApi');
 	const baseUrl = normalizeBaseUrl(credentials.baseUrl);
+
 	try {
 		return await loadScopeOptions(
 			authenticatedRequest(context, false, deadline),
@@ -328,18 +352,20 @@ async function scopeOptions(
 		// A spent poll budget is not a permission problem; poll() wraps it with node context.
 		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 		if (error instanceof PollBudgetError) throw error;
+
 		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 		if (error instanceof NodeApiError) throw error;
 		const status = responseStatus(error);
 		const message = `Unable to load SentinelOne ${scopeType.toLowerCase()} scopes. Check the credential permissions and try again.`;
+
 		if (status === null)
-			throw new NodeOperationError(context.getNode(), `${message} ${(error as Error).message}`);
+			throw new NodeOperationError(context.getNode(), `${message} ${errorMessage(error)}`);
 		throw new NodeApiError(
 			context.getNode(),
 			{ message },
 			{
 				message,
-				description: `${(error as Error).message} (HTTP ${status})`,
+				description: `${errorMessage(error)} (HTTP ${status})`,
 				httpCode: String(status),
 			},
 		);
@@ -356,6 +382,7 @@ async function validateSelectedScopes(
 	const options = await scopeOptions(context, scopeType, filters, deadline);
 	const visibleIds = new Set(options.map((option) => String(option.value)));
 	const missingIds = selectedIds.filter((id) => !visibleIds.has(id));
+
 	if (missingIds.length === 0) return;
 	throw new NodeOperationError(
 		context.getNode(),
@@ -639,6 +666,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 		loadOptions: {
 			async getAccounts(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const credentials = await this.getCredentials('sentinelOnePlatformApi');
+
 				try {
 					return await loadScopeOptions(
 						authenticatedRequest(this),
@@ -659,7 +687,9 @@ export class SentinelOnePlatformTrigger implements INodeType {
 			async getGroups(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const accountIds = readStringArray(this, 'accountIds');
 				const siteIds = readStringArray(this, 'siteIds');
+
 				if (siteIds.length === 0) return scopeParentPlaceholder('GROUP');
+
 				return await scopeOptions(this, 'GROUP', { accountIds, siteIds });
 			},
 		},
@@ -668,27 +698,34 @@ export class SentinelOnePlatformTrigger implements INodeType {
 	async poll(this: IPollFunctions): Promise<INodeExecutionData[][] | null> {
 		const node = this.getNode();
 		const pollKey = `${this.getWorkflow().id}:${node.id}`;
+
 		if (activePollKeys.has(pollKey)) {
 			this.logger.warn('[SentinelOne Platform Trigger] Skipping overlapping poll');
+
 			return null;
 		}
+
 		activePollKeys.add(pollKey);
 		const deadline = pollDeadline(this);
+
 		try {
 			const credentials = await this.getCredentials('sentinelOnePlatformApi');
 			const options = this.getNodeParameter('options', {}) as IDataObject;
 			const nodeDebug = this.getNodeParameter('nodeDebug', false) === true;
 			const request = authenticatedRequest(this, nodeDebug, deadline);
 			const staticData = this.getWorkflowStaticData('node');
+			// SAFETY: this node stores only TriggerState values under its sentinelOneTrigger key.
 			const previousState = (staticData.sentinelOneTrigger as TriggerState | undefined) ?? {};
 
 			try {
 				const baseUrl = normalizeBaseUrl(credentials.baseUrl);
 				const resource = this.getNodeParameter('resource') as 'alert' | 'alertActivity';
+
 				const savedOperation = this.getNodeParameter(
 					'operation',
 					resource === 'alertActivity' ? 'occurred' : 'new',
 				) as 'occurred' | 'new' | 'newOrUpdated' | 'updated';
+
 				// n8n retains the operation selected for the other resource when the resource changes.
 				const operation =
 					resource === 'alertActivity' &&
@@ -697,6 +734,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						: resource === 'alert' && savedOperation === 'occurred'
 							? 'new'
 							: savedOperation;
+
 				if (
 					(resource !== 'alert' && resource !== 'alertActivity') ||
 					(resource === 'alertActivity' && operation !== 'occurred') ||
@@ -704,6 +742,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				) {
 					throw new NodeOperationError(node, 'Unsupported trigger resource or operation.');
 				}
+
 				const events: TriggerEvent[] =
 					resource === 'alertActivity'
 						? ['alert.activity']
@@ -712,23 +751,29 @@ export class SentinelOnePlatformTrigger implements INodeType {
 							: operation === 'updated'
 								? ['alert.updated']
 								: ['alert.new'];
+
 				const accountIds = readStringArray(this, 'accountIds');
 				const siteIds = readStringArray(this, 'siteIds');
 				const groupIds = readStringArray(this, 'groupIds');
+
 				if (groupIds.length > 0 && siteIds.length === 0) {
 					throw new NodeOperationError(
 						node,
 						'Group selections require a site selection. Select the sites for these groups, or clear the saved group selections before polling.',
 					);
 				}
+
 				const allVisibleAccounts =
 					accountIds.length === 0 && siteIds.length === 0 && groupIds.length === 0;
+
 				if (accountIds.length > 0) {
 					await validateSelectedScopes(this, 'ACCOUNT', accountIds, { accountIds }, deadline);
 				}
+
 				if (siteIds.length > 0) {
 					await validateSelectedScopes(this, 'SITE', siteIds, { accountIds, siteIds }, deadline);
 				}
+
 				if (groupIds.length > 0) {
 					await validateSelectedScopes(
 						this,
@@ -738,8 +783,10 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						deadline,
 					);
 				}
+
 				let scopeType: ScopeType;
 				let scopeIds: string[];
+
 				if (groupIds.length > 0) {
 					scopeType = 'GROUP';
 					scopeIds = groupIds;
@@ -752,12 +799,14 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				} else {
 					({ scopeType, scopeIds } = await discoverVisibleScopes(request, baseUrl, node));
 				}
+
 				if (scopeIds.length === 0) {
 					throw new NodeOperationError(
 						this.getNode(),
 						'No credential-visible account or site scopes were found.',
 					);
 				}
+
 				const config: TriggerConfig = {
 					baseUrl,
 					credentialIdentity: credentialIdentity(this),
@@ -769,10 +818,13 @@ export class SentinelOnePlatformTrigger implements INodeType {
 							: undefined,
 					allVisibleAccounts,
 					events,
+					// SAFETY: both multi-select parameters contain only string option values.
 					severities: (options.severities as string[] | undefined) ?? [],
+					// SAFETY: both multi-select parameters contain only string option values.
 					statuses: (options.statuses as string[] | undefined) ?? [],
 					alertName: String(options.alertName ?? ''),
 					advancedFilters: resource === 'alert' ? options.advancedFilters : undefined,
+					// SAFETY: this multi-select parameter contains only the declared string field values.
 					additionalAlertFields:
 						resource === 'alert'
 							? ((options.additionalAlertFields as string[] | undefined) ??
@@ -818,6 +870,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					maxAlertPages: 25,
 					pollDeadlineMs: deadline,
 				};
+
 				const result = await (resource === 'alertActivity' ? pollAlertActivities : pollSentinelOne)(
 					request,
 					config,
@@ -825,17 +878,22 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					this.getMode() === 'manual' ? 'manual' : 'scheduled',
 					Date.now(),
 				);
+
 				if (result.nextState) staticData.sentinelOneTrigger = result.nextState;
+
 				if (result.items.length === 0) return null;
+
 				return [this.helpers.returnJsonArray(result.items)];
 			} catch (error) {
 				// Preserve typed n8n errors and their status, description and cause.
 				// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 				if (error instanceof NodeApiError || error instanceof NodeOperationError) throw error;
+
 				const operationError = new NodeOperationError(
 					this.getNode(),
-					`Unable to poll SentinelOne Unified Alerts. ${(error as Error).message}`,
+					`Unable to poll SentinelOne Unified Alerts. ${errorMessage(error)}`,
 				);
+
 				throw Object.assign(operationError, { cause: error });
 			}
 		} finally {

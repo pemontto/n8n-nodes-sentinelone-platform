@@ -1,5 +1,7 @@
 import { alertDetailSelection, alertListSelection } from '../../shared/AlertFields';
+
 const ALERT_DETAIL_FIELDS = `fragment AlertDetailFields on UnifiedAlertDetail { ${alertDetailSelection()} }`;
+
 const ALERT_NOTE_FIELDS = /* GraphQL */ `
 	fragment AlertNoteFields on AlertNote {
 		id

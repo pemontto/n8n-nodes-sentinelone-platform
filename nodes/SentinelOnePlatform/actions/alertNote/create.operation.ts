@@ -5,6 +5,7 @@ import { requiredId, localError, apiError, isRecord, assertMutationRetryDisabled
 import { graphQlRequest } from '../../transport/graphql';
 import { GRAPHQL_DOCUMENTS } from '../documents';
 import { readAlertNotes, readContentType, parseNote } from './notes';
+
 function rethrowUnknownMutation(
 	context: IExecuteFunctions,
 	itemIndex: number,
@@ -14,6 +15,7 @@ function rethrowUnknownMutation(
 		Object.assign(error, { mayHaveCommitted: true, outcome: 'unknown' });
 		throw error;
 	}
+
 	throw apiError(
 		context,
 		itemIndex,
@@ -31,11 +33,14 @@ export async function createAlertNote(
 	assertMutationRetryDisabled(context, itemIndex);
 	const alertId = requiredId(context, itemIndex, 'alertId', 'Alert ID');
 	const text = context.getNodeParameter('text', itemIndex);
+
 	if (typeof text !== 'string' || text.length === 0 || text.length > 20_000) {
 		throw localError(context, itemIndex, 'Note text must contain between 1 and 20,000 characters.');
 	}
+
 	const type = readContentType(context, itemIndex);
 	const before = await readAlertNotes(context, itemIndex, alertId);
+
 	const root = await graphQlRequest(
 		context,
 		itemIndex,
@@ -44,14 +49,17 @@ export async function createAlertNote(
 		'addAlertNote',
 		true,
 	);
+
 	try {
 		if (!isRecord(root) || !Array.isArray(root.data)) {
 			throw apiError(context, itemIndex, 'SentinelOne returned malformed created-note data.');
 		}
+
 		const after = root.data.map((note) => parseNote(context, itemIndex, note, alertId));
 		const beforeIds = new Set(before.map((note) => String(note.id)));
 		const afterIds = new Set(after.map((note) => String(note.id)));
 		const completeSnapshot = [...beforeIds].every((id) => afterIds.has(id));
+
 		const candidates = after.filter(
 			(note) =>
 				!beforeIds.has(String(note.id)) &&
@@ -59,7 +67,9 @@ export async function createAlertNote(
 				note.text === text &&
 				note.type === type,
 		);
+
 		let identification: IDataObject;
+
 		if (completeSnapshot && candidates.length === 1) {
 			identification = {
 				status: 'inferred',
@@ -77,6 +87,7 @@ export async function createAlertNote(
 				candidates,
 			};
 		}
+
 		return [
 			{
 				outcome: 'acknowledged',

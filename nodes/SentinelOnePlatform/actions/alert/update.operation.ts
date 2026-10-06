@@ -16,6 +16,7 @@ import { parseImmediateActions, sanitizeDetail } from './update/results';
 import { parseUpdateObject, UPDATE_DEFINITIONS, validateUpdateValues } from './update/values';
 import { unavailableVerification, verifyUpdate } from './update/verification';
 import { responseStatus } from '../../../shared/transport/retry';
+
 export const description: INodeProperties[] = [
 	{
 		...alertId,
@@ -107,19 +108,23 @@ export async function updateUnifiedAlert(
 ): Promise<IDataObject[]> {
 	assertMutationRetryDisabled(context, itemIndex);
 	const options = context.getNodeParameter('options', itemIndex, {});
+
 	if (
 		!isRecord(options) ||
 		(options.verifyUpdate !== undefined && typeof options.verifyUpdate !== 'boolean')
 	) {
 		throw localError(context, itemIndex, 'Verify Update must be true or false in Options.');
 	}
+
 	const alertId = requiredId(context, itemIndex, 'alertId', 'Alert ID');
+
 	const guided = parseUpdateObject(
 		context,
 		itemIndex,
 		context.getNodeParameter('updateFields', itemIndex, {}),
 		'Update Fields',
 	);
+
 	const advanced = parseUpdateObject(
 		context,
 		itemIndex,
@@ -128,8 +133,10 @@ export async function updateUnifiedAlert(
 			: {},
 		'Advanced Update Payload',
 	);
+
 	const requested = validateUpdateValues(context, itemIndex, guided, advanced);
 	const filter = exactAlertFilter(alertId);
+
 	const discovery = await graphQlRequest(
 		context,
 		itemIndex,
@@ -137,18 +144,22 @@ export async function updateUnifiedAlert(
 		{ filter, viewType: 'ALL' },
 		'alertAvailableActions',
 	);
+
 	const selected = orderActions(
 		context,
 		itemIndex,
 		parseDiscoveredActions(context, itemIndex, discovery, requested),
 	);
+
 	const actions = selected.map((action) => ({
 		id: action.id,
 		payload: {
 			[UPDATE_DEFINITIONS[action.field].payloadBranch]: { value: requested[action.field] },
 		},
 	}));
+
 	let acknowledgement: IDataObject;
+
 	try {
 		const root = await graphQlRequest(
 			context,
@@ -158,8 +169,10 @@ export async function updateUnifiedAlert(
 			'alertTriggerActions',
 			true,
 		);
+
 		if (!isRecord(root))
 			throw apiError(context, itemIndex, 'SentinelOne returned a malformed update result.');
+
 		if (root.__typename === 'TriggerActionsError') {
 			if (!Array.isArray(root.errors) || !root.errors.length)
 				throw apiError(context, itemIndex, 'SentinelOne returned a malformed update rejection.');
@@ -174,9 +187,11 @@ export async function updateUnifiedAlert(
 				alertId,
 			);
 		}
+
 		if (root.__typename === 'TriggerActionsScheduled') {
 			const executionId = idString(root.executionId);
 			const bulkActionTriggerId = idString(root.bulkActionTriggerId);
+
 			if (!executionId && !bulkActionTriggerId)
 				throw apiError(
 					context,
@@ -193,6 +208,7 @@ export async function updateUnifiedAlert(
 			const results = parseImmediateActions(context, itemIndex, root, selected, alertId, [
 				requested.ticketId ?? '',
 			]);
+
 			const accepted = results.every(
 				(result) =>
 					result.status === 'success' ||
@@ -200,6 +216,7 @@ export async function updateUnifiedAlert(
 						isRecord(result.detail) &&
 						result.detail.skipType === 'NO_CHANGE'),
 			);
+
 			acknowledgement = {
 				outcome: accepted ? 'complete' : 'partial',
 				mutationAcknowledged: true,
@@ -213,6 +230,7 @@ export async function updateUnifiedAlert(
 		if (error instanceof NodeApiError && isRecord(error) && error.updateRejection === true)
 			return Promise.reject(error);
 		const status = responseStatus(error);
+
 		if (status === 401 || status === 403 || (isRecord(error) && error.rejected === true)) {
 			const message =
 				status === 401
@@ -220,6 +238,7 @@ export async function updateUnifiedAlert(
 					: status === 403
 						? 'SentinelOne denied this update. Check the credential permissions.'
 						: 'SentinelOne rejected the GraphQL update before execution.';
+
 			throw rejectedUpdateError(
 				context,
 				itemIndex,
@@ -241,6 +260,7 @@ export async function updateUnifiedAlert(
 				alertId,
 			);
 		}
+
 		const errorCode = isRecord(error) ? (error.errorCode ?? error.code) : undefined;
 		acknowledgement = {
 			outcome: 'unknown',
@@ -252,6 +272,7 @@ export async function updateUnifiedAlert(
 				'The mutation was sent once. Its result is unavailable; do not repeat it without checking the alert.',
 		};
 	}
+
 	if (options.verifyUpdate === false)
 		return [
 			{
@@ -263,15 +284,19 @@ export async function updateUnifiedAlert(
 			},
 		];
 	const query = `query SentinelOneVerifyUpdate($id: ID!) { alert(id: $id) { id ${Object.keys(requested).join(' ')} } }`;
+
 	const verified = await verifyUpdate(requested, async (timeoutMs) => {
 		const alert = await graphQlRequest(context, itemIndex, query, { id: alertId }, 'alert', false, {
 			attempts: 1,
 			timeoutMs,
 		});
+
 		if (!isRecord(alert) || idString(alert.id) !== alertId)
 			throw apiError(context, itemIndex, 'SentinelOne returned an unexpected verification alert.');
+
 		return alert as IDataObject;
 	});
+
 	return [
 		{
 			...acknowledgement,
@@ -296,6 +321,7 @@ function actionErrorCodes(results: IDataObject[]): string[] {
 			results.flatMap((result) => {
 				if (result.status !== 'failed' || !isRecord(result.detail)) return [];
 				const code = result.detail.errorType;
+
 				return isSafeErrorCode(code) ? [code] : [];
 			}),
 		),
@@ -314,18 +340,26 @@ function rejectedUpdateError(
 	const verification = Object.fromEntries(
 		Object.keys(requested).map((field) => [field, { observed: null, verified: null }]),
 	);
-	const serviceCodes = errors
-		.map((detail) => detail.errorCode ?? detail.errorType)
-		.filter(isSafeErrorCode);
+
+	const serviceCodes = errors.flatMap((detail) => {
+		const code = detail.errorCode ?? detail.errorType;
+
+		return isSafeErrorCode(code) ? [code] : [];
+	});
+
 	const description = `Mutation acknowledged: no. Verification status: skipped.${serviceCodes.length ? ` Service error codes: ${[...new Set(serviceCodes)].join(', ')}.` : ''} ${errors
-		.map((detail) => {
+		.flatMap((detail) => {
 			const messages = [detail.message, detail.errorMessage, detail.skipMessage];
-			return messages.find((value) => typeof value === 'string') ?? '';
+
+			const message = messages.find((value) => typeof value === 'string') ?? '';
+
+			return message ? [message] : [];
 		})
-		.filter(Boolean)
 		.join(' ')}`;
+
 	const error = apiError(context, itemIndex, message, description, httpCode ?? null);
-	if (httpCode === undefined) delete (error as unknown as Record<string, unknown>).httpCode;
+
+	if (httpCode === undefined) Reflect.deleteProperty(error, 'httpCode');
 	Object.assign(error, {
 		rejected: true,
 		updateRejection: true,
@@ -345,5 +379,6 @@ function rejectedUpdateError(
 			errors,
 		},
 	});
+
 	return error;
 }

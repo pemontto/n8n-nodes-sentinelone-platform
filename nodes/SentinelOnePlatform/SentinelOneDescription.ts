@@ -6,6 +6,7 @@ import { description as update } from './actions/alert/update.operation';
 import { description as noteGet } from './actions/alertNote/getMany.operation';
 import { description as noteCreate } from './actions/alertNote/create.operation';
 import { sdlOperation, sdlDescription } from './actions/sdlQuery/execute.operation';
+
 export const sentinelOneProperties: INodeProperties[] = [
 	debugSetting,
 	{

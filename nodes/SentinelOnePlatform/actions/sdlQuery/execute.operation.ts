@@ -18,8 +18,10 @@ const MAX_RETRY_DELAY_MS = 10_000;
 
 function requireQueryId(value: unknown): string {
 	const queryId = requireString(value, 'a query ID in the launch response');
+
 	if (queryId.length > 256 || !/^[A-Za-z0-9._:-]+$/.test(queryId))
 		throw safeError('launch returned an invalid query ID');
+
 	return queryId;
 }
 
@@ -32,15 +34,19 @@ function requireInteger(
 ): number {
 	const resolved =
 		value === undefined || value === null || value === '' ? defaultValue : Number(value);
+
 	if (!Number.isSafeInteger(resolved) || resolved < minimum || resolved > maximum)
 		throw safeError(`${label} must be an integer from ${minimum} to ${maximum}`);
+
 	return resolved;
 }
 
 function parseDate(value: unknown, label: string): Date {
 	const input = requireString(value, label);
 	const date = new Date(input);
+
 	if (!Number.isFinite(date.getTime())) throw safeError(`requires a valid ${label}`);
+
 	return date;
 }
 
@@ -58,9 +64,12 @@ function isComplete(payload: IDataObject): boolean {
 
 function updateLastStepSeen(payload: IDataObject, current: number): number {
 	const value = payload.stepsCompleted;
+
 	if (value === undefined || value === null) return current;
+
 	if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)
 		throw safeError('received invalid query progress');
+
 	return Math.max(current, value);
 }
 
@@ -81,9 +90,12 @@ function statusFailure(stage: 'launch' | 'poll', status: number): Error {
 
 function cleanupWarning(status: CleanupStatus): string | undefined {
 	if (status === 'failed') return 'SentinelOne did not confirm query cleanup.';
+
 	if (status === 'timed_out') return 'SentinelOne query cleanup timed out before confirmation.';
+
 	return undefined;
 }
+
 async function executeSdlQueryInternal(
 	context: IExecuteFunctions,
 	itemIndex: number,
@@ -91,25 +103,32 @@ async function executeSdlQueryInternal(
 	const query = requireString(context.getNodeParameter('query', itemIndex), 'a query');
 	const start = parseDate(context.getNodeParameter('startTime', itemIndex), 'start time');
 	const end = parseDate(context.getNodeParameter('endTime', itemIndex), 'end time');
+
 	if (end.getTime() <= start.getTime())
 		throw safeError('requires an end time after its start time');
 	const queryScope = context.getNodeParameter('queryScope', itemIndex) as string;
+
 	if (queryScope !== 'tenant' && queryScope !== 'accounts')
 		throw safeError('requires a valid query scope');
+
 	const accountIdsValue =
 		queryScope === 'accounts'
 			? (context.getNodeParameter('accountIds', itemIndex, []) as unknown)
 			: [];
+
 	const accountIds = Array.isArray(accountIdsValue)
 		? accountIdsValue.map((value) => requireString(value, 'valid account IDs'))
 		: [];
+
 	if (queryScope === 'accounts' && accountIds.length === 0)
 		throw safeError('requires at least one account ID for account scope');
 	const outputMode = context.getNodeParameter('outputMode', itemIndex, 'rows') as string;
+
 	if (outputMode !== 'rows' && outputMode !== 'table')
 		throw safeError('requires a valid output mode');
 	const options = asRecord(context.getNodeParameter('options', itemIndex, {})) ?? {};
 	const timeoutSeconds = requireInteger(options.timeoutSeconds, 100, 10, 300, 'timeoutSeconds');
+
 	const pollIntervalMs = requireInteger(
 		options.pollIntervalMs,
 		1500,
@@ -117,7 +136,9 @@ async function executeSdlQueryInternal(
 		10_000,
 		'pollIntervalMs',
 	);
+
 	const maxRows = requireInteger(options.maxRows, 5000, 1, 100_000, 'maxRows');
+
 	const maxResponseSizeMiB = requireInteger(
 		options.maxResponseSizeMiB,
 		10,
@@ -125,20 +146,26 @@ async function executeSdlQueryInternal(
 		50,
 		'maxResponseSizeMiB',
 	);
+
 	const maxResponseBytes = maxResponseSizeMiB * 1024 * 1024;
+
 	const { endpoint, commonHeaders, parentSignal, lifecycle, deadline, request, cleanup } =
 		await createSdlTransport(context, itemIndex, timeoutSeconds, maxResponseBytes);
+
 	let queryId: string | undefined;
 	let forwardTag: string | undefined;
 	let completedPayload: IDataObject | undefined;
 	let primaryFailure: unknown;
 	let cleanupStatus: CleanupStatus | undefined;
+
 	const routedHeaders = () => ({
 		...commonHeaders,
 		...(forwardTag ? { [FORWARD_HEADER]: forwardTag } : {}),
 	});
+
 	try {
 		let response: FullResponse;
+
 		try {
 			response = await request({
 				url: endpoint,
@@ -155,16 +182,20 @@ async function executeSdlQueryInternal(
 			});
 		} catch {
 			if (parentSignal?.aborted) throw safeError('was cancelled during launch');
+
 			if (lifecycle.deadlineExpired())
 				throw safeError('exceeded its execution deadline during launch');
 			throw safeError('launch request failed');
 		}
+
 		if (response.statusCode < 200 || response.statusCode >= 300)
 			throw statusFailure('launch', response.statusCode);
 		const launchPayload = asRecord(decodeResponseBody(response.body));
+
 		if (!launchPayload) throw safeError('launch returned an invalid response body');
 		queryId = requireQueryId(launchPayload.id);
 		forwardTag = readForwardTag(response.headers);
+
 		if (!forwardTag) throw safeError('launch response omitted its query routing header');
 		validateQueryId(launchPayload, queryId);
 		validateNoQueryErrors(launchPayload);
@@ -172,8 +203,10 @@ async function executeSdlQueryInternal(
 		let lastStepSeen = updateLastStepSeen(payload, 0);
 		let retryCount = 0;
 		let nextDelayMs = pollIntervalMs;
+
 		while (!isComplete(payload)) {
 			if (parentSignal?.aborted) throw safeError('was cancelled');
+
 			if (lifecycle.deadlineExpired() || Date.now() >= deadline)
 				throw safeError('exceeded its execution deadline');
 			await delay(Math.min(nextDelayMs, remainingMilliseconds(deadline)), lifecycle.signal).catch(
@@ -183,6 +216,7 @@ async function executeSdlQueryInternal(
 				},
 			);
 			let pollResponse: FullResponse;
+
 			try {
 				pollResponse = await request({
 					url: `${endpoint}/${encodeURIComponent(queryId)}`,
@@ -193,7 +227,9 @@ async function executeSdlQueryInternal(
 				});
 			} catch (error) {
 				if (error instanceof ResponseProtocolError) throw safeError(error.safeReason);
+
 				if (parentSignal?.aborted) throw safeError('was cancelled during polling');
+
 				if (lifecycle.deadlineExpired() || Date.now() >= deadline)
 					throw safeError('exceeded its execution deadline during polling');
 				retryCount++;
@@ -203,8 +239,11 @@ async function executeSdlQueryInternal(
 				);
 				continue;
 			}
+
 			const replacementTag = readForwardTag(pollResponse.headers);
+
 			if (replacementTag) forwardTag = replacementTag;
+
 			if (pollResponse.statusCode < 200 || pollResponse.statusCode >= 300) {
 				if (!retryableStatus(pollResponse.statusCode))
 					throw statusFailure('poll', pollResponse.statusCode);
@@ -215,15 +254,18 @@ async function executeSdlQueryInternal(
 				);
 				continue;
 			}
+
 			retryCount = 0;
 			nextDelayMs = pollIntervalMs;
 			const pollPayload = asRecord(decodeResponseBody(pollResponse.body));
+
 			if (!pollPayload) throw safeError('poll returned an invalid response body');
 			validateQueryId(pollPayload, queryId);
 			validateNoQueryErrors(pollPayload);
 			lastStepSeen = updateLastStepSeen(pollPayload, lastStepSeen);
 			payload = pollPayload;
 		}
+
 		completedPayload = payload;
 	} catch (error) {
 		primaryFailure = error;
@@ -232,31 +274,36 @@ async function executeSdlQueryInternal(
 			cleanupStatus = await cleanup(`${endpoint}/${encodeURIComponent(queryId)}`, routedHeaders());
 		}
 	}
+
 	if (primaryFailure !== undefined) {
 		if (queryId && cleanupStatus) {
 			const message =
 				primaryFailure instanceof SdlQueryError
 					? primaryFailure.message
 					: 'SentinelOne SDL query failed';
+
+			// SAFETY: This optional metadata view leaves httpCode unknown; only the string check below permits propagation.
+			const httpCode = (primaryFailure as { httpCode?: unknown }).httpCode;
+
 			throw Object.assign(
 				new SdlQueryError(
 					`${message.replace(/^SentinelOne SDL query /, '')}; queryId=${queryId}; cleanupStatus=${cleanupStatus}`,
 				),
-				{
-					...(typeof (primaryFailure as { httpCode?: unknown }).httpCode === 'string'
-						? { httpCode: (primaryFailure as { httpCode: string }).httpCode }
-						: {}),
-				},
+				typeof httpCode === 'string' ? { httpCode } : {},
 			);
 		}
+
 		throw primaryFailure;
 	}
+
 	if (!completedPayload || !queryId || !cleanupStatus)
 		throw safeError('ended without a completed query result');
 	const table = collectTable(completedPayload, queryId);
 	table.metadata.cleanupStatus = cleanupStatus;
 	const warning = cleanupWarning(cleanupStatus);
+
 	if (warning) (table.metadata.warnings as string[]).push(warning);
+
 	return boundOutput(outputMode, table, maxRows, maxResponseBytes, itemIndex);
 }
 
@@ -270,12 +317,14 @@ export async function executeSdlQuery(
 		if (error instanceof NodeOperationError) {
 			return Promise.reject(error);
 		}
+
 		if (error instanceof SdlQueryError && error.httpCode)
 			throw new NodeApiError(
 				context.getNode(),
 				{ message: error.message },
 				{ message: error.message, description: error.message, httpCode: error.httpCode },
 			);
+
 		if (error instanceof SdlQueryError)
 			throw new NodeOperationError(context.getNode(), error.message, { itemIndex });
 		const message = error instanceof Error ? error.message : 'SentinelOne SDL query failed';

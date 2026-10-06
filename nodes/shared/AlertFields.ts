@@ -1,6 +1,7 @@
 import type { IDataObject, INodePropertyOptions } from 'n8n-workflow';
 
 export type AlertProjection = 'list' | 'detail';
+
 interface AlertField {
 	name: string;
 	list?: string;
@@ -290,6 +291,7 @@ const fields: Record<string, AlertField> = {
 export const DEFAULT_ADDITIONAL_ALERT_FIELDS = Object.keys(fields).filter(
 	(key) => fields[key].list && fields[key].standard && !fields[key].core,
 );
+
 export const DEFAULT_ALERT_DETAIL_FIELDS = Object.keys(fields).filter(
 	(key) => key !== 'id' && fields[key].detail && fields[key].standard,
 );
@@ -300,11 +302,14 @@ function optionsFor(projection: AlertProjection): INodePropertyOptions[] {
 		.map(([value, field]) => ({ name: field.name, value }))
 		.sort((a, b) => a.name.localeCompare(b.name));
 }
+
 export const additionalAlertFieldOptions = optionsFor('list');
+
 export const alertDetailFieldOptions = optionsFor('detail');
 
 function chosenFields(selected: unknown, projection: AlertProjection): string[] {
 	if (selected === undefined) return [];
+
 	if (
 		!Array.isArray(selected) ||
 		selected.some(
@@ -317,19 +322,24 @@ function chosenFields(selected: unknown, projection: AlertProjection): string[] 
 		throw new Error(
 			'Additional Alert Fields contains an unsupported alert field. Choose fields from the list.',
 		);
+
 	return [...new Set(selected as string[])];
 }
+
 export function selectedAlertFields(selected: unknown): string[] {
 	return [...new Set([...DEFAULT_ADDITIONAL_ALERT_FIELDS, ...chosenFields(selected, 'list')])];
 }
+
 export function alertFieldSelection(selected: unknown): string {
 	return selectedAlertFields(selected)
 		.map((key) => fields[key].list)
 		.join('\n');
 }
+
 export function additionalAlertOutput(selected: unknown, alert: IDataObject): IDataObject {
 	return Object.fromEntries(selectedAlertFields(selected).map((key) => [key, alert[key] ?? null]));
 }
+
 export function alertListSelection(selected?: unknown): string {
 	return [
 		...new Set([
@@ -343,41 +353,55 @@ export function alertListSelection(selected?: unknown): string {
 
 function additionalSelection(value: unknown): string {
 	if (value === undefined || value === '') return '';
+
 	if (typeof value !== 'string' || value.length > 20_000)
 		throw new Error('Additional GraphQL Fields must be text of at most 20,000 characters.');
 	const source = value.replace(/#[^\n\r]*/g, '');
 	const tokens = source.match(/\.\.\.|[_A-Za-z][_0-9A-Za-z]*|[{}]/g) ?? [];
+
 	if (source.replace(/\.\.\.|[_A-Za-z][_0-9A-Za-z]*|[{}]|\s|,/g, '') || tokens.length > 2_000)
 		throw new Error(
 			'Additional GraphQL Fields accepts field names, nested braces, and inline fragments. Arguments, aliases, directives, and complete queries are not supported.',
 		);
 	let index = 0;
+
 	const isName = (token: string | undefined) =>
 		token !== undefined && /^[_A-Za-z][_0-9A-Za-z]*$/.test(token);
+
 	function selectionSet(nested: boolean, depth: number): void {
 		if (depth > 12) throw new Error('Additional GraphQL Fields cannot exceed 12 nesting levels.');
 		let count = 0;
+
 		while (index < tokens.length && tokens[index] !== '}') {
 			const fragment = tokens[index] === '...';
+
 			if (fragment) {
 				index++;
+
 				if (tokens[index++] !== 'on')
 					throw new Error('Use inline fragments in the form ... on Type { fields }.');
 			}
+
 			if (!isName(tokens[index++]))
 				throw new Error('Additional GraphQL Fields contains an invalid field selection.');
 			count++;
+
 			if (tokens[index] === '{') {
 				index++;
 				selectionSet(true, depth + 1);
 			} else if (fragment) throw new Error('An inline fragment must contain a field selection.');
 		}
+
 		if (count === 0 && nested) throw new Error('Nested GraphQL field selections cannot be empty.');
+
 		if (nested && tokens[index++] !== '}')
 			throw new Error('Additional GraphQL Fields has unbalanced braces.');
 	}
+
 	selectionSet(false, 0);
+
 	if (index !== tokens.length) throw new Error('Additional GraphQL Fields has unbalanced braces.');
+
 	return tokens.join(' ');
 }
 

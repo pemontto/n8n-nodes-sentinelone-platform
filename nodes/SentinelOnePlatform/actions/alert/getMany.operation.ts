@@ -12,6 +12,7 @@ import { getManyAlertsDocument } from '../documents';
 import { readListScope } from '../../../shared/Scopes';
 import { buildFilters } from './filters';
 import { alertListSelection } from '../../../shared/AlertFields';
+
 const MAX_PAGE_SIZE = 100;
 
 const MAX_RETURN_ALL_ALERTS = 10_000;
@@ -24,9 +25,11 @@ function assertConnection(
 	if (!isRecord(root) || !Array.isArray(root.edges) || !isRecord(root.pageInfo)) {
 		throw apiError(context, itemIndex, 'SentinelOne returned a malformed alerts connection.');
 	}
+
 	if (typeof root.pageInfo.hasNextPage !== 'boolean') {
 		throw apiError(context, itemIndex, 'SentinelOne returned malformed alert pagination data.');
 	}
+
 	return {
 		edges: root.edges,
 		hasNextPage: root.pageInfo.hasNextPage,
@@ -39,8 +42,10 @@ export async function getManyUnifiedAlerts(
 	itemIndex: number,
 ): Promise<IDataObject[]> {
 	let selection: string;
+
 	try {
 		const options = context.getNodeParameter('options', itemIndex, {});
+
 		if (!isRecord(options)) throw new Error('Options must be an object.');
 		selection = alertListSelection(options.additionalAlertFields);
 	} catch (error) {
@@ -50,25 +55,32 @@ export async function getManyUnifiedAlerts(
 			error instanceof Error ? error.message : 'Invalid alert field selection.',
 		);
 	}
+
 	const document = getManyAlertsDocument(selection);
 	const scope = await readListScope(context, itemIndex);
 	const returnAll = Boolean(context.getNodeParameter('returnAll', itemIndex));
+
 	const rawLimit = returnAll
 		? Number.POSITIVE_INFINITY
 		: Number(context.getNodeParameter('limit', itemIndex));
+
 	if (!returnAll && (!Number.isSafeInteger(rawLimit) || rawLimit < 1)) {
 		throw localError(context, itemIndex, 'Limit must be a positive integer.');
 	}
+
 	const filters = buildFilters(
 		context,
 		itemIndex,
 		context.getNodeParameter('filters', itemIndex, {}),
 	);
+
 	const alerts: IDataObject[] = [];
 	const seenCursors = new Set<string>();
 	let after: string | undefined;
+
 	while (alerts.length < rawLimit) {
 		const first = returnAll ? MAX_PAGE_SIZE : Math.min(MAX_PAGE_SIZE, rawLimit - alerts.length);
+
 		const root = await graphQlRequest(
 			context,
 			itemIndex,
@@ -83,7 +95,9 @@ export async function getManyUnifiedAlerts(
 			},
 			'alerts',
 		);
+
 		const page = assertConnection(context, itemIndex, root);
+
 		if (
 			returnAll &&
 			(alerts.length + page.edges.length > MAX_RETURN_ALL_ALERTS ||
@@ -95,6 +109,7 @@ export async function getManyUnifiedAlerts(
 				`Return All is limited to ${MAX_RETURN_ALL_ALERTS.toLocaleString('en-US')} alerts. Add filters or use a bounded Limit.`,
 			);
 		}
+
 		if (page.edges.length === 0 && page.hasNextPage) {
 			throw apiError(
 				context,
@@ -102,23 +117,30 @@ export async function getManyUnifiedAlerts(
 				'SentinelOne returned an empty alert page that claims another page exists.',
 			);
 		}
+
 		for (const edge of page.edges) {
 			if (!isRecord(edge) || typeof edge.cursor !== 'string' || !edge.cursor.trim()) {
 				throw apiError(context, itemIndex, 'SentinelOne returned a malformed alert edge.');
 			}
+
 			assertAlert(context, itemIndex, edge.node, null, scope);
 			alerts.push(edge.node as IDataObject);
+
 			if (alerts.length >= rawLimit) break;
 		}
+
 		if (!page.hasNextPage || alerts.length >= rawLimit) break;
 		const next = typeof page.endCursor === 'string' ? page.endCursor.trim() : '';
+
 		if (!next)
 			throw apiError(context, itemIndex, 'SentinelOne omitted the cursor for the next alert page.');
+
 		if (seenCursors.has(next))
 			throw apiError(context, itemIndex, 'SentinelOne repeated an alert pagination cursor.');
 		seenCursors.add(next);
 		after = next;
 	}
+
 	return alerts;
 }
 

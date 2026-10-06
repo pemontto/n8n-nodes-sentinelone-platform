@@ -22,27 +22,33 @@ import { ActivityFeedBudgetError } from './ActivityFeed';
 
 // SDL rejects Unix epoch dates; use a verified historical query boundary.
 const PREVIEW_START_MS = Date.UTC(2020, 0, 1);
+
 /** Poll budget kept back from the feed read for the current alert lookup that follows it. */
 const ALERT_LOOKUP_RESERVE_MS = 10_000;
 
 export const ACTIVITY_STATE_LIMIT = 40_000;
+
 export const ALERT_QUERY = `query ActivityAlerts($first: Int!, $after: String, $scope: ScopeSelectorInput!, $filters: [FilterInput!]) {
   alerts(first: $first, after: $after, scope: $scope, viewType: ALL, filters: $filters) {
     edges { node { id externalId name severity status analystVerdict realTime { scope { account { id name } site { id name } group { id name } } } } }
     pageInfo { hasNextPage endCursor }
   }
 }`;
+
 function record(value: unknown): IDataObject | undefined {
 	return value !== null && typeof value === 'object' && !Array.isArray(value)
 		? (value as IDataObject)
 		: undefined;
 }
+
 function fail(message: string): Error {
 	return new Error(`SentinelOne activity polling ${message}; state was not advanced.`);
 }
+
 function stringId(value: unknown): value is string {
 	return typeof value === 'string' && value.length > 0 && value.trim() === value;
 }
+
 async function parallel<T, R>(items: T[], worker: (item: T) => Promise<R>): Promise<R[]> {
 	const results: R[] = [];
 	let position = 0;
@@ -62,7 +68,9 @@ async function parallel<T, R>(items: T[], worker: (item: T) => Promise<R>): Prom
 			}
 		}),
 	);
+
 	if (failures.length) throw failures[0];
+
 	return results;
 }
 
@@ -77,8 +85,10 @@ async function pages(
 	const rows: IDataObject[] = [];
 	const cursors = new Set<string>();
 	let after: string | null = null;
+
 	for (let page = 0; page < maxPages; page++) {
 		let response: IDataObject | undefined;
+
 		try {
 			response = record(
 				await request({
@@ -93,14 +103,18 @@ async function pages(
 			// The lookup keeps the batches that completed; the poll cuts its window before the first activity still waiting.
 			// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 			if (error instanceof PollBudgetError) throw error;
+
 			// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 			if (error instanceof NodeApiError) throw error;
 			const status = responseStatus(error);
+
 			const failure = fail(
 				`current alert lookup failed${status ? ` (HTTP ${status})` : ''}. Check alert read permissions and service availability`,
 			);
+
 			throw Object.assign(failure, { cause: error, statusCode: status ?? undefined });
 		}
+
 		if (
 			response?.errors !== undefined &&
 			(!Array.isArray(response.errors) || response.errors.length > 0)
@@ -108,33 +122,44 @@ async function pages(
 			throw fail('current alert lookup received GraphQL errors; check alert read permissions');
 		const connection = record(record(response?.data)?.[key]);
 		const info = record(connection?.pageInfo);
+
 		if (!Array.isArray(connection?.edges) || typeof info?.hasNextPage !== 'boolean')
 			throw fail('received an incomplete page');
+
 		for (const edge of connection.edges) {
 			const node = record(record(edge)?.node);
+
 			if (!node) throw fail('received an invalid page row');
 			rows.push(node);
 		}
+
 		if (!info.hasNextPage) return rows;
+
 		if (!stringId(info.endCursor) || cursors.has(info.endCursor))
 			throw fail('received a missing or repeated cursor');
 		cursors.add(info.endCursor);
 		after = info.endCursor;
 	}
+
 	throw fail('exceeded its page limit');
 }
 
 function scopeOf(config: TriggerConfig, alert: IDataObject): IDataObject {
 	const value = record(record(alert.realTime)?.scope);
+
 	const entity = (key: string) => {
 		const item = record(value?.[key]);
+
 		return item ? { id: item.id ?? null, name: item.name ?? null } : null;
 	};
+
 	const account = entity('account'),
 		site = entity('site'),
 		group = entity('group');
+
 	const selected =
 		config.scopeType === 'ACCOUNT' ? account : config.scopeType === 'SITE' ? site : group;
+
 	return {
 		type: config.scopeType,
 		id: selected?.id ?? null,
@@ -159,10 +184,13 @@ async function currentAlerts(
 	ids: string[],
 ): Promise<AlertLookup> {
 	const exclusions = compileExclusions(config);
+
 	const accounts =
 		config.activityAccountIds ?? (config.scopeType === 'ACCOUNT' ? config.scopeIds : []);
+
 	if (!accounts.length) throw fail('requires resolved account IDs');
 	const pendingIds = new Set<string>();
+
 	async function lookup(
 		wanted: string[],
 		scopeType: 'ACCOUNT' | 'SITE' | 'GROUP',
@@ -170,23 +198,29 @@ async function currentAlerts(
 		filtered: boolean,
 	): Promise<IDataObject[]> {
 		const batches: Array<{ chunk: string[]; scopes: string[] }> = [];
+
 		for (let offset = 0; offset < wanted.length; offset += 200)
 			for (let index = 0; index < scopeIds.length; index += 500)
 				batches.push({
 					chunk: wanted.slice(offset, offset + 200),
 					scopes: scopeIds.slice(index, index + 500),
 				});
+
 		return (
 			await parallel(batches, async ({ chunk, scopes }) => {
 				const filters: IDataObject[] = [{ fieldId: 'id', stringIn: { values: chunk } }];
+
 				if (filtered) {
 					if (config.severities.length)
 						filters.push({ fieldId: 'severity', stringIn: { values: config.severities } });
+
 					if (config.statuses.length)
 						filters.push({ fieldId: 'status', stringIn: { values: config.statuses } });
 					filters.push({ fieldId: 'alertName', match: { values: [config.alertName.trim()] } });
 				}
+
 				let found: IDataObject[];
+
 				try {
 					found = await pages(
 						request,
@@ -200,27 +234,35 @@ async function currentAlerts(
 					// The trigger boundary wraps lookup failures with its node context.
 					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 					if (!(error instanceof PollBudgetError)) throw error;
+
 					for (const id of chunk) pendingIds.add(id);
+
 					return [];
 				}
+
 				for (const alert of found) {
 					if (!stringId(alert.id) || !chunk.includes(alert.id))
 						throw fail('received an unrequested alert');
 					const scope = scopeOf(config, alert);
 					const accountId = record(scope.account)?.id;
+
 					if (!stringId(accountId) || !(filtered ? accounts : scopes).includes(accountId))
 						throw fail('received an alert outside the requested account scope');
 				}
+
 				return found;
 			})
 		).flat();
 	}
+
 	const found = await lookup(ids, 'ACCOUNT', accounts, false);
 	const alerts = new Map<string, IDataObject>();
 	const unresolvedIds = new Set(ids.filter((id) => !pendingIds.has(id)));
 	const ineligibleIds = new Set<string>();
+
 	const eligible = (alert: IDataObject) => {
 		const scope = scopeOf(config, alert);
+
 		return (
 			stringId(scope.id) &&
 			config.scopeIds.includes(scope.id) &&
@@ -231,14 +273,18 @@ async function currentAlerts(
 			!matchesExclusion(exclusions.group, record(scope.group)?.name)
 		);
 	};
+
 	for (const alert of found) {
 		const id = String(alert.id);
+
 		if (!stringId(scopeOf(config, alert).id))
 			throw fail('could not resolve current alert scope from a returned alert');
 		unresolvedIds.delete(id);
+
 		if (eligible(alert)) alerts.set(id, alert);
 		else ineligibleIds.add(id);
 	}
+
 	if (config.alertName.trim() && alerts.size) {
 		const filtered = new Map(
 			(await lookup([...alerts.keys()], config.scopeType, config.scopeIds, true)).map((alert) => [
@@ -246,15 +292,19 @@ async function currentAlerts(
 				alert,
 			]),
 		);
+
 		for (const id of alerts.keys()) {
 			if (pendingIds.has(id)) {
 				alerts.delete(id);
 				continue;
 			}
+
 			const alert = filtered.get(id);
+
 			if (alert && !stringId(scopeOf(config, alert).id)) {
 				throw fail('could not resolve current alert scope from a returned alert');
 			}
+
 			if (alert && eligible(alert)) alerts.set(id, alert);
 			else {
 				alerts.delete(id);
@@ -262,11 +312,13 @@ async function currentAlerts(
 			}
 		}
 	}
+
 	return { alerts, unresolvedIds, ineligibleIds, pendingIds };
 }
 
 function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEvent): IDataObject {
 	const scope = scopeOf(config, alert);
+
 	const item: IDataObject = {
 		alertId: event.alertId,
 		alertName: alert.name ?? null,
@@ -278,7 +330,9 @@ function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEv
 		eventTimestamp: event.createdAt,
 		changes: event.changes,
 	};
+
 	if (event.noteText !== undefined) item.note = { text: event.noteText };
+
 	if (event.mitigation !== undefined) item.mitigation = event.mitigation;
 	Object.assign(item, {
 		currentAlertStatus: alert.status ?? null,
@@ -287,11 +341,14 @@ function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEv
 		actor: { id: event.authorId, name: event.authorName },
 		scope: { ...scope, source: 'current' },
 	});
+
 	if (config.includeRawActivity) {
 		if (!event.rawActivity) throw fail('omitted the full activity record');
 		item.rawActivity = event.rawActivity;
 	}
+
 	if (config.includeCurrentAlert) item.currentAlert = alert;
+
 	return item;
 }
 
@@ -303,16 +360,20 @@ function expiredMissingActivities(
 ): number {
 	const retryFrom =
 		BigInt(Math.max(0, Math.floor(pollStartMs - config.overlapSeconds * 1000))) * BigInt(1000000);
+
 	const missing = candidates.filter((event) => lookup.unresolvedIds.has(event.alertId));
+
 	if (missing.some((event) => BigInt(event.timestampNs) >= retryFrom))
 		throw fail(
 			'could not resolve current alert scope for a recent activity; retry while alert indexing completes',
 		);
+
 	return missing.length;
 }
 
 function warnDropped(config: TriggerConfig, count: number): void {
 	if (!count) return;
+
 	try {
 		config.warnLog?.(
 			'Dropped alert activities whose parent alerts remained unavailable beyond the overlap retry window.',
@@ -332,18 +393,23 @@ export async function pollAlertActivities(
 	timing?: ActivityFeedTiming,
 ): Promise<PollResult> {
 	const exclusions = compileExclusions(config);
+
 	const selected = (event: ActivityFeedEvent) =>
 		(!config.activityTypeIds || config.activityTypeIds.includes(event.activityTypeId)) &&
 		!matchesExclusion(exclusions.author, event.authorName) &&
 		!(config.excludeActorIds ?? []).includes(event.authorId ?? '') &&
 		matchesActivityConditions(event, config.activityConditions, config.conditionMatch);
+
 	const fingerprint = `${fingerprintConfig(config)}:sdl-activities-v1`;
+
 	const matches =
 		mode === 'scheduled' &&
 		previousState.configFingerprint === fingerprint &&
 		previousState.initialized === true;
+
 	const checkpoint = matches ? previousState.checkpointMs : undefined;
 	const activation = matches ? previousState.activityActivationMs : pollStartMs;
+
 	if (
 		matches &&
 		(typeof activation !== 'number' ||
@@ -353,10 +419,13 @@ export async function pollAlertActivities(
 			checkpoint > pollStartMs)
 	)
 		throw fail('has an invalid activation checkpoint');
+
 	const accountIds =
 		config.activityAccountIds ?? (config.scopeType === 'ACCOUNT' ? config.scopeIds : undefined);
+
 	if (!accountIds?.length || !config.scopeIds.length)
 		throw fail('requires resolved account and selected scope IDs');
+
 	if (mode === 'manual') {
 		const preview: IDataObject[] = [];
 		let dropped = 0;
@@ -369,9 +438,11 @@ export async function pollAlertActivities(
 			timing,
 			async (events) => {
 				const candidates = events.filter(selected);
+
 				const lookup = await currentAlerts(request, config, [
 					...new Set(candidates.map((event) => event.alertId)),
 				]);
+
 				if (lookup.pendingIds.size)
 					throw fail('ran out of the n8n poll time budget during the current alert lookup');
 				dropped += expiredMissingActivities(config, candidates, lookup, pollStartMs);
@@ -383,29 +454,39 @@ export async function pollAlertActivities(
 							? -1
 							: b.activityId.localeCompare(a.activityId),
 				);
+
 				for (const event of eligible.slice(0, 10 - preview.length))
 					preview.push(output(config, lookup.alerts.get(event.alertId)!, event));
+
 				return preview.length > 0;
 			},
 			config.includeRawActivity,
 			config.activityTypeIds,
 		);
 		warnDropped(config, dropped);
+
 		return { items: preview };
 	}
+
 	const start = (checkpoint ?? pollStartMs) - config.overlapSeconds * 1000;
 	const previous = new Map<string, string>();
+
 	if (matches) {
 		const timestamps = record(previousState.seenActivityTimestamps);
+
 		if (!timestamps) throw fail('has invalid saved activity timestamps');
+
 		for (const [id, timestamp] of Object.entries(timestamps)) {
 			if (!stringId(id) || typeof timestamp !== 'string' || !/^\d{1,30}$/.test(timestamp))
 				throw fail('has invalid saved activity identities');
 			previous.set(id, timestamp);
 		}
+
 		if (previous.size > ACTIVITY_STATE_LIMIT) throw fail('exceeded the activity state capacity');
 	}
+
 	const baseline = mode === 'scheduled' && !matches;
+
 	// The feed stops early enough to leave the lookup its reserve; the transport enforces the budget itself.
 	const feedTiming: ActivityFeedTiming | undefined =
 		config.pollDeadlineMs === undefined
@@ -420,9 +501,11 @@ export async function pollAlertActivities(
 						),
 					),
 				};
+
 	// A baseline reads through the same resumable prefix, so a budget stop saves its progress and the activation time instead of restarting activation.
 	const startMs = Math.max(0, Math.floor(start));
 	let result;
+
 	try {
 		result = await readActivityFeedPrefix(request, {
 			baseUrl: config.baseUrl,
@@ -441,21 +524,26 @@ export async function pollAlertActivities(
 				`activity stream is stuck at checkpoint ${new Date(position).toISOString()} because its ${budget} ended before a forward window completed`,
 			);
 		}
+
 		// Transport failures keep their identity for the trigger boundary to report.
 		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 		throw error;
 	}
+
 	let activities = result.events;
 	let end = result.completedThroughMs;
+
 	if (end <= (baseline ? startMs : Number(checkpoint))) {
 		const position = baseline ? startMs : Number(checkpoint);
 		throw fail(
 			`activity stream is stuck at checkpoint ${new Date(position).toISOString()} and did not complete a forward window within the query budget`,
 		);
 	}
+
 	if (activities.length > ACTIVITY_STATE_LIMIT) throw fail('exceeded the activity state capacity');
 	let items: IDataObject[] = [];
 	let dropped = 0;
+
 	if (!baseline) {
 		let candidates = activities.filter(
 			(event) =>
@@ -463,45 +551,60 @@ export async function pollAlertActivities(
 				selected(event) &&
 				BigInt(event.timestampNs) >= BigInt(Number(activation)) * BigInt(1000000),
 		);
+
 		const lookup = await currentAlerts(request, config, [
 			...new Set(candidates.map((event) => event.alertId)),
 		]);
+
 		// A lookup the poll budget cut short ends this poll's window at the first activity still waiting on it; every earlier activity, including ones in the same millisecond, is delivered and retained, so the next poll starts past them.
 		const waiting = candidates.find((event) => lookup.pendingIds.has(event.alertId));
+
 		if (waiting) {
 			end = Math.max(Number(checkpoint), Number(BigInt(waiting.timestampNs) / BigInt(1000000)));
+
 			const before = (event: ActivityFeedEvent) =>
 				BigInt(event.timestampNs) < BigInt(waiting.timestampNs);
+
 			activities = activities.filter(before);
 			candidates = candidates.filter(before);
+
 			if (end <= Number(checkpoint) && candidates.every((event) => previous.has(event.activityId)))
 				throw fail(
 					`activity stream is stuck at checkpoint ${new Date(Number(checkpoint)).toISOString()} because the n8n poll time budget ended before the current alert lookup completed a forward window`,
 				);
 		}
+
 		dropped = expiredMissingActivities(config, candidates, lookup, pollStartMs);
 		items = candidates.flatMap((event) => {
 			const alert = lookup.alerts.get(event.alertId);
+
 			return alert ? [output(config, alert, event)] : [];
 		});
 	}
+
 	for (const event of activities) {
 		const earlier = previous.get(event.activityId);
+
 		if (earlier === undefined || BigInt(event.timestampNs) > BigInt(earlier))
 			previous.set(event.activityId, event.timestampNs);
 	}
+
 	const retainFrom =
 		BigInt(Math.max(0, Math.floor(end - config.overlapSeconds * 1000))) * BigInt(1000000);
+
 	for (const [id, timestamp] of previous) if (BigInt(timestamp) < retainFrom) previous.delete(id);
+
 	if (previous.size > ACTIVITY_STATE_LIMIT)
 		throw fail('exceeded the activity state capacity inside the overlap');
 	warnDropped(config, dropped);
+
 	if (config.debug)
 		config.debugLog?.('Completed direct ActivityFeed activity poll', {
 			outputCount: items.length,
 			checkpointAdvanced: true,
 			seenActivityCount: previous.size,
 		});
+
 	return {
 		items,
 		nextState: {

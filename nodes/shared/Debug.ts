@@ -28,10 +28,14 @@ interface ResultMetadata extends RequestMetadata {
 
 function redactVariables(value: unknown, seen = new WeakSet<object>()): unknown {
 	if (value === null || value === undefined) return value;
+
 	if (typeof value !== 'object') return '[REDACTED]';
+
 	if (seen.has(value)) return '[CIRCULAR]';
 	seen.add(value);
+
 	if (Array.isArray(value)) return value.map((entry) => redactVariables(entry, seen));
+
 	return Object.fromEntries(
 		Object.entries(value).map(([key, entry]) => [key, redactVariables(entry, seen)]),
 	);
@@ -60,6 +64,7 @@ export function logGraphqlRequest(
 	metadata: RequestMetadata = {},
 ): void {
 	if (!enabled) return;
+
 	try {
 		const query = redactDocument(document);
 		writeLog(logger, 'SentinelOne GraphQL request', {

@@ -44,6 +44,7 @@ export class SentinelOnePlatformApi implements ICredentialType {
 			...requestOptions.headers,
 			Authorization: `Bearer ${credentials.apiToken}`,
 		};
+
 		return requestOptions;
 	};
 

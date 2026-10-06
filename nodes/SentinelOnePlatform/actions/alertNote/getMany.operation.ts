@@ -2,6 +2,7 @@ import type { INodeProperties, IDataObject, IExecuteFunctions } from 'n8n-workfl
 import { alertId } from '../../../shared/Descriptions';
 import { requiredId, localError } from '../common';
 import { readAlertNotes } from './notes';
+
 export async function getManyAlertNotes(
 	context: IExecuteFunctions,
 	itemIndex: number,
@@ -9,11 +10,14 @@ export async function getManyAlertNotes(
 	const alertId = requiredId(context, itemIndex, 'alertId', 'Alert ID');
 	const notes = await readAlertNotes(context, itemIndex, alertId);
 	const returnAll = Boolean(context.getNodeParameter('returnAll', itemIndex, false));
+
 	if (returnAll) return notes;
 	const limit = Number(context.getNodeParameter('limit', itemIndex, 50));
+
 	if (!Number.isSafeInteger(limit) || limit < 1) {
 		throw localError(context, itemIndex, 'Limit must be a positive integer.');
 	}
+
 	return notes.slice(0, limit);
 }
 
