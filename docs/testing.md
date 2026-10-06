@@ -14,14 +14,14 @@ Run the mutation once with Retry On Fail disabled. Review the acknowledgement an
 
 ## Alert Notes and activity
 
-The note example requires an explicit alert ID and uses the same fixed account-name guard described above. The listener uses Alert Activity > Occurred with Note created (`16007`). Activate the listener and wait for its first scheduled poll to establish a baseline before creating a note; the baseline does not emit earlier activity. Then create one note from the manual branch and wait for the next poll. The resulting activity has `eventType: "alert.activity"`, `activityTypeId: "16007"`, and the parent `alertId`. This package has no note-delete operation, so remove test notes manually if permitted.
+The note example requires an explicit alert ID and uses the same fixed account-name guard described above. The listener uses Alert Activity > Occurred with Note created (`16007`). Activation establishes a baseline without emitting earlier activity. After activation, create one note from the manual branch and wait for the first scheduled poll, which can emit later matching activity. The resulting activity has `eventType: "alert.activity"`, `activityTypeId: "16007"`, and the parent `alertId`. This package has no note-delete operation, so remove test notes manually if permitted.
 
 For a read-only check, use Fetch Test Event without running a write branch. A manual preview searches historical windows and does not establish scheduled polling state.
 
 ## Alert trigger
 
-The alert-changes example listens for New or Updated alerts. Its first scheduled poll records the activation baseline and does not replay earlier alerts. Wait for that poll before making a controlled change to a designated test alert. Later matching alerts are emitted according to the configured scope, filters, overlap, and retained checkpoint state.
+The alert-changes example listens for New or Updated alerts. Activation records a baseline and does not replay earlier alerts. After activation, make a controlled change to a designated test alert; the first scheduled poll can emit later matching alerts according to the configured scope, filters, overlap, and retained checkpoint state.
 
 ## Development
 
-For package-local development, run `pnpm dev`. It invokes the official `n8n-node dev` workflow. Use `pnpm run build`, `node --test tests/**/*.test.js`, `pnpm run lint`, and `pnpm run format:check` for package checks. Install the packed package in an isolated n8n instance before release to check it without the source tree.
+For package-local development, run `pnpm dev`. It invokes the official `n8n-node dev` workflow. Fake-server tests should cover trigger deadline budgeting and fallback, independent per-stream and per-scope resume cursors, activation baseline retention, version-2 rebaseline, bounded cache eviction while retaining cursor IDs, immediate positioned no-progress errors, and the distinction between deadline/page-cap completed-prefix stops and API failures that must not emit or advance state. SDL fake-server cases should cover 429 `Retry-After` within the deadline, deadline exhaustion with status and retry metadata, and cancellation of completed or abandoned queries. Use `pnpm run build`, `node --test tests/**/*.test.js`, `pnpm run lint`, and `pnpm run format:check` for package checks. Install the packed package in an isolated n8n instance before release to check it without the source tree.

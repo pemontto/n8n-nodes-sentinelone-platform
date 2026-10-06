@@ -27,6 +27,8 @@ For example, escalate High and Critical alerts to ServiceNow and write the incid
 
 Alert Activity covers alert creation, status, verdict, severity and assignee changes, mitigation activity and notes. See [triggers](docs/trigger.md) for filters, conditions, output and limits.
 
+Every trigger event includes a stable `eventId` for downstream deduplication. Rare duplicates can occur after crashes, state restores, overlapping runs, or overload; see the [trigger delivery limits](docs/trigger.md#polling-and-test-events).
+
 ## Documentation
 
 - [Credentials](docs/credentials.md)
