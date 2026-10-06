@@ -20,7 +20,7 @@ const cfg = (extra = {}) => ({
 	severities: [],
 	statuses: [],
 	alertName: '',
-	simplifyOutput: true,
+	simplifyOutput: false,
 	debug: false,
 	overlapSeconds: 300,
 	alertLookbackDays: 1,
@@ -1064,4 +1064,110 @@ test('old activity state schema establishes a baseline rather than replaying sav
 	assert.deepEqual(result.items, []);
 	assert.equal(result.nextState.version, TRIGGER_STATE_VERSION);
 	assert.equal(result.nextState.activityActivationMs, NOW);
+});
+
+test('simplified activities return flat current context, optional changes and note text', async () => {
+	for (const activityType of ['16007', '16001', '16000']) {
+		const c = cfg({ simplifyOutput: true, includeRawActivity: true, includeCurrentAlert: true });
+		const source = logFeed(feed());
+		Object.assign(source.data.matches[0].values, {
+			activity_type: activityType,
+			'data.user.enriched_name': 'Example Actor',
+			...(activityType === '16001'
+				? {
+						'data.payload.changes.old_status': 'NEW',
+						'data.payload.changes.new_status': 'RESOLVED',
+					}
+				: {}),
+		});
+		const result = await pollAlertActivities(
+			async (r) =>
+				r.method === 'DELETE' ? {} : r.url.includes('/sdl/') ? source : page([alert()]),
+			c,
+			state(c),
+			'scheduled',
+			NOW,
+		);
+		assert.deepEqual(result.items[0], {
+			eventId: 'tenant.example/alert/old-alert/activity/activity',
+			eventType: 'alert.activity',
+			eventTime: new Date(NOW - 500).toISOString(),
+			activityKind: { 16007: 'noteCreated', 16001: 'statusChanged', 16000: 'alertCreated' }[
+				activityType
+			],
+			...(activityType === '16001'
+				? { changes: [{ field: 'status', oldValue: 'NEW', newValue: 'RESOLVED' }] }
+				: {}),
+			...(activityType === '16007' ? { note: 'Exact SDL note text' } : {}),
+			actorName: 'Example Actor',
+			alertId: 'old-alert',
+			alertName: 'Old alert',
+			alertStatus: 'NEW',
+			alertSeverity: 'HIGH',
+			alertAnalystVerdict: null,
+			accountName: 'Account',
+			siteName: 'Site',
+			groupName: null,
+		});
+	}
+});
+
+test('full activity output preserves the envelope, source fields and optional enrichment', async () => {
+	const c = cfg({ simplifyOutput: false, includeRawActivity: true, includeCurrentAlert: true });
+	const source = logFeed(feed());
+	const result = await pollAlertActivities(
+		async (r) => (r.method === 'DELETE' ? {} : r.url.includes('/sdl/') ? source : page([alert()])),
+		c,
+		state(c),
+		'scheduled',
+		NOW,
+	);
+	assert.deepEqual(result.items[0], {
+		alertId: 'old-alert',
+		alertName: 'Old alert',
+		alertExternalId: null,
+		eventType: 'alert.activity',
+		eventId: 'tenant.example/alert/old-alert/activity/activity',
+		eventTime: new Date(NOW - 500).toISOString(),
+		activityId: 'activity',
+		activityTypeId: '16007',
+		activityKind: 'noteCreated',
+		eventTimestamp: new Date(NOW - 500).toISOString(),
+		changes: [],
+		note: { text: 'Exact SDL note text' },
+		currentAlertStatus: 'NEW',
+		currentAlertSeverity: 'HIGH',
+		currentAlertAnalystVerdict: null,
+		actor: { id: null, name: null },
+		scope: {
+			type: 'ACCOUNT',
+			id: 'a',
+			name: 'Account',
+			account: { id: 'a', name: 'Account' },
+			site: { id: 'site', name: 'Site' },
+			group: null,
+			source: 'current',
+		},
+		rawActivity: source.data.matches[0],
+		currentAlert: alert(),
+	});
+});
+
+test('simplified notes include only recorded text strings, including an empty string', async () => {
+	for (const text of [null, undefined, '']) {
+		const c = cfg({ simplifyOutput: true });
+		const source = logFeed(feed());
+		if (text === undefined) delete source.data.matches[0].values['data.payload.note_text'];
+		else source.data.matches[0].values['data.payload.note_text'] = text;
+		const result = await pollAlertActivities(
+			async (r) =>
+				r.method === 'DELETE' ? {} : r.url.includes('/sdl/') ? source : page([alert()]),
+			c,
+			state(c),
+			'scheduled',
+			NOW,
+		);
+		assert.equal('note' in result.items[0], typeof text === 'string');
+		if (typeof text === 'string') assert.equal(result.items[0].note, text);
+	}
 });

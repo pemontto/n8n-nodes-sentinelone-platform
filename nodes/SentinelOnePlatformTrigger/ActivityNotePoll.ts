@@ -331,6 +331,28 @@ function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEv
 		changes: event.changes,
 	};
 
+	if (config.simplifyOutput) {
+		return {
+			eventId: item.eventId,
+			eventType: item.eventType,
+			eventTime: item.eventTime,
+			activityKind: event.activityKind,
+			...(event.changes.length ? { changes: event.changes } : {}),
+			...(event.activityKind === 'noteCreated' && typeof event.noteText === 'string'
+				? { note: event.noteText }
+				: {}),
+			actorName: event.authorName,
+			alertId: event.alertId,
+			alertName: alert.name ?? null,
+			alertStatus: alert.status ?? null,
+			alertSeverity: alert.severity ?? null,
+			alertAnalystVerdict: alert.analystVerdict ?? null,
+			accountName: record(scope.account)?.name ?? null,
+			siteName: record(scope.site)?.name ?? null,
+			groupName: record(scope.group)?.name ?? null,
+		};
+	}
+
 	if (event.noteText !== undefined) item.note = { text: event.noteText };
 
 	if (event.mitigation !== undefined) item.mitigation = event.mitigation;

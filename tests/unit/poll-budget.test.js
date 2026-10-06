@@ -888,6 +888,7 @@ test('A permission failure that arrives after the budget passes surfaces as deni
 
 const activityConfig = (extra = {}) =>
 	config({
+		simplifyOutput: false,
 		credentialIdentity: { id: 'c' },
 		scopeIds: ['a'],
 		events: ['alert.activity'],

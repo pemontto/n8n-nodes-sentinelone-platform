@@ -1,6 +1,6 @@
 # Triggers
 
-Alert supports New, Updated, and New or Updated events. Updated emits alerts revised after creation, and New or Updated does not emit the same alert as both event types in one poll. Alert Activity > Occurred reads individual alert-linked ActivityFeed records through the SDL V2 LOG query API. It requires SDL query access as well as the alert read access needed to validate current scope.
+Alert supports New, Updated, and New or Updated events. Updated emits alerts revised after creation, and New or Updated does not emit the same alert as both event types in one poll. Alert Activity reads individual alert-linked ActivityFeed records through the SDL V2 LOG query API. It requires SDL query access as well as the alert read access needed to validate current scope.
 
 ## Alert options
 
@@ -18,7 +18,7 @@ Account, Site, Group, and activity actor name exclusions use case-insensitive re
 
 ## Activity selection
 
-Choose Any alert activity, named activity types, or advanced custom numeric IDs. Any includes unknown alert-linked activity types and preserves their IDs without assigning a guessed name.
+Choose activity types with the Operation multi-select. It offers the same values as the former Trigger On multi-select and defaults to Any (`["any"]`). Any includes unknown alert-linked activity types, whose numeric IDs are preserved without assigning a guessed name. The former single-select Operation offered only Occurred; saved workflows may contain that value, which runtime ignores in favour of the activity-type selection.
 
 | Type ID | Activity                |
 | ------- | ----------------------- |
@@ -34,7 +34,7 @@ Mitigation activity describes a recorded action and its supplied status. It does
 
 ## Conditions and current alert filters
 
-Add repeatable builder conditions and choose Match any or Match all. Every condition applies to one activity. Match all never accumulates separate events across polls. There is no JSON condition editor or free-form SDL input.
+Add repeatable builder conditions under Recorded Activity Conditions. Match Conditions appears directly after that section even when it currently contains zero or one condition, and defaults to Any. It only affects matching when two or more conditions are configured; a single configured condition still applies. Every condition applies to one activity. Match all never accumulates separate events across polls. There is no JSON condition editor or free-form SDL input.
 
 Status, analyst verdict, and severity conditions offer optional From and To multiselects using the complete shared enum values. Values within a list use OR. From and To use AND on the same recorded change. Both endpoints must exist and differ, even when only one list is selected. Empty lists add no endpoint restriction. For example, Status with To `RESOLVED` accepts a recorded resolution; From `RESOLVED` and To `NEW` or `IN_PROGRESS` accepts reopening.
 
@@ -46,11 +46,179 @@ Options > Scope groups the optional Account, Site, and Group selections that res
 
 ## Output
 
-Each activity includes the common top-level `eventId`, `eventType`, and `eventTime` envelope alongside `alertId`, `alertName`, `alertExternalId`, `activityId`, `activityTypeId` as a string, `activityKind`, `eventTimestamp`, `changes` and `actor`. The default summary includes `currentAlertStatus`, `currentAlertSeverity` and `currentAlertAnalystVerdict` from the current parent lookup. These fields never stand in for recorded change endpoints. The external ID is the detection source identifier; it can differ from the unified alert ID. Missing summary fields remain null. Scope resolved from a parent lookup is identified as current scope. An event's `alertId` can feed Alert > Get directly without account or site selection.
+Simplify is an activity Option that defaults to true. Simplified output is flat and contains `eventId`, `eventType`, `eventTime`, `activityKind`, `actorName`, `alertId`, `alertName`, `alertStatus`, `alertSeverity`, `alertAnalystVerdict`, `accountName`, `siteName`, and `groupName`. `changes` is included only when present. `note` is a string included only for `noteCreated`. The alert summary fields remain present as `null` when the lookup has no value. The activity's external identifier, `activityId`, `activityTypeId`, `eventTimestamp`, nested actor, and full parent object are available in the full output when Simplify is disabled.
 
-Each recognised change appears in `changes[]` as `{field, oldValue?, newValue?}`. One activity can contain several changes. An empty array means no recognised changes were supplied. A missing endpoint stays absent; an explicit null stays null. Note and mitigation details appear when supplied. Unknown types retain the generic envelope.
+Each recognised change appears in `changes[]` as `{field, oldValue?, newValue?}`. One activity can contain several changes. In full output, an empty array means no recognised changes were supplied; simplified output omits that empty array. A missing endpoint stays absent; an explicit null stays null. The full output includes note and mitigation details when supplied. Unknown types retain the generic envelope.
 
-Include Raw Activity adds `rawActivity` with the original flattened keys and exact large integer values. Include Current Alert adds the full lookup object as `currentAlert`; the compact alert summary is always present. It does not replace the event envelope or historical changes. Raw and normal output use the same activity selection and current V2 LOG endpoint.
+With Simplify disabled, output preserves the existing full activity shape, including fields that are optional, `rawActivity` when Include Raw Activity is enabled, and `currentAlert` when Include Current Alert is enabled. These raw and current objects are available only in full output. They do not replace the event envelope or historical changes. The full activity output uses the same activity selection and current V2 LOG endpoint.
+
+A simplified status change has this shape (all values are synthetic):
+
+```json
+{
+	"eventId": "tenant.example/alert/alert-123/activity/activity-456",
+	"eventType": "alert.activity",
+	"eventTime": "2025-02-03T10:00:00Z",
+	"activityKind": "statusChanged",
+	"changes": [{ "field": "status", "oldValue": "NEW", "newValue": "IN_PROGRESS" }],
+	"actorName": "analyst@example.test",
+	"alertId": "alert-123",
+	"alertName": "Example detection",
+	"alertStatus": "IN_PROGRESS",
+	"alertSeverity": "HIGH",
+	"alertAnalystVerdict": "UNDEFINED",
+	"accountName": "Example account",
+	"siteName": "London",
+	"groupName": "Workstations"
+}
+```
+
+With Simplify disabled, the event keeps its full envelope. Optional `note`, `mitigation`, `rawActivity`, and `currentAlert` are present only when their corresponding source data or options provide them; `rawActivity` and `currentAlert` are only available in full output. For example:
+
+```json
+{
+	"alertId": "alert-123",
+	"alertName": "Example detection",
+	"alertExternalId": "source-789",
+	"eventType": "alert.activity",
+	"eventId": "tenant.example/alert/alert-123/activity/activity-456",
+	"eventTime": "2025-02-03T10:00:00Z",
+	"activityId": "activity-456",
+	"activityTypeId": "16001",
+	"activityKind": "statusChanged",
+	"eventTimestamp": "2025-02-03T10:00:00Z",
+	"changes": [
+		{
+			"field": "status",
+			"oldValue": "NEW",
+			"newValue": "IN_PROGRESS"
+		}
+	],
+	"currentAlertStatus": "IN_PROGRESS",
+	"currentAlertSeverity": "HIGH",
+	"currentAlertAnalystVerdict": "UNDEFINED",
+	"actor": {
+		"id": "user-234",
+		"name": "analyst@example.test"
+	},
+	"scope": {
+		"account": {
+			"id": "account-101",
+			"name": "Example account"
+		},
+		"site": {
+			"id": "site-202",
+			"name": "London"
+		},
+		"group": {
+			"id": "group-303",
+			"name": "Workstations"
+		},
+		"source": "current",
+		"type": "ACCOUNT",
+		"id": "account-101",
+		"name": "Example account"
+	},
+	"rawActivity": {
+		"timestamp": "1738576800000000000",
+		"values": {
+			"activity_id": "activity-456",
+			"activity_type": "16001",
+			"created_at": "2025-02-03T10:00:00Z",
+			"data.alert.id": "alert-123",
+			"data.user.id": "user-234",
+			"data.user.enriched_name": "analyst@example.test",
+			"data.payload.changes.old_status": "NEW",
+			"data.payload.changes.new_status": "IN_PROGRESS"
+		}
+	},
+	"currentAlert": {
+		"id": "alert-123",
+		"name": "Example detection",
+		"externalId": "source-789",
+		"status": "IN_PROGRESS",
+		"severity": "HIGH",
+		"analystVerdict": "UNDEFINED",
+		"realTime": {
+			"scope": {
+				"account": {
+					"id": "account-101",
+					"name": "Example account"
+				},
+				"site": {
+					"id": "site-202",
+					"name": "London"
+				},
+				"group": {
+					"id": "group-303",
+					"name": "Workstations"
+				}
+			}
+		}
+	}
+}
+```
+
+Alert trigger outputs use the same Simplify option. Simplified alerts rename `name`, `status`, `severity`, and `externalId` to `alertName`, `alertStatus`, `alertSeverity`, and `alertExternalId`, and omit `eventTimestamp`; other common fields, Additional Alert Fields, and `scope` are unchanged. Raw output keeps the original alert object under `alert`. Examples:
+
+```json
+{
+	"eventId": "tenant.example/alert/alert-123/new",
+	"eventType": "alert.new",
+	"eventTime": "2025-02-03T09:55:00Z",
+	"scope": {
+		"type": "ACCOUNT",
+		"id": "account-101",
+		"name": "Example account",
+		"account": { "id": "account-101", "name": "Example account" },
+		"site": { "id": "site-202", "name": "London" },
+		"group": { "id": "group-303", "name": "Workstations" }
+	},
+	"alertId": "alert-123",
+	"alertExternalId": "source-789",
+	"alertName": "Example detection",
+	"alertSeverity": "HIGH",
+	"alertStatus": "NEW",
+	"createdAt": "2025-02-03T09:55:00Z",
+	"updatedAt": "2025-02-03T09:55:00Z",
+	"detectedAt": "2025-02-03T09:54:50Z",
+	"firstSeenAt": "2025-02-03T09:54:50Z",
+	"lastSeenAt": "2025-02-03T09:55:00Z",
+	"noteExists": false
+}
+```
+
+With Simplify disabled, the raw alert is nested under `alert`, and the output includes `eventTimestamp`:
+
+```json
+{
+	"eventId": "tenant.example/alert/alert-123/new",
+	"eventType": "alert.new",
+	"eventTime": "2025-02-03T09:55:00Z",
+	"eventTimestamp": "2025-02-03T09:55:00Z",
+	"scope": {
+		"type": "ACCOUNT",
+		"id": "account-101",
+		"name": "Example account",
+		"account": { "id": "account-101", "name": "Example account" },
+		"site": { "id": "site-202", "name": "London" },
+		"group": { "id": "group-303", "name": "Workstations" }
+	},
+	"alert": {
+		"id": "alert-123",
+		"externalId": "source-789",
+		"name": "Example detection",
+		"severity": "HIGH",
+		"status": "NEW",
+		"createdAt": "2025-02-03T09:55:00Z",
+		"updatedAt": "2025-02-03T09:55:00Z",
+		"detectedAt": "2025-02-03T09:54:50Z",
+		"firstSeenAt": "2025-02-03T09:54:50Z",
+		"lastSeenAt": "2025-02-03T09:55:00Z",
+		"noteExists": false
+	}
+}
+```
 
 ## Polling and test events
 

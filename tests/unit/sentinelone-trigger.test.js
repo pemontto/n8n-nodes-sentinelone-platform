@@ -1127,16 +1127,20 @@ test('trigger UI uses resource, operation, and resource-specific options', () =>
 
 	assert.match(source, /displayName: 'Resource'[\s\S]*?name: 'resource'/);
 	assert.match(source, /resource: \['alert'\][\s\S]*?value: 'newOrUpdated'/);
-	const activityOperation = node.description.properties.find(
-		(p) => p.name === 'operation' && p.displayOptions.show.resource.includes('alertActivity'),
+	const activityOperation = node.description.properties.find((p) => p.name === 'activityTypes');
+	assert.equal(activityOperation.type, 'multiOptions');
+	assert.deepEqual(activityOperation.default, ['any']);
+	assert.equal(activityOperation.displayName, 'Operation');
+	assert.equal(
+		node.description.properties.some(
+			(p) => p.name === 'operation' && p.displayOptions.show.resource.includes('alertActivity'),
+		),
+		false,
 	);
-	assert.equal(activityOperation.type, 'options');
-	assert.equal(activityOperation.default, 'occurred');
-	assert.deepEqual(
-		activityOperation.options.map((option) => option.value),
-		['occurred'],
+	assert.equal(
+		node.description.properties.indexOf(activityOperation),
+		node.description.properties.findIndex((p) => p.name === 'operation') + 1,
 	);
-	assert.equal(activityOperation.options[0].action, 'Trigger on alert activity');
 	assert.match(source, /displayName: 'Options'[\s\S]*?resource: \['alert'\]/);
 	assert.match(source, /displayName: 'Options'[\s\S]*?resource: \['alertActivity'\]/);
 	assert.doesNotMatch(source, /previewLookbackMinutes/);
@@ -1536,63 +1540,80 @@ test('credential uses the same Bearer token for SDL, GraphQL, and management RES
 	assert.equal(rest.headers.Authorization, 'Bearer test-token');
 });
 
-test('the activity node dispatches through V2 LOG with a generic note envelope', async () => {
-	const now = Date.now();
-	const params = {
-		resource: 'alertActivity',
-		operation: 'occurred',
-		activityTypes: ['16007'],
-		options: { scope: { selection: { accountIds: ['account-1'] } } },
-	};
-	let sdlCalls = 0;
-	const request = async (r) => {
-		if (r.method === 'DELETE') return {};
-		if (r.method === 'GET') return { data: [{ id: 'account-1', name: 'Account One' }] };
-		if (r.url.includes('/sdl/v2/api/queries')) {
-			sdlCalls++;
-			const body = JSON.parse(r.body);
-			assert.deepEqual(body.accountIds, ['account-1']);
-			assert.equal(body.tenant, false);
-			assert.equal(body.queryType, 'LOG');
-			assert.match(body.log.filter, /16007/);
-			return {
-				id: 'job',
-				stepsCompleted: 1,
-				stepsTotal: 1,
-				data: {
-					matches: [
-						{
-							timestamp: String(BigInt(now - 1000) * 1000000n),
-							values: {
-								activity_id: 'event',
-								activity_type: '16007',
-								created_at: new Date(now - 1000).toISOString(),
-								'data.alert.id': 'example-note-alert',
-								'data.payload.note_text': 'Content from SDL',
+test('activity dispatch defaults to simplified output and ignores removed saved operations', async () => {
+	for (const [simplifyOutput, operation] of [
+		[false, 'occurred'],
+		[true, undefined],
+		[true, 'unsupported'],
+	]) {
+		const now = Date.now();
+		const params = {
+			resource: 'alertActivity',
+			operation,
+			activityTypes: ['16007'],
+			options: {
+				...(simplifyOutput ? {} : { simplifyOutput: false }),
+				scope: { selection: { accountIds: ['account-1'] } },
+			},
+		};
+		let sdlCalls = 0;
+		const request = async (r) => {
+			if (r.method === 'DELETE') return {};
+			if (r.method === 'GET') return { data: [{ id: 'account-1', name: 'Account One' }] };
+			if (r.url.includes('/sdl/v2/api/queries')) {
+				sdlCalls++;
+				const body = JSON.parse(r.body);
+				assert.deepEqual(body.accountIds, ['account-1']);
+				assert.equal(body.tenant, false);
+				assert.equal(body.queryType, 'LOG');
+				assert.match(body.log.filter, /16007/);
+				return {
+					id: 'job',
+					stepsCompleted: 1,
+					stepsTotal: 1,
+					data: {
+						matches: [
+							{
+								timestamp: String(BigInt(now - 1000) * 1000000n),
+								values: {
+									activity_id: 'event',
+									activity_type: '16007',
+									created_at: new Date(now - 1000).toISOString(),
+									'data.alert.id': 'example-note-alert',
+									'data.payload.note_text': 'Content from SDL',
+								},
 							},
-						},
-					],
-				},
-			};
+						],
+					},
+				};
+			}
+			if (r.body.query.includes('ActivityAlerts'))
+				return alertResponse([alertWithNotes('example-note-alert')]);
+			assert.fail('Unexpected request path');
+		};
+		const node = new SentinelOnePlatformTrigger();
+		const manual = createNodeContext(params, request);
+		const result = await node.poll.call(manual);
+		assert.equal(result[0][0].json.eventType, 'alert.activity');
+		if (!simplifyOutput) {
+			assert.equal(result[0][0].json.activityId, 'event');
+			assert.equal(result[0][0].json.activityTypeId, '16007');
+			assert.equal(result[0][0].json.note.text, 'Content from SDL');
+			assert.equal(result[0][0].json.scope.source, 'current');
+		} else {
+			assert.equal(result[0][0].json.activityKind, 'noteCreated');
+			assert.equal(result[0][0].json.note, 'Content from SDL');
+			assert.equal(result[0][0].json.alertId, 'example-note-alert');
+			assert.equal('activityId' in result[0][0].json, false);
 		}
-		if (r.body.query.includes('ActivityAlerts'))
-			return alertResponse([alertWithNotes('example-note-alert')]);
-		assert.fail('Unexpected request path');
-	};
-	const node = new SentinelOnePlatformTrigger();
-	const manual = createNodeContext(params, request);
-	const result = await node.poll.call(manual);
-	assert.equal(result[0][0].json.eventType, 'alert.activity');
-	assert.equal(result[0][0].json.activityId, 'event');
-	assert.equal(result[0][0].json.activityTypeId, '16007');
-	assert.equal(result[0][0].json.note.text, 'Content from SDL');
-	assert.equal(result[0][0].json.scope.source, 'current');
-	assert.equal(manual.staticData.sentinelOneTrigger, undefined);
-	assert.equal(sdlCalls, 1);
-	const scheduled = createNodeContext(params, request, 'trigger');
-	assert.equal(await node.poll.call(scheduled), null);
-	assert.match(scheduled.staticData.sentinelOneTrigger.configFingerprint, /:sdl-activities-v1$/);
-	assert.equal(sdlCalls, 2);
+		assert.equal(manual.staticData.sentinelOneTrigger, undefined);
+		assert.equal(sdlCalls, 1);
+		const scheduled = createNodeContext(params, request, 'trigger');
+		scheduled.getWorkflow = () => ({ id: `activity-output-${simplifyOutput}-${operation}` });
+		assert.equal(await node.poll.call(scheduled), null);
+		assert.match(scheduled.staticData.sentinelOneTrigger.configFingerprint, /:sdl-activities-v1$/);
+		assert.equal(sdlCalls, 2);
+	}
 });
 
 test('activity builder exposes every shared enum and only recorded value controls', () => {
@@ -1609,7 +1630,7 @@ test('activity builder exposes every shared enum and only recorded value control
 	);
 	const types = properties.find((p) => p.name === 'activityTypes');
 	assert.deepEqual(types.default, ['any']);
-	assert.equal(types.displayName, 'Trigger On');
+	assert.equal(types.displayName, 'Operation');
 	assert.equal(types.description, undefined);
 	assert.deepEqual(
 		types.options.map((o) => o.value).sort(),
@@ -1654,9 +1675,7 @@ test('activity builder exposes every shared enum and only recorded value control
 	])
 		assert.ok(activityOptions.find((p) => p.name === name));
 	assert.equal(
-		activityOptions.some(
-			(p) => p.type === 'json' || p.name === 'simplifyOutput' || p.name === 'advancedFilters',
-		),
+		activityOptions.some((p) => p.type === 'json' || p.name === 'advancedFilters'),
 		false,
 	);
 });
@@ -1682,7 +1701,7 @@ test('all unsupported trigger resource and operation pairs fail before requests'
 			'created',
 			'unsupported',
 		]) {
-			if (supportedPairs.has(`${resource}:${operation}`)) continue;
+			if (resource === 'alertActivity' || supportedPairs.has(`${resource}:${operation}`)) continue;
 			const params = { resource, operation };
 			const context = createNodeContext(params, async () =>
 				assert.fail('Unsupported configuration must not request data'),
@@ -1882,12 +1901,21 @@ test('activity trigger retains valid group selections and resolves their account
 	assert.ok(context.staticData.sentinelOneTrigger.configFingerprint);
 });
 
-test('Match Conditions only appears when recorded conditions exist', () => {
+test('Match Conditions is always visible for activity immediately after recorded conditions', () => {
 	const { NodeHelpers } = require('n8n-workflow');
-	const control = new SentinelOnePlatformTrigger().description.properties.find(
-		(p) => p.name === 'conditionMatch',
+	const properties = new SentinelOnePlatformTrigger().description.properties;
+	const control = properties.find((p) => p.name === 'conditionMatch');
+	assert.equal(control.default, 'any');
+	assert.match(control.description, /two or more conditions/);
+	assert.equal(
+		properties.indexOf(control),
+		properties.findIndex((p) => p.name === 'activityConditions') + 1,
 	);
-	for (const activityConditions of [{}, { conditions: [] }])
+	for (const activityConditions of [
+		{},
+		{ conditions: [] },
+		{ conditions: [{ field: 'status' }] },
+	]) {
 		assert.equal(
 			NodeHelpers.displayParameter(
 				{ resource: 'alertActivity', activityConditions },
@@ -1895,19 +1923,11 @@ test('Match Conditions only appears when recorded conditions exist', () => {
 				null,
 				null,
 			),
-			false,
+			true,
 		);
-	assert.equal(
-		NodeHelpers.displayParameter(
-			{ resource: 'alertActivity', activityConditions: { conditions: [{ field: 'status' }] } },
-			control,
-			null,
-			null,
-		),
-		true,
-	);
+	}
+	assert.equal(NodeHelpers.displayParameter({ resource: 'alert' }, control, null, null), false);
 });
-
 test('nested trigger scopes keep the group guard', async () => {
 	for (const [resource, operation] of [
 		['alert', 'new'],
@@ -1925,5 +1945,75 @@ test('nested trigger scopes keep the group guard', async () => {
 			new SentinelOnePlatformTrigger().poll.call(context),
 			/Group selections require a site selection/,
 		);
+	}
+});
+
+test('subtitle describes selected activity operations and alert operations', () => {
+	const expression = new SentinelOnePlatformTrigger().description.subtitle;
+	const evaluate = ($parameter) =>
+		new Function('$parameter', 'return ' + expression.slice(3, -2))($parameter);
+	assert.equal(evaluate({ resource: 'alertActivity' }), 'Alert activity: Any');
+	assert.equal(
+		evaluate({ resource: 'alertActivity', activityTypes: ['any'] }),
+		'Alert activity: Any',
+	);
+	assert.equal(
+		evaluate({ resource: 'alertActivity', activityTypes: ['16001', '16007'] }),
+		'Alert activity: Status Changed, Note Created',
+	);
+	assert.equal(evaluate({ resource: 'alert', operation: 'updated' }), 'Alert: Updated');
+});
+
+test('both resources expose the same Simplify option with default true', () => {
+	const properties = new SentinelOnePlatformTrigger().description.properties;
+	const controls = ['alert', 'alertActivity'].map((resource) =>
+		properties
+			.find((p) => p.name === 'options' && p.displayOptions.show.resource.includes(resource))
+			.options.find((p) => p.name === 'simplifyOutput'),
+	);
+	assert.deepEqual(controls[0], controls[1]);
+	assert.equal(controls[0].default, true);
+	assert.equal(controls[0].type, 'boolean');
+});
+
+test('alert output renames only simplified fields and preserves full output', async () => {
+	for (const simplifyOutput of [true, false]) {
+		const c = config({ simplifyOutput });
+		const parent = { ...alert('output-alert'), externalId: 'source-alert' };
+		const result = await pollSentinelOne(
+			async () => alertResponse([parent]),
+			c,
+			initializedState(c),
+			'scheduled',
+			NOW,
+		);
+		const item = result.items[0];
+		if (simplifyOutput) {
+			assert.equal(item.alertName, parent.name);
+			assert.equal(item.alertStatus, parent.status);
+			assert.equal(item.alertSeverity, parent.severity);
+			assert.equal(item.alertExternalId, parent.externalId);
+			for (const key of ['name', 'status', 'severity', 'externalId', 'eventTimestamp'])
+				assert.equal(key in item, false);
+			assert.equal(item.eventTime, parent.createdAt);
+			for (const key of [
+				'createdAt',
+				'updatedAt',
+				'detectedAt',
+				'firstSeenAt',
+				'lastSeenAt',
+				'noteExists',
+			])
+				assert.equal(item[key], parent[key] ?? null);
+		} else {
+			assert.deepEqual(item, {
+				eventId: 'tenant.example/alert/output-alert/new',
+				eventType: 'alert.new',
+				eventTime: parent.createdAt,
+				eventTimestamp: parent.createdAt,
+				scope: item.scope,
+				alert: parent,
+			});
+		}
 	}
 });

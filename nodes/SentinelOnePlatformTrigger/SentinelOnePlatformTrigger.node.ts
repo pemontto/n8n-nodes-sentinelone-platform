@@ -51,9 +51,17 @@ import { debugSetting, logGraphqlRequest, logGraphqlResult } from '../shared/Deb
 import { PollBudgetError, requestWithRetry } from '../shared/transport/request';
 import { responseStatus, isRetryableReadError, retryAfterMs } from '../shared/transport/retry';
 
+const simplifyOption: INodeProperties = {
+	displayName: 'Simplify',
+	name: 'simplifyOutput',
+	type: 'boolean',
+	default: true,
+	description: 'Whether to return a simplified version of the response instead of the raw data',
+};
+
 const activityFields: INodeProperties[] = [
 	{
-		displayName: 'Trigger On',
+		displayName: 'Operation',
 		name: 'activityTypes',
 		type: 'multiOptions',
 		default: ['any'],
@@ -72,24 +80,6 @@ const activityFields: INodeProperties[] = [
 			{ name: 'Severity Changed', value: '16003' },
 			{ name: 'Status Changed', value: '16001' },
 		],
-	},
-	{
-		displayName: 'Match Conditions',
-		name: 'conditionMatch',
-		type: 'options',
-		default: 'any',
-		displayOptions: {
-			show: {
-				resource: ['alertActivity'],
-				'activityConditions.conditions': [{ _cnd: { exists: true } }],
-			},
-		},
-		options: [
-			{ name: 'Match All', value: 'all' },
-			{ name: 'Match Any', value: 'any' },
-		],
-		description:
-			'Evaluate all conditions against one activity. Empty conditions match every selected activity type.',
 	},
 	{
 		displayName: 'Recorded Activity Conditions',
@@ -196,6 +186,23 @@ const activityFields: INodeProperties[] = [
 				],
 			},
 		],
+	},
+	{
+		displayName: 'Match Conditions',
+		name: 'conditionMatch',
+		type: 'options',
+		default: 'any',
+		displayOptions: {
+			show: {
+				resource: ['alertActivity'],
+			},
+		},
+		options: [
+			{ name: 'Match All', value: 'all' },
+			{ name: 'Match Any', value: 'any' },
+		],
+		description:
+			'Only matters when there are two or more conditions. Evaluate them against one activity.',
 	},
 ];
 
@@ -406,7 +413,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 		group: ['trigger'],
 		version: 1,
 		subtitle:
-			'={{$parameter["resource"] === "alertActivity" ? "Alert activity: Occurred" : "Alert: " + ({new: "New", newOrUpdated: "New or updated", updated: "Updated"}[$parameter["operation"]] || "New")}}',
+			'={{$parameter["resource"] === "alertActivity" ? "Alert activity: " + (($parameter["activityTypes"] || ["any"]).map(type => ({any: "Any", "16000": "Alert Created", "16001": "Status Changed", "16002": "Analyst Verdict Changed", "16003": "Severity Changed", "16004": "Assignee Changed", "16005": "Mitigation Activity", "16007": "Note Created"}[type] || type)).join(", ")) : "Alert: " + ({new: "New", newOrUpdated: "New or updated", updated: "Updated"}[$parameter["operation"]] || "New")}}',
 		description: 'Starts the workflow when selected SentinelOne Unified Alerts events are found',
 		defaults: {
 			name: 'SentinelOne Platform Trigger',
@@ -460,22 +467,6 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						description:
 							'Emit the latest changed state observed when an existing alert update time advances',
 						action: 'Trigger on updated alerts',
-					},
-				],
-			},
-			{
-				displayName: 'Operation',
-				name: 'operation',
-				type: 'options',
-				noDataExpression: true,
-				default: 'occurred',
-				displayOptions: { show: { resource: ['alertActivity'] } },
-				options: [
-					{
-						name: 'Occurred',
-						value: 'occurred',
-						description: 'Emit an alert activity once when it is first found',
-						action: 'Trigger on alert activity',
 					},
 				],
 			},
@@ -541,14 +532,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						options: severityOptions,
 						description: 'Limit alerts to the selected severities',
 					},
-					{
-						displayName: 'Simplify',
-						name: 'simplifyOutput',
-						type: 'boolean',
-						default: true,
-						description:
-							'Whether to return a simplified version of the response instead of the raw data',
-					},
+					simplifyOption,
 					{
 						displayName: 'Status',
 						name: 'statuses',
@@ -662,6 +646,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						description:
 							'Whether to add the complete raw activity alongside the stable activity envelope',
 					},
+					simplifyOption,
 				],
 			},
 		],
@@ -733,16 +718,14 @@ export class SentinelOnePlatformTrigger implements INodeType {
 
 				// n8n retains the operation selected for the other resource when the resource changes.
 				const operation =
-					resource === 'alertActivity' &&
-					['new', 'newOrUpdated', 'updated'].includes(savedOperation)
+					resource === 'alertActivity'
 						? 'occurred'
-						: resource === 'alert' && savedOperation === 'occurred'
+						: savedOperation === 'occurred'
 							? 'new'
 							: savedOperation;
 
 				if (
 					(resource !== 'alert' && resource !== 'alertActivity') ||
-					(resource === 'alertActivity' && operation !== 'occurred') ||
 					(resource === 'alert' && !['new', 'newOrUpdated', 'updated'].includes(operation))
 				) {
 					throw new NodeOperationError(node, 'Unsupported trigger resource or operation.');

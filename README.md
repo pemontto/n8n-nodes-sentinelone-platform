@@ -23,9 +23,9 @@ For example, escalate High and Critical alerts to ServiceNow and write the incid
 | Resource       | Events                       |
 | -------------- | ---------------------------- |
 | Alert          | New, Updated, New or Updated |
-| Alert Activity | Occurred                     |
+| Alert Activity | Activity types               |
 
-Alert Activity covers alert creation, status, verdict, severity and assignee changes, mitigation activity and notes. See [triggers](docs/trigger.md) for filters, conditions, output and limits.
+Alert Activity covers alert creation, status, verdict, severity and assignee changes, mitigation activity and notes. Choose activity types with the Operation multi-select, which defaults to Any. Simplify defaults to enabled; see [trigger output examples](docs/trigger.md#output) for simplified and full activity and alert records, plus filters, conditions and delivery limits.
 
 Every trigger event includes a stable `eventId` for downstream deduplication. Rare duplicates can occur after crashes, state restores, overlapping runs, or overload; see the [trigger delivery limits](docs/trigger.md#polling-and-test-events).
 
