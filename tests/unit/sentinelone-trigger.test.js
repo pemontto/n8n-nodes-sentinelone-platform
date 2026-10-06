@@ -258,7 +258,7 @@ test('scope discovery drains REST cursors and parses each envelope', async () =>
 		'GROUP',
 		{ accountIds: ['account-1'], siteIds: ['site-1'] },
 	);
-	assert.deepEqual(groupOptions, [{ name: 'Site site-1 / Servers', value: 'group-1' }]);
+	assert.deepEqual(groupOptions, [{ name: 'Servers', value: 'group-1' }]);
 	assert.equal(groupRequest.qs.accountIds, 'account-1');
 	assert.equal(groupRequest.qs.siteIds, 'site-1');
 });
@@ -1091,7 +1091,7 @@ test('ActivityFeed access requirements belong in credential docs, not a trigger 
 	assert.match(documentation, /Alert Activity > Occurred trigger requires SDL query access/);
 });
 
-test('trigger scope controls are top-level and site and group loaders depend on their parents', () => {
+test('trigger scope controls come first and site and group loaders depend on their parents', () => {
 	const properties = new SentinelOnePlatformTrigger().description.properties;
 	const scopeFields = Object.fromEntries(
 		['accountIds', 'siteIds', 'groupIds'].map((name) => [
@@ -1103,12 +1103,7 @@ test('trigger scope controls are top-level and site and group loaders depend on 
 	assert.ok(scopeFields.siteIds);
 	assert.ok(scopeFields.groupIds);
 	assert.deepEqual(
-		properties
-			.slice(
-				properties.indexOf(properties.find((property) => property.name === 'activityTypes')) + 1,
-				properties.indexOf(properties.find((property) => property.name === 'activityTypes')) + 4,
-			)
-			.map((property) => property.name),
+		properties.slice(0, 3).map((property) => property.name),
 		['accountIds', 'siteIds', 'groupIds'],
 	);
 	assert.deepEqual(scopeFields.siteIds.typeOptions.loadOptionsDependsOn, ['accountIds']);

@@ -173,10 +173,6 @@ function scopeLabel(scopeType: ManagementScopeType, item: ManagementScopeItem): 
 		return `${item.siteName.trim()} / ${name}`;
 	}
 
-	if (scopeType === 'GROUP' && item.siteId?.trim()) {
-		return `Site ${item.siteId.trim()} / ${name}`;
-	}
-
 	return name;
 }
 

@@ -122,7 +122,7 @@ test('parses site and group response envelopes and builds useful labels', async 
 	});
 	assert.deepEqual(await loadManagementScopeOptions(groupFixture.context, 'GROUP'), [
 		{ name: 'London / Workstations', value: 'group-1' },
-		{ name: 'Site site-2 / Servers', value: 'group-2' },
+		{ name: 'Servers', value: 'group-2' },
 	]);
 	assert.equal(groupRequest.qs.states, undefined);
 });
