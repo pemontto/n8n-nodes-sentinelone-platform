@@ -748,14 +748,17 @@ export class SentinelOnePlatformTrigger implements INodeType {
 	async poll(this: IPollFunctions): Promise<INodeExecutionData[][] | null> {
 		const node = this.getNode();
 		const pollKey = `${this.getWorkflow().id}:${node.id}`;
+		// Only scheduled polls share saved state, so only they need the overlap guard.
+		// A manual Fetch Test Event must always run, even while an earlier one is still going.
+		const guarded = this.getMode() !== 'manual';
 
-		if (activePollKeys.has(pollKey)) {
+		if (guarded && activePollKeys.has(pollKey)) {
 			this.logger.warn('[SentinelOne Platform Trigger] Skipping overlapping poll');
 
 			return null;
 		}
 
-		activePollKeys.add(pollKey);
+		if (guarded) activePollKeys.add(pollKey);
 
 		try {
 			const deadline = pollDeadline(this);
@@ -1009,7 +1012,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				throw Object.assign(operationError, { cause: error });
 			}
 		} finally {
-			activePollKeys.delete(pollKey);
+			if (guarded) activePollKeys.delete(pollKey);
 		}
 	}
 }

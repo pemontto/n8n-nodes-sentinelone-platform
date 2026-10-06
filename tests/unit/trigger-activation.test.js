@@ -172,6 +172,35 @@ test('emitting polls do not refresh the pending activation baseline', async () =
 	assert.equal(afterExpiry.staticData.sentinelOneTrigger.activationMs, START + 3_600_001);
 });
 
+test('a manual test run is never skipped while another poll of the node is running', async () => {
+	const trigger = new SentinelOnePlatformTrigger();
+	const first = context('manual-overlap', []);
+	let release;
+	let entered;
+	const gate = new Promise((resolve) => {
+		release = resolve;
+	});
+	const started = new Promise((resolve) => {
+		entered = resolve;
+	});
+	const send = first.helpers.httpRequestWithAuthentication;
+	first.helpers.httpRequestWithAuthentication = async (...args) => {
+		entered();
+		await gate;
+		return send(...args);
+	};
+	const active = at(START, () => trigger.poll.call(first));
+	await started;
+	const manual = context('manual-overlap', []);
+	manual.getMode = () => 'manual';
+	// The fake server only models scheduled queries; reaching it at all proves the guard let the run through.
+	await trigger.poll.call(manual).catch(() => undefined);
+	assert.ok(manual.requests.length > 0);
+	assert.equal(manual.warnings.filter((warning) => /overlapping poll/.test(warning)).length, 0);
+	release();
+	await active;
+});
+
 test('overlapping poll warns and leaves state untouched', async () => {
 	const trigger = new SentinelOnePlatformTrigger();
 	const first = context('activation-overlap', []);
