@@ -33,11 +33,9 @@ Add **SentinelOne Platform Trigger** as the first node in a workflow and choose 
 
 The trigger polls on the schedule you configure and keeps checkpoint and deduplication state. Optional Account, Site, and Group selections under Options > Scope narrow the records it checks; empty selections include accessible records. Site-scoped credentials can list accessible sites without account-list permission. Groups require at least one selected Site. A poll with no qualifying events produces no items.
 
-See [trigger configuration](docs/trigger.md) for activity conditions, current-parent filters, delivery limits, and migration guidance.
+See [trigger configuration](docs/trigger.md) for activity conditions, current-parent filters, and delivery limits.
 
 Alert Activity supports alert creation, status/verdict/severity/assignee changes, mitigation activity, and note creation. It also accepts unknown alert-linked activity types. The condition builder matches recorded values within one activity. Optional raw activity and current alert fields add to a stable event envelope.
-
-Alert Activity > Occurred replaces the earlier trigger's Alert Note > Created resource without an alias. To keep note-only delivery, select Note created (`16007`) and start with fresh trigger state. Alert Note actions and Alert snapshot triggers are available. See [migration steps](docs/trigger.md#breaking-migration-from-alert-note).
 
 Activity output starts with the alert ID, name and source-provided external ID. Current status, severity and analyst verdict are included by default and clearly separated from recorded changes.
 
@@ -46,24 +44,6 @@ Activity output starts with the alert ID, name and source-provided external ID. 
 - Alert snapshot overlap exclusions are capped at 1,000 IDs per request.
 - On single-batch tenants under sustained load close to per-poll capacity, New alerts that become visible more than roughly 240 seconds after their `createdAt` (close to the 300-second overlap) can be missed.
 - These limits depend on SentinelOne behaviour to confirm on a live tenant: the request size limit for excluded IDs, real alert ID length, page latency at 200 rows for large scope batches, alert visibility lag, `updatedAt` ties from bulk actions, and cursor stability. See [delivery limits](docs/trigger.md).
-
-## Migrating from n8n-nodes-sentinelone-alerts
-
-This package supersedes `n8n-nodes-sentinelone-alerts`. Install the new package and migrate workflows deliberately: its credential type is `sentinelOnePlatformApi` instead of `sentinelOneAlertsApi`, its action node type is `sentinelOnePlatform` instead of `sentinelOneAlerts`, and its trigger type is `sentinelOnePlatformTrigger` instead of `sentinelOneAlertsTrigger`. n8n can have both packages installed side by side while workflows are migrated.
-
-| Earlier package setting                     | New package setting                                                                                                                                                       |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| SentinelOne Alerts node, Alert > Get        | SentinelOne Platform, Alert > Get; keep `alertId`                                                                                                                         |
-| SentinelOne Alerts node, Alert > Get Many   | SentinelOne Platform, Alert > Get Many; move `accountIds`, `siteIds`, and `groupIds` into Options > Scope, retain filters, and review pagination                          |
-| SentinelOne Alerts node, Alert > Update     | SentinelOne Platform, Alert > Update; keep `alertId`, map status, analyst verdict, and ticket ID into Update Fields, and review Advanced Update Payload and Verify Update |
-| Alert Note > Get Many/Create                | Alert Note > Get Many/Create; keep `alertId`, text, content format, and limit/Return All settings                                                                         |
-| SDL Query > Execute                         | SDL Query > Execute; review query scope, output mode, and the new output and lifecycle limits                                                                             |
-| Trigger, Alert > New/Updated/New or Updated | SentinelOne Platform Trigger, Alert with the same event; move scopes into Options > Scope and review trigger filters and output                                           |
-| Trigger, Alert Note > Created               | SentinelOne Platform Trigger, Alert Activity > Occurred; select Note created (`16007`) and review conditions, exclusions, and output expressions                          |
-| Include SentinelOne OCSF                    | Removed from the trigger; use Alert > Get for alert fields. This package does not expose an OCSF operation.                                                               |
-| Use as AI tool                              | Removed; the action node is not exposed as an AI tool.                                                                                                                    |
-
-The old and new node identifiers and credentials are distinct, so existing workflows continue to need their old package and credential until migrated. For trigger cutover, run the old and new triggers in parallel for at least one poll interval plus the configured overlap, then de-duplicate downstream by `alertId` and disable the old trigger. The first scheduled poll of the new trigger records a baseline and does not emit historical events; the overlap provides time to compare current delivery while that baseline is established.
 
 ## Documentation
 
@@ -77,6 +57,6 @@ The old and new node identifiers and credentials are distinct, so existing workf
 
 ## Development
 
-Use `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm test`, and `pnpm lint`. Run `pnpm dev` for the normal package-local n8n development process. See [development runtime checks](docs/testing.md#development-runtime) for maintainer-specific runtime checks. This is the 0.1.0 release; new node and credential identifiers do not automatically migrate existing workflows.
+Use `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm test`, and `pnpm lint`. Run `pnpm dev` for the normal package-local n8n development process. See [development runtime checks](docs/testing.md#development-runtime) for maintainer-specific runtime checks.
 
 [Source and issues](https://github.com/pemontto/n8n-nodes-sentinelone-platform). MIT licence; see LICENSE.
