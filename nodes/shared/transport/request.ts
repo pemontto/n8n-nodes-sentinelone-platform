@@ -11,18 +11,12 @@ export interface RequestPolicy {
 
 export type RequestResult = { ok: true; value: unknown } | { ok: false; error: unknown };
 
-/** The caller deadline stopped a request that would otherwise have run or been retried. Permission and other permanent failures are never reported this way. */
+/** Only the caller's deadline, rather than a service failure, stopped the request. */
 export class PollBudgetError extends Error {
 	readonly retryable = false;
-	/** HTTP status of the transient failure whose retry no longer fitted, when there was one. Named so status sniffing on error chains does not mistake this error for that failure. */
-	readonly blockedStatus: number | null;
 
-	constructor(cause?: unknown) {
-		const status = responseStatus(cause);
-		super(
-			`The n8n poll time budget ran out${status ? ` (HTTP ${status} could not be retried in time)` : ''}.`,
-		);
-		this.blockedStatus = status;
+	constructor() {
+		super('The n8n poll time budget ran out.');
 	}
 }
 
@@ -36,12 +30,6 @@ export async function requestWithRetry(
 		Date.now() + Math.max(1, Math.min(30_000, policy.timeoutMs ?? 30_000)),
 		policy.deadline ?? Infinity,
 	);
-
-	// A transient failure that the caller deadline keeps from being retried is a budget stop; everything else is the failure itself.
-	const stop = (error: unknown, at: number): RequestResult =>
-		policy.deadline !== undefined && at >= policy.deadline && isRetryableReadError(error)
-			? { ok: false, error: new PollBudgetError(error) }
-			: { ok: false, error };
 
 	if (policy.deadline !== undefined && Date.now() >= policy.deadline)
 		return { ok: false, error: new PollBudgetError() };
@@ -65,21 +53,34 @@ export async function requestWithRetry(
 				/* Diagnostics never change transport outcomes. */
 			}
 
+			// A timeout is our stop only when this attempt was shortened to the caller deadline.
+			const timeout =
+				error instanceof Error && /timeout|ETIMEDOUT|ECONNABORTED/i.test(error.message);
+
+			if (
+				policy.deadline !== undefined &&
+				deadline === policy.deadline &&
+				startedAt + attemptTimeoutMs >= policy.deadline &&
+				Date.now() >= policy.deadline &&
+				responseStatus(error) === null &&
+				timeout
+			)
+				return { ok: false, error: new PollBudgetError() };
+
 			const delay = Math.max(retryAfterMs(error), attempt * 1000 + Math.floor(Math.random() * 100));
 
 			if (attempt >= attempts || !isRetryableReadError(error)) {
-				// A caller that owns further retries must not sleep out a Retry-After that ends past the deadline.
-				return stop(error, Date.now() + retryAfterMs(error));
+				return { ok: false, error };
 			}
 
 			if (Date.now() + delay >= deadline) {
-				return stop(error, Date.now() + delay);
+				return { ok: false, error };
 			}
 
 			await sleep(delay);
 
 			if (Date.now() >= deadline) {
-				return stop(error, Date.now());
+				return { ok: false, error };
 			}
 		}
 	}

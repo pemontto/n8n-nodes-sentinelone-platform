@@ -56,6 +56,7 @@ test('ActivityFeed completes inline, preserves nanoseconds and restricts account
 	input[3] = ns(START, 999999n);
 	const events = await readActivityFeed(
 		async (request) => {
+			if (request.method === 'DELETE') return {};
 			assert.equal(request.method, 'POST');
 			assert.equal(JSON.parse(request.body).log.filter, ACTIVITY_FEED_LOG_FILTER);
 			assert.deepEqual(JSON.parse(request.body).accountIds, ['account-1']);
@@ -71,14 +72,15 @@ test('ActivityFeed completes inline, preserves nanoseconds and restricts account
 	assert.equal(events[0].timestampNs, input[3]);
 });
 
-test('ActivityFeed retries poll 404/429 and requires completed counters plus data', async () => {
+test('ActivityFeed retries rate-limited polling and requires completed counters plus data', async () => {
 	let gets = 0;
 	const events = await readActivityFeed(
 		async (request) => {
+			if (request.method === 'DELETE') return {};
 			if (request.method === 'POST')
 				return { id: 'query-1', stepsCompleted: 0, stepsTotal: 1, data: {} };
 			gets++;
-			if (gets <= 2) throw { statusCode: gets === 1 ? 404 : 429 };
+			if (gets <= 2) throw { statusCode: 429 };
 			return response([row()]);
 		},
 		BASE,
@@ -157,6 +159,7 @@ test('ActivityFeed splits saturation into gapless half-open windows', async () =
 	const windows = [];
 	const events = await readActivityFeed(
 		async (request) => {
+			if (request.method === 'DELETE') return {};
 			const start = Date.parse(JSON.parse(request.body).startTime),
 				end = Date.parse(JSON.parse(request.body).endTime);
 			windows.push([start, end]);
@@ -265,6 +268,7 @@ test('ActivityFeed rejects top-level warnings and failure after a successful spl
 			readActivityFeed(
 				async (request) => {
 					if (request.method === 'DELETE') return {};
+					if (request.method === 'DELETE') return {};
 					creates++;
 					if (creates === 1)
 						return response(Array.from({ length: 1000 }, (_, i) => row(String(i))));
@@ -362,6 +366,7 @@ test('ActivityFeed splits oversized inline responses instead of truncating', asy
 	const windows = [];
 	const result = await readActivityFeed(
 		async (r) => {
+			if (r.method === 'DELETE') return {};
 			const start = Date.parse(JSON.parse(r.body).startTime),
 				end = Date.parse(JSON.parse(r.body).endTime);
 			windows.push([start, end]);
@@ -392,6 +397,7 @@ test('ActivityFeed never ignores or downloads a full-result URL', async () => {
 	let calls = 0;
 	const result = await readActivityFeed(
 		async (r) => {
+			if (r.method === 'DELETE') return {};
 			assert.ok(r.url.startsWith(BASE));
 			calls++;
 			const start = Date.parse(JSON.parse(r.body).startTime),
@@ -444,6 +450,7 @@ test('ActivityFeed rejects mismatched poll query IDs but accepts an omitted poll
 	assert.equal(cancelled, true);
 	const events = await readActivityFeed(
 		async (r) => {
+			if (r.method === 'DELETE') return {};
 			if (r.method === 'POST') return { id: 'requested-query', stepsCompleted: 0, stepsTotal: 1 };
 			const completed = response([row()]);
 			delete completed.id;
@@ -492,6 +499,7 @@ test('LOG full output preserves unsafe integer tokens and every native field', a
 		.replace('"' + ns(START) + '"', ns(START))
 		.replace('"EXACT_SITE_INTEGER"', '900719925474099312345');
 	const events = await readFull(async (r) => {
+		if (r.method === 'DELETE') return {};
 		assert.equal(r.json, false);
 		assert.equal(r.encoding, 'text');
 		assert.equal(r.returnFullResponse, true);
@@ -519,6 +527,7 @@ test('LOG textual polling preserves routing and embedded string escapes', async 
 	match.values.extra = '12345678901234567890 "quoted" \\ slash';
 	const events = await readFull(
 		async (r) => {
+			if (r.method === 'DELETE') return {};
 			assert.equal(r.json, false);
 			assert.equal(r.encoding, 'text');
 			if (r.method === 'POST')
@@ -561,6 +570,7 @@ test('LOG full output splits capped raw matches without dropping unknown fields'
 	let creates = 0;
 	const events = await readFull(
 		async (r) => {
+			if (r.method === 'DELETE') return {};
 			creates++;
 			const body = JSON.parse(r.body),
 				start = Date.parse(body.startTime),
@@ -678,6 +688,7 @@ test('ActivityFeed normal and raw modes request identical LOG selection and pres
 	for (const raw of [false, true]) {
 		const events = await readActivityFeed(
 			async (request) => {
+				if (request.method === 'DELETE') return {};
 				bodies.push(JSON.parse(request.body));
 				return JSON.stringify(logResponse([logMatch()])).replace('"' + ns(START) + '"', ns(START));
 			},
@@ -724,6 +735,7 @@ test('ActivityFeed manual preview stops at the first matching window and reports
 	const matched = [];
 	await readActivityFeed(
 		async (request) => {
+			if (request.method === 'DELETE') return {};
 			requests++;
 			const body = JSON.parse(request.body);
 			return logResponse([logMatch('match', Date.parse(body.startTime))]);
@@ -777,6 +789,7 @@ test('SDL failures preserve safe HTTP categories at launch and polling', async (
 		for (const [statusCode, category] of [
 			[401, /authentication/],
 			[403, /permission/],
+			[404, /HTTP 404/],
 			[429, /rate limit/],
 			[500, /server error \(HTTP 500\)/],
 			[501, /server error \(HTTP 501\)/],
@@ -832,6 +845,7 @@ test('preview retains newest activity identity across historical and split windo
 		let queries = 0;
 		await readActivityFeed(
 			async (request) => {
+				if (request.method === 'DELETE') return {};
 				queries++;
 				const body = JSON.parse(request.body);
 				const from = Date.parse(body.startTime),
@@ -881,6 +895,7 @@ test('ActivityFeed prefix grows chronological sparse windows and includes overla
 	const windows = [];
 	const result = await readActivityFeedPrefix(
 		async (request) => {
+			if (request.method === 'DELETE') return {};
 			const body = JSON.parse(request.body);
 			windows.push([Date.parse(body.startTime), Date.parse(body.endTime)]);
 			return logResponse([]);
@@ -900,6 +915,7 @@ test('ActivityFeed prefix grows chronological sparse windows and includes overla
 test('ActivityFeed prefix returns only completed windows on the shared query budget', async () => {
 	const result = await readActivityFeedPrefix(
 		async (request) => {
+			if (request.method === 'DELETE') return {};
 			const body = JSON.parse(request.body);
 			return logResponse([logMatch(body.startTime, Date.parse(body.startTime))]);
 		},
@@ -911,6 +927,7 @@ test('ActivityFeed prefix returns only completed windows on the shared query bud
 
 test('ActivityFeed prefix keeps completed saturated subdivisions and rejects no forward progress', async () => {
 	const request = async (input) => {
+		if (input.method === 'DELETE') return {};
 		const body = JSON.parse(input.body);
 		const start = Date.parse(body.startTime),
 			end = Date.parse(body.endTime);
@@ -934,6 +951,7 @@ test('ActivityFeed prefix keeps completed saturated subdivisions and rejects no 
 
 test('ActivityFeed prefix stops before a whole leaf exceeds the event budget', async () => {
 	const request = async (input) => {
+		if (input.method === 'DELETE') return {};
 		const start = Date.parse(JSON.parse(input.body).startTime);
 		return logResponse(
 			start === START
@@ -983,6 +1001,7 @@ test('ActivityFeed prefix still fails on partial results, transport errors and d
 			() =>
 				readActivityFeedPrefix(async (request) => {
 					if (request.method === 'DELETE') return {};
+					if (request.method === 'DELETE') return {};
 					if (++launches === 1) return logResponse([logMatch()]);
 					if (failure === 'partial') return { ...logResponse([]), warnings: ['incomplete'] };
 					if (failure === 'transport') throw new Error('private transport detail');
@@ -999,6 +1018,7 @@ test('ActivityFeed prefix still fails on partial results, transport errors and d
 test('ActivityFeed prefix does not leak newer revisions from an event-cap rejected leaf', async () => {
 	const result = await readActivityFeedPrefix(
 		async (request) => {
+			if (request.method === 'DELETE') return {};
 			const start = Date.parse(JSON.parse(request.body).startTime);
 			if (start === START) return logResponse([logMatch('original'), logMatch('other')]);
 			const revised = logMatch('original', start);
@@ -1030,6 +1050,7 @@ test('ActivityFeed prefix does not treat malformed completion responses as budge
 				readActivityFeedPrefix(
 					async (request) => {
 						if (request.method === 'DELETE') return {};
+						if (request.method === 'DELETE') return {};
 						return ++launches === 1 ? logResponse([logMatch()]) : malformed;
 					},
 					prefixOptions({ timing: clock() }),
@@ -1045,8 +1066,9 @@ test('ActivityFeed prefix never resets the shared deadline between completed win
 	const result = await readActivityFeedPrefix(
 		async (request) => {
 			if (request.method === 'DELETE') return {};
+			if (request.method === 'DELETE') return {};
 			launches++;
-			time += 1400;
+			time += 600;
 			const start = Date.parse(JSON.parse(request.body).startTime);
 			return logResponse([logMatch(String(start), start)]);
 		},
@@ -1055,4 +1077,240 @@ test('ActivityFeed prefix never resets the shared deadline between completed win
 	assert.equal(launches, 2);
 	assert.equal(result.completedThroughMs, START + 300000);
 	assert.equal(result.events.length, 1);
+});
+
+test('ActivityFeed honours Retry-After and cleans completed queries inside the remaining deadline', async () => {
+	let time = 0;
+	const polls = [];
+	const deletes = [];
+	const result = await readActivityFeed(
+		async (request) => {
+			if (request.method === 'DELETE') {
+				deletes.push(request.timeout);
+				return {};
+			}
+			if (request.method === 'POST') return { id: 'query-1' };
+			polls.push(time);
+			if (polls.length === 1) throw { statusCode: 429, headers: { 'retry-after': '3' } };
+			return response([row()]);
+		},
+		BASE,
+		START,
+		START + 1,
+		[],
+		{
+			now: () => time,
+			sleep: async (ms) => {
+				time += ms;
+			},
+			deadlineMs: 6000,
+		},
+	);
+	assert.equal(result.length, 1);
+	assert.deepEqual(polls, [1500, 4500]);
+	assert.deepEqual(deletes, [1000]);
+});
+
+test('ActivityFeed preserves real HTTP failures after progress even when the deadline has passed', async () => {
+	for (const statusCode of [401, 403, 404, 429, 503]) {
+		let time = 0;
+		let launches = 0;
+		await assert.rejects(
+			() =>
+				readActivityFeedPrefix(
+					async (request) => {
+						if (request.method === 'DELETE') return {};
+						if (++launches === 1) return logResponse([logMatch()]);
+						time = 6000;
+						throw { statusCode, headers: { 'retry-after': '9' } };
+					},
+					prefixOptions({ timing: { now: () => time, deadlineMs: 5000 } }),
+				),
+			(error) => {
+				assert.equal(error.statusCode, statusCode);
+				assert.equal(error.retryAfterMs, 9000);
+				return true;
+			},
+		);
+	}
+});
+
+test('ActivityFeed rate limit whose delay cannot fit fails with retry metadata after completed progress', async () => {
+	let time = 0;
+	let launches = 0;
+	let deletes = 0;
+	await assert.rejects(
+		() =>
+			readActivityFeedPrefix(
+				async (request) => {
+					if (request.method === 'DELETE') {
+						deletes++;
+						return {};
+					}
+					if (request.method === 'POST')
+						return ++launches === 1 ? logResponse([logMatch()]) : { id: 'pending' };
+					throw { statusCode: 429, response: { headers: { 'Retry-After': '20' } } };
+				},
+				prefixOptions({
+					timing: {
+						now: () => time,
+						sleep: async (ms) => {
+							time += ms;
+						},
+						deadlineMs: 5000,
+					},
+				}),
+			),
+		(error) => {
+			assert.equal(error.statusCode, 429);
+			assert.equal(error.retryAfterMs, 20000);
+			assert.match(error.message, /rate limit/);
+			return true;
+		},
+	);
+	assert.equal(time, 1500);
+	assert.equal(deletes, 2);
+});
+
+test('ActivityFeed retries an explicitly rate-limited launch within its finite deadline', async () => {
+	let time = 0;
+	const launches = [];
+	let deletes = 0;
+	const events = await readActivityFeed(
+		async (request) => {
+			if (request.method === 'DELETE') {
+				deletes++;
+				return {};
+			}
+			launches.push({ time, body: request.body });
+			if (launches.length === 1) throw { statusCode: 429, headers: { 'retry-after': 2 } };
+			return response([row()]);
+		},
+		BASE,
+		START,
+		START + 1,
+		[],
+		{
+			now: () => time,
+			sleep: async (ms) => {
+				time += ms;
+			},
+			deadlineMs: 5000,
+		},
+	);
+	assert.equal(events.length, 1);
+	assert.deepEqual(
+		launches.map(({ time }) => time),
+		[0, 2000],
+	);
+	assert.equal(launches[0].body, launches[1].body);
+	assert.equal(deletes, 1);
+});
+
+test('ActivityFeed cleanup failures preserve HTTP identity and cannot return successful partial output', async () => {
+	for (const statusCode of [401, 403, 404, 429, 503]) {
+		await assert.rejects(
+			() =>
+				readActivityFeedPrefix(async (request) => {
+					if (request.method === 'DELETE') throw { statusCode, headers: { 'retry-after': 4 } };
+					return logResponse([logMatch()]);
+				}, prefixOptions()),
+			(error) => {
+				assert.equal(error.statusCode, statusCode);
+				assert.equal(error.retryAfterMs, 4000);
+				assert.match(error.message, /cleanup/);
+				return true;
+			},
+		);
+	}
+});
+
+test('ActivityFeed preserves the original query failure when cleanup also fails', async () => {
+	await assert.rejects(
+		() =>
+			readActivityFeed(
+				async (request) => {
+					if (request.method === 'POST') return { id: 'query-1' };
+					throw { statusCode: request.method === 'GET' ? 401 : 503 };
+				},
+				BASE,
+				START,
+				START + 1,
+				[],
+				clock(),
+			),
+		(error) => {
+			assert.equal(error.statusCode, 401);
+			assert.match(error.message, /polling/);
+			return true;
+		},
+	);
+});
+
+test('ActivityFeed reserves cleanup time when data polling exhausts a finite deadline after progress', async () => {
+	let time = 0;
+	let launches = 0;
+	const deleted = [];
+	const result = await readActivityFeedPrefix(
+		async (request) => {
+			if (request.method === 'DELETE') {
+				deleted.push({ id: request.url.split('/').at(-1), time, timeout: request.timeout });
+				time += 100;
+				return {};
+			}
+			if (request.method === 'POST' && ++launches === 1) return logResponse([logMatch()]);
+			return { id: 'abandoned', stepsCompleted: 0, stepsTotal: 1 };
+		},
+		prefixOptions({
+			timing: {
+				now: () => time,
+				sleep: async (ms) => {
+					time += ms;
+				},
+				deadlineMs: 5000,
+			},
+		}),
+	);
+	assert.equal(result.completedThroughMs, START + 300000);
+	assert.equal(result.events.length, 1);
+	assert.deepEqual(deleted, [
+		{ id: 'raw-query', time: 0, timeout: 1000 },
+		{ id: 'abandoned', time: 4000, timeout: 1000 },
+	]);
+	assert.equal(time, 4100);
+});
+
+test('an abandoned query cleanup HTTP failure outranks the reader deadline after a completed prefix', async () => {
+	for (const statusCode of [401, 403, 404, 429, 503]) {
+		let time = 0;
+		let launches = 0;
+		await assert.rejects(
+			readActivityFeedPrefix(
+				async (request) => {
+					if (request.method === 'DELETE') {
+						if (request.url.endsWith('/abandoned'))
+							throw { statusCode, headers: { 'retry-after': '4' } };
+						return {};
+					}
+					if (request.method === 'POST' && ++launches === 1) return logResponse([logMatch()]);
+					return { id: 'abandoned', stepsCompleted: 0, stepsTotal: 1 };
+				},
+				prefixOptions({
+					timing: {
+						now: () => time,
+						sleep: async (ms) => {
+							time += ms;
+						},
+						deadlineMs: 5000,
+					},
+				}),
+			),
+			(error) => {
+				assert.equal(error.statusCode, statusCode);
+				assert.equal(error.retryAfterMs, 4000);
+				assert.match(error.message, /cleanup/);
+				return true;
+			},
+		);
+	}
 });

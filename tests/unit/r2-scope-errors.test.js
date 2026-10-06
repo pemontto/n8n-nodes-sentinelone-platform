@@ -259,11 +259,11 @@ test('activity budget failures identify the checkpoint as an ISO timestamp', asy
 	};
 	const checkpoint = now - 60_000;
 	const previous = {
+		version: 2,
 		configFingerprint: `${fingerprintConfig(config)}:sdl-activities-v1`,
 		initialized: true,
 		checkpointMs: checkpoint,
 		activityActivationMs: checkpoint - 1000,
-		seenActivityIds: [],
 		seenActivityTimestamps: {},
 	};
 	await assert.rejects(

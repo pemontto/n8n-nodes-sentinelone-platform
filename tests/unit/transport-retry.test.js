@@ -80,3 +80,61 @@ test('A blank Retry-After does not hide an inner frame value', () => {
 	};
 	assert.equal(retryAfterMs(error), 7000);
 });
+
+const { PollBudgetError } = require('../../dist/nodes/shared/transport/request.js');
+
+async function clocked(run) {
+	const realNow = Date.now;
+	let now = 10_000;
+	Date.now = () => now;
+	try {
+		return await run((elapsed) => {
+			now += elapsed;
+		});
+	} finally {
+		Date.now = realNow;
+	}
+}
+
+test('HTTP failures preserve identity when Retry-After does not fit the deadline', async () => {
+	await clocked(async () => {
+		for (const statusCode of [401, 403, 404, 429, 500, 503]) {
+			const error = { statusCode, headers: { 'retry-after': '10' } };
+			const result = await requestWithRetry(
+				async () => {
+					throw error;
+				},
+				{ deadline: Date.now() + 100, attempts: 3 },
+			);
+			assert.equal(result.error, error);
+			assert.equal(responseStatus(result.error), statusCode);
+			assert.equal(retryAfterMs(result.error), 10_000);
+		}
+	});
+});
+
+test('only a request timeout caused by the caller deadline becomes a poll stop', async () => {
+	await clocked(async (advance) => {
+		const result = await requestWithRetry(
+			async (timeoutMs) => {
+				advance(timeoutMs);
+				throw Object.assign(new Error(`timeout of ${timeoutMs}ms exceeded`), {
+					code: 'ECONNABORTED',
+				});
+			},
+			{ deadline: Date.now() + 100, timeoutMs: 30_000 },
+		);
+		assert.ok(result.error instanceof PollBudgetError);
+	});
+	await clocked(async (advance) => {
+		const failure = Object.assign(new Error('timeout of 50ms exceeded'), { code: 'ETIMEDOUT' });
+		const result = await requestWithRetry(
+			async () => {
+				advance(50);
+				throw failure;
+			},
+			{ deadline: Date.now() + 100, timeoutMs: 50 },
+		);
+		assert.equal(result.error, failure);
+	});
+});

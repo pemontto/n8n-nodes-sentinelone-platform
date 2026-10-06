@@ -1,6 +1,6 @@
 import type { IDataObject } from 'n8n-workflow';
 import { NodeApiError } from 'n8n-workflow';
-import { fingerprintConfig } from './SentinelOneTriggerHelpers';
+import { fingerprintConfig, TRIGGER_STATE_VERSION } from './SentinelOneTriggerHelpers';
 import type {
 	AuthenticatedRequest,
 	TriggerConfig,
@@ -173,7 +173,6 @@ function scopeOf(config: TriggerConfig, alert: IDataObject): IDataObject {
 interface AlertLookup {
 	alerts: Map<string, IDataObject>;
 	unresolvedIds: Set<string>;
-	ineligibleIds: Set<string>;
 	/** Alert IDs whose lookup the poll budget cut short; nothing is known about them yet. */
 	pendingIds: Set<string>;
 }
@@ -258,7 +257,6 @@ async function currentAlerts(
 	const found = await lookup(ids, 'ACCOUNT', accounts, false);
 	const alerts = new Map<string, IDataObject>();
 	const unresolvedIds = new Set(ids.filter((id) => !pendingIds.has(id)));
-	const ineligibleIds = new Set<string>();
 
 	const eligible = (alert: IDataObject) => {
 		const scope = scopeOf(config, alert);
@@ -282,7 +280,6 @@ async function currentAlerts(
 		unresolvedIds.delete(id);
 
 		if (eligible(alert)) alerts.set(id, alert);
-		else ineligibleIds.add(id);
 	}
 
 	if (config.alertName.trim() && alerts.size) {
@@ -308,12 +305,11 @@ async function currentAlerts(
 			if (alert && eligible(alert)) alerts.set(id, alert);
 			else {
 				alerts.delete(id);
-				ineligibleIds.add(id);
 			}
 		}
 	}
 
-	return { alerts, unresolvedIds, ineligibleIds, pendingIds };
+	return { alerts, unresolvedIds, pendingIds };
 }
 
 function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEvent): IDataObject {
@@ -324,6 +320,10 @@ function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEv
 		alertName: alert.name ?? null,
 		alertExternalId: alert.externalId ?? null,
 		eventType: 'alert.activity',
+		eventId: [new URL(config.baseUrl).host, 'alert', event.alertId, 'activity', event.activityId]
+			.map(encodeURIComponent)
+			.join('/'),
+		eventTime: event.createdAt,
 		activityId: event.activityId,
 		activityTypeId: event.activityTypeId,
 		activityKind: event.activityKind,
@@ -392,6 +392,23 @@ export async function pollAlertActivities(
 	pollStartMs: number,
 	timing?: ActivityFeedTiming,
 ): Promise<PollResult> {
+	const now = timing?.now ?? Date.now;
+	const deadline = config.pollDeadlineMs ?? now() + 300_000;
+	const originalRequest = request;
+	request = async (options, readerDeadline) => {
+		const remaining = deadline - now();
+
+		if (remaining <= 0) throw new PollBudgetError();
+
+		return originalRequest(
+			{
+				...options,
+				timeout: Math.max(1, Math.min(options.timeout ?? config.requestTimeoutMs, remaining)),
+			},
+			readerDeadline,
+		);
+	};
+
 	const exclusions = compileExclusions(config);
 
 	const selected = (event: ActivityFeedEvent) =>
@@ -404,6 +421,7 @@ export async function pollAlertActivities(
 
 	const matches =
 		mode === 'scheduled' &&
+		previousState.version === TRIGGER_STATE_VERSION &&
 		previousState.configFingerprint === fingerprint &&
 		previousState.initialized === true;
 
@@ -481,26 +499,21 @@ export async function pollAlertActivities(
 				throw fail('has invalid saved activity identities');
 			previous.set(id, timestamp);
 		}
-
-		if (previous.size > ACTIVITY_STATE_LIMIT) throw fail('exceeded the activity state capacity');
 	}
 
 	const baseline = mode === 'scheduled' && !matches;
 
 	// The feed stops early enough to leave the lookup its reserve; the transport enforces the budget itself.
-	const feedTiming: ActivityFeedTiming | undefined =
-		config.pollDeadlineMs === undefined
-			? timing
-			: {
-					...timing,
-					deadlineMs: Math.max(
-						1,
-						Math.min(
-							timing?.deadlineMs ?? 300_000,
-							Math.floor(config.pollDeadlineMs - ALERT_LOOKUP_RESERVE_MS - Date.now()),
-						),
-					),
-				};
+	const feedTiming: ActivityFeedTiming = {
+		...timing,
+		deadlineMs: Math.max(
+			1,
+			Math.min(
+				timing?.deadlineMs ?? 300_000,
+				Math.floor(deadline - ALERT_LOOKUP_RESERVE_MS - now()),
+			),
+		),
+	};
 
 	// A baseline reads through the same resumable prefix, so a budget stop saves its progress and the activation time instead of restarting activation.
 	const startMs = Math.max(0, Math.floor(start));
@@ -540,7 +553,6 @@ export async function pollAlertActivities(
 		);
 	}
 
-	if (activities.length > ACTIVITY_STATE_LIMIT) throw fail('exceeded the activity state capacity');
 	let items: IDataObject[] = [];
 	let dropped = 0;
 
@@ -594,8 +606,24 @@ export async function pollAlertActivities(
 
 	for (const [id, timestamp] of previous) if (BigInt(timestamp) < retainFrom) previous.delete(id);
 
-	if (previous.size > ACTIVITY_STATE_LIMIT)
-		throw fail('exceeded the activity state capacity inside the overlap');
+	if (previous.size > ACTIVITY_STATE_LIMIT) {
+		const evicted = previous.size - ACTIVITY_STATE_LIMIT;
+
+		const oldest = [...previous].sort(([, left], [, right]) =>
+			BigInt(left) < BigInt(right) ? -1 : BigInt(left) > BigInt(right) ? 1 : 0,
+		);
+
+		for (const [id] of oldest.slice(0, evicted)) previous.delete(id);
+
+		try {
+			config.warnLog?.('Evicted oldest activity keys from the recent deduplication cache.', {
+				evictedActivityCount: evicted,
+			});
+		} catch {
+			// Logging must not change delivery or checkpoint state.
+		}
+	}
+
 	warnDropped(config, dropped);
 
 	if (config.debug)
@@ -612,7 +640,7 @@ export async function pollAlertActivities(
 			initialized: true,
 			checkpointMs: end,
 			activityActivationMs: activation,
-			seenActivityIds: [...previous.keys()],
+			version: TRIGGER_STATE_VERSION,
 			seenActivityTimestamps: Object.fromEntries(previous),
 		},
 	};

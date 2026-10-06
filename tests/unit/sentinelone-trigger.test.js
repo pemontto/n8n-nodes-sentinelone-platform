@@ -29,6 +29,7 @@ const {
 	MAX_SCOPE_IDS_PER_QUERY,
 	advancedFilterSelection,
 	fingerprintConfig,
+	TRIGGER_STATE_VERSION,
 	pollSentinelOne,
 } = require(existsSync(builtHelpers) ? builtHelpers : sourceHelpers);
 const { SentinelOnePlatformTrigger } = existsSync(builtNode) ? require(builtNode) : {};
@@ -65,6 +66,7 @@ function initializedState(triggerConfig, overrides = {}) {
 	if (triggerConfig.events.includes('alert.updated'))
 		alertCursors['updatedAt:fixture'] = { throughMs: checkpointMs, ids: [] };
 	return {
+		version: TRIGGER_STATE_VERSION,
 		configFingerprint: fingerprintConfig(triggerConfig),
 		initialized: true,
 		activationMs: 0,
@@ -919,45 +921,6 @@ test('alert Relay connection drains every page', async () => {
 	);
 });
 
-test('without a poll budget the page cap splits the range exactly as before', async () => {
-	const alerts = [
-		'2026-08-26T11:58:00.000Z',
-		'2026-08-26T11:58:30.000Z',
-		'2026-08-26T11:59:00.000Z',
-	];
-	const ranges = [];
-	const request = async (options) => {
-		const { after, filters } = queryVariables(options);
-		const range = filters[0].dateTimeRange;
-		ranges.push([range.start, range.end]);
-		const page = alerts
-			.filter((time) => Date.parse(time) >= range.start && Date.parse(time) <= range.end)
-			.map((time) => alert(`alert-${time}`, time))
-			.reverse();
-		const offset = after ? Number(after) : 0;
-		return alertResponse(page.slice(offset, offset + 2), {
-			hasNextPage: offset + 2 < page.length,
-			endCursor: offset + 2 < page.length ? String(offset + 2) : null,
-		});
-	};
-	const noBudgetConfig = config({ maxAlertPages: 1 });
-	const noBudgetResult = await pollSentinelOne(
-		request,
-		noBudgetConfig,
-		initializedState(noBudgetConfig, { checkpointMs: NOW - 600_000 }),
-		'scheduled',
-		NOW,
-	);
-	assert.deepEqual(
-		noBudgetResult.items.map((item) => item.alert.id),
-		alerts.map((time) => `alert-${time}`),
-	);
-	assert.equal(noBudgetResult.nextState.checkpointMs, NOW);
-	assert.ok(ranges.length > 1, 'the capped range was split');
-	assert.equal(ranges[1][1], NOW, 'the newer half is read first, as before');
-	assert.ok(ranges[1][0] > ranges[0][0]);
-});
-
 test('pagination failure does not mutate or replace prior state', async () => {
 	const triggerConfig = config();
 	const previous = initializedState(triggerConfig, {
@@ -973,27 +936,6 @@ test('pagination failure does not mutate or replace prior state', async () => {
 			NOW,
 		),
 		/without a continuation cursor/,
-	);
-	assert.deepEqual(previous, snapshot);
-});
-
-test('a page cap inside an indivisible range fails without advancing', async () => {
-	const cappedConfig = config({ maxAlertPages: 1 });
-	const previous = initializedState(cappedConfig);
-	const snapshot = structuredClone(previous);
-	await assert.rejects(
-		pollSentinelOne(
-			async () =>
-				alertResponse([alert('pending-alert')], {
-					hasNextPage: true,
-					endCursor: 'page-2',
-				}),
-			cappedConfig,
-			previous,
-			'scheduled',
-			NOW,
-		),
-		/exceeded the configured page limit/,
 	);
 	assert.deepEqual(previous, snapshot);
 });
@@ -1115,26 +1057,6 @@ test('debug logging captures sanitized request stages without credentials or res
 	);
 	const serialized = JSON.stringify(entries);
 	assert.doesNotMatch(serialized, /Authorization|ApiToken|apiToken|Content debug-alert/);
-});
-
-test('poll fails before emission when one overlap exceeds the alert state capacity', async () => {
-	const triggerConfig = config();
-	const alerts = Array.from({ length: MAX_SEEN_ALERT_IDS + 1 }, (_, index) =>
-		alert(`alert-${index}`, new Date(NOW - index).toISOString()),
-	).reverse();
-	const previous = initializedState(triggerConfig);
-	for (const pollStart of [NOW, NOW + 60_000]) {
-		await assert.rejects(
-			pollSentinelOne(
-				async () => alertResponse(alerts),
-				triggerConfig,
-				previous,
-				'scheduled',
-				pollStart,
-			),
-			/exceeds the safe state limit.*state was not advanced/,
-		);
-	}
 });
 
 test('expired seen identities retire while current identities remain within documented limits', async () => {
@@ -1277,7 +1199,6 @@ test('trigger UI uses resource, operation, and resource-specific options', () =>
 const {
 	compileExclusion,
 	matchesExclusion,
-	noteAuthorName,
 } = require('../../dist/nodes/SentinelOnePlatformTrigger/Exclusions.js');
 const testNode = {
 	name: 'SentinelOne Platform Trigger',
@@ -1310,15 +1231,6 @@ test('exclusion regex supports names, anchors, alternatives and bounded native m
 		assert.throws(() => compileExclusion(pattern, 'Account'), /Account: use a valid regex/);
 	}
 	assert.throws(() => matchesExclusion(/a/i, 'a'.repeat(1025)), /safety limit/);
-	assert.equal(
-		noteAuthorName({ __typename: 'UserNoteAuthor', fullName: 'Human', name: 'Wrong' }),
-		'Human',
-	);
-	assert.equal(
-		noteAuthorName({ __typename: 'RuleNoteAuthor', name: 'Rule', fullName: 'Wrong' }),
-		'Rule',
-	);
-	assert.equal(noteAuthorName({ __typename: 'Unknown', name: 'Unknown' }), undefined);
 });
 
 test('scope exclusions cascade without changing query scope or dropping ungrouped alerts', async () => {
@@ -1634,6 +1546,7 @@ test('the activity node dispatches through V2 LOG with a generic note envelope',
 	};
 	let sdlCalls = 0;
 	const request = async (r) => {
+		if (r.method === 'DELETE') return {};
 		if (r.method === 'GET') return { data: [{ id: 'account-1', name: 'Account One' }] };
 		if (r.url.includes('/sdl/v2/api/queries')) {
 			sdlCalls++;
@@ -1812,6 +1725,7 @@ test('an alert resource treats a retained activity operation as the alert defaul
 			},
 			'trigger',
 		);
+		context.getWorkflow = () => ({ id: `retained-operation-${savedOperation}` });
 		assert.equal(await node.poll.call(context), null);
 		assert.ok(alertQueries > 0, 'the alert resource must query alerts');
 		fingerprints.push(context.staticData.sentinelOneTrigger.configFingerprint);
@@ -1852,7 +1766,7 @@ test('saved groups without sites fail before requests for both trigger resources
 		const state = {
 			configFingerprint: 'existing',
 			lastPollTime: NOW - 1000,
-			seenActivityIds: ['existing-activity'],
+			seenActivityTimestamps: { 'existing-activity': '1000000' },
 		};
 		context.staticData.sentinelOneTrigger = state;
 		await assert.rejects(
@@ -1864,7 +1778,7 @@ test('saved groups without sites fail before requests for both trigger resources
 		assert.deepEqual(context.staticData.sentinelOneTrigger, {
 			configFingerprint: 'existing',
 			lastPollTime: NOW - 1000,
-			seenActivityIds: ['existing-activity'],
+			seenActivityTimestamps: { 'existing-activity': '1000000' },
 		});
 	}
 });
@@ -1946,6 +1860,7 @@ test('activity trigger retains valid group selections and resolves their account
 			},
 		},
 		async (request) => {
+			if (request.method === 'DELETE') return {};
 			if (request.method === 'GET') {
 				if (request.url.endsWith('/accounts'))
 					return { data: [{ id: 'account-1', name: 'Account One' }] };

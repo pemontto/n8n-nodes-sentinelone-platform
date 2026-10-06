@@ -29,6 +29,8 @@ import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workf
 
 import {
 	pollSentinelOne,
+	fingerprintConfig,
+	TRIGGER_STATE_VERSION,
 	type AuthenticatedRequest,
 	type TriggerConfig,
 	type TriggerEvent,
@@ -199,23 +201,25 @@ const activityFields: INodeProperties[] = [
 
 const activePollKeys = new Set<string>();
 
-/** Declared by n8n 2.38.0 and later; older hosts omit it and keep their existing limits. */
+const pendingBaselines = new Map<string, TriggerState>();
+
+/** Declared by n8n 2.38.0 and later. */
 type PollBudgetFunctions = { getPollBudgetMs?: () => number };
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/** Absolute time at which a scheduled poll must stop reading, or undefined when the host sets no budget or the poll is a manual preview. */
+/** Scheduled hosts without a budget use the same reader with five minutes. */
 function pollDeadline(context: IPollFunctions): number | undefined {
 	if (context.getMode() === 'manual') return undefined;
 	// SAFETY: n8n 2.38.0+ adds getPollBudgetMs to poll functions; older hosts are checked below.
 	const { getPollBudgetMs } = context as IPollFunctions & PollBudgetFunctions;
 
-	if (typeof getPollBudgetMs !== 'function') return undefined;
-	const budgetMs = Number(getPollBudgetMs.call(context));
+	const budgetMs =
+		typeof getPollBudgetMs === 'function' ? Number(getPollBudgetMs.call(context)) : 300_000;
 
-	return Number.isFinite(budgetMs) ? Date.now() + Math.max(0, budgetMs) : undefined;
+	return Date.now() + (Number.isFinite(budgetMs) ? Math.max(0, budgetMs) : 300_000);
 }
 
 function normalizeBaseUrl(value: unknown): string {
@@ -248,7 +252,7 @@ function authenticatedRequest(
 	debug = false,
 	deadline?: number,
 ): AuthenticatedRequest {
-	return async (options) =>
+	return async (options, readerDeadline) =>
 		requestWithRetry(
 			async (timeoutMs, attempt) => {
 				// SAFETY: request bodies passed to this helper are n8n JSON objects.
@@ -295,7 +299,8 @@ function authenticatedRequest(
 				// Scope loading and SDL polling own their bounded retry loops.
 				attempts: options.url.includes('/unifiedalerts/graphql') ? 3 : 1,
 				timeoutMs: options.timeout,
-				deadline,
+				deadline:
+					readerDeadline === undefined ? deadline : Math.min(deadline ?? Infinity, readerDeadline),
 			},
 		).then((result) => {
 			if (result.ok) return result.value;
@@ -706,9 +711,9 @@ export class SentinelOnePlatformTrigger implements INodeType {
 		}
 
 		activePollKeys.add(pollKey);
-		const deadline = pollDeadline(this);
 
 		try {
+			const deadline = pollDeadline(this);
 			const credentials = await this.getCredentials('sentinelOnePlatformApi');
 			const options = this.getNodeParameter('options', {}) as IDataObject;
 			const nodeDebug = this.getNodeParameter('nodeDebug', false) === true;
@@ -871,15 +876,36 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					pollDeadlineMs: deadline,
 				};
 
+				const fingerprint = `${fingerprintConfig(config)}${resource === 'alertActivity' ? ':sdl-activities-v1' : ''}`;
+				const baselineKey = `${pollKey}:${fingerprint}`;
+				const scheduled = this.getMode() !== 'manual';
+
+				const committed =
+					previousState.version === TRIGGER_STATE_VERSION &&
+					previousState.initialized === true &&
+					previousState.configFingerprint === fingerprint;
+
+				if (scheduled && committed) pendingBaselines.delete(baselineKey);
+
+				const state =
+					scheduled && !committed
+						? (pendingBaselines.get(baselineKey) ?? previousState)
+						: previousState;
+
 				const result = await (resource === 'alertActivity' ? pollAlertActivities : pollSentinelOne)(
 					request,
 					config,
-					previousState,
+					state,
 					this.getMode() === 'manual' ? 'manual' : 'scheduled',
 					Date.now(),
 				);
 
-				if (result.nextState) staticData.sentinelOneTrigger = result.nextState;
+				if (result.nextState) {
+					staticData.sentinelOneTrigger = result.nextState;
+
+					// Activation and empty polls return null, so n8n may discard their static data.
+					if (scheduled && !committed) pendingBaselines.set(baselineKey, result.nextState);
+				}
 
 				if (result.items.length === 0) return null;
 
@@ -888,6 +914,25 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				// Preserve typed n8n errors and their status, description and cause.
 				// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 				if (error instanceof NodeApiError || error instanceof NodeOperationError) throw error;
+
+				const status = responseStatus(error);
+
+				if (status !== null) {
+					const apiError = new NodeApiError(
+						node,
+						{ message: errorMessage(error) },
+						{
+							message: errorMessage(error),
+							httpCode: String(status),
+						},
+					);
+
+					throw Object.assign(apiError, {
+						statusCode: status,
+						retryable: isRetryableReadError(error),
+						retryAfterMs: retryAfterMs(error),
+					});
+				}
 
 				const operationError = new NodeOperationError(
 					this.getNode(),

@@ -1,5 +1,3 @@
-import type { IDataObject } from 'n8n-workflow';
-
 export interface ExclusionPatterns {
 	excludeAccountName?: string;
 	excludeSiteName?: string;
@@ -75,14 +73,6 @@ export function matchesExclusion(pattern: RegExp | undefined, name: unknown): bo
 		);
 
 	return pattern.test(name);
-}
-
-export function noteAuthorName(author: IDataObject | null | undefined): unknown {
-	if (author?.__typename === 'UserNoteAuthor') return author.fullName;
-
-	if (author?.__typename === 'RuleNoteAuthor') return author.name;
-
-	return undefined;
 }
 
 export function compileExclusions(patterns: ExclusionPatterns) {

@@ -8,6 +8,7 @@ const {
 	MAX_SEEN_ALERT_IDS,
 	MAX_SEEN_ALERT_VERSIONS,
 	fingerprintConfig,
+	TRIGGER_STATE_VERSION,
 	pollSentinelOne,
 } = require('../../dist/nodes/SentinelOnePlatformTrigger/SentinelOneTriggerHelpers.js');
 const {
@@ -63,6 +64,7 @@ function cursorsFor(triggerConfig, checkpointMs) {
 
 function stateFor(triggerConfig, checkpointMs = CHECKPOINT) {
 	return {
+		version: TRIGGER_STATE_VERSION,
 		configFingerprint: fingerprintConfig(triggerConfig),
 		initialized: true,
 		activationMs: 0,
@@ -233,7 +235,7 @@ test('Invalid current saved activation or identity data fails before requests an
 	}
 });
 
-test('Without a budget the scheduled read uses descending pagination: one descending query per stream from the overlap before the checkpoint, every alert delivered, checkpoint at the poll start', async () => {
+test('A helper without a host budget uses the same ascending reader with a five-minute fallback', async () => {
 	const triggerConfig = config({ events: ['alert.new', 'alert.updated'] });
 	const source = tenant(backlog);
 	const result = await pollSentinelOne(
@@ -254,8 +256,8 @@ test('Without a budget the scheduled read uses descending pagination: one descen
 			])
 			.sort(),
 		[
-			['createdAt', 'DESC', CHECKPOINT - 300_000, NOW],
-			['updatedAt', 'DESC', CHECKPOINT - 300_000, NOW],
+			['createdAt', 'ASC', CHECKPOINT - 300_000, NOW],
+			['updatedAt', 'ASC', CHECKPOINT - 300_000, NOW],
 		],
 	);
 	assert.ok(variables.every((value) => !value.filters.some((filter) => filter.fieldId === 'id')));
@@ -429,60 +431,6 @@ test('A baseline cut short by the budget never replays pre-activation alerts as 
 	assert.deepEqual(seen, ['post-activation']);
 });
 
-test('A drain past the seen-ID limit keeps every identity still inside an overlap, so the re-read repeats nothing', async () => {
-	const triggerConfig = config({ alertPageSize: 200, maxAlertPages: 10 });
-	const count = MAX_SEEN_ALERT_IDS + 1_000;
-	const alerts = Array.from({ length: count }, (_, index) =>
-		alert(`alert-${index}`, NOW - (count - index) * 1_000),
-	);
-	const { emitted, state } = await drain(
-		triggerConfig,
-		stateFor(triggerConfig, NOW - count * 1_000),
-		alerts,
-		{ budgetMs: 5_000, pageCostMs: 100 },
-	);
-	assert.equal(emitted.length, count);
-	assert.equal(new Set(emitted.map((item) => item.alertId)).size, count);
-	assert.ok(
-		state.seenAlertIds.length < MAX_SEEN_ALERT_IDS,
-		'identities outside every overlap retired',
-	);
-	const again = await pollSentinelOne(
-		tenant(alerts).request,
-		triggerConfig,
-		state,
-		'scheduled',
-		NOW + 60_000,
-	);
-	assert.deepEqual(again.items, []);
-});
-
-test('An overlap that needs more identities than the limit fails visibly instead of retiring them', async () => {
-	const triggerConfig = config({ alertPageSize: 200, maxAlertPages: 60 });
-	const count = MAX_SEEN_ALERT_IDS + 1;
-	const alerts = Array.from({ length: count }, (_, index) =>
-		alert(`alert-${index}`, NOW - 120_000 + index),
-	);
-	const first = await pollSentinelOne(
-		tenant(alerts.slice(0, 12_000)).request,
-		triggerConfig,
-		stateFor(triggerConfig, NOW - 200_000),
-		'scheduled',
-		NOW,
-	);
-	assert.equal(first.items.length, 12_000);
-	await assert.rejects(
-		pollSentinelOne(
-			tenant(alerts).request,
-			triggerConfig,
-			first.nextState,
-			'scheduled',
-			NOW + 60_000,
-		),
-		/exceeds the safe state limit.*state was not advanced/,
-	);
-});
-
 test('Cursors follow scope membership: reordering scopes keeps them, and a changed batch starts where the slowest saved cursor stands', async () => {
 	const scopeIds = Array.from(
 		{ length: 501 },
@@ -556,44 +504,28 @@ test('Cursors follow scope membership: reordering scopes keeps them, and a chang
 	assert.deepEqual(ids(third), ['new-scope', 'last-2', 'last-3']);
 });
 
-test('A budget stop with no progress fails after repeated stalls, and a descending page is a hard error', async () => {
+test('A budget stop with no progress fails immediately at its stream position, and descending pages remain hard errors', async () => {
 	const triggerConfig = config();
 	const previous = stateFor(triggerConfig);
 	const snapshot = structuredClone(previous);
-	let stalled = previous;
-	for (let poll = 0; poll < 9; poll += 1) {
-		const pollStart = NOW + poll * 60_000;
-		const result = await pollSentinelOne(
-			async () => {
-				throw new PollBudgetError({ statusCode: 429 });
-			},
-			{ ...triggerConfig, pollDeadlineMs: pollStart + 60_000 },
-			stalled,
-			'scheduled',
-			pollStart,
-		);
-		stalled = result.nextState;
-	}
-	assert.equal(Object.values(stalled.stalledAlertPolls)[0], 9);
 	await assert.rejects(
 		pollSentinelOne(
 			async () => {
-				throw new PollBudgetError({ statusCode: 429 });
+				throw new PollBudgetError();
 			},
-			{ ...triggerConfig, pollDeadlineMs: NOW + 9 * 60_000 + 60_000 },
-			stalled,
+			triggerConfig,
+			previous,
 			'scheduled',
-			NOW + 9 * 60_000,
+			NOW,
 		),
 		new RegExp(
-			`createdAt stream in scope batch 1 remained stalled at ${iso(CHECKPOINT)} for 10 polls.*HTTP 429.*state was not advanced`,
+			`createdAt stream in scope batch 1 made no progress at ${iso(CHECKPOINT)}.*state was not advanced`,
 		),
 	);
-	assert.deepEqual(previous, snapshot);
 	await assert.rejects(
 		pollSentinelOne(
 			tenant(backlog, { ignoreSortOrder: true }).request,
-			{ ...triggerConfig, pollDeadlineMs: Date.now() + 60_000 },
+			triggerConfig,
 			previous,
 			'scheduled',
 			NOW,
@@ -602,9 +534,8 @@ test('A budget stop with no progress fails after repeated stalls, and a descendi
 	);
 	assert.deepEqual(previous, snapshot);
 });
-
-test('Under a budget a read pages past the manual page cap until the budget stops it, and a dense overlap re-read resumes where it stopped instead of restarting', async () => {
-	const triggerConfig = config({ maxAlertPages: 1, alertPageSize: 200 });
+test('A scheduled page cap hands over its completed prefix and resumes a dense overlap', async () => {
+	const triggerConfig = config({ maxAlertPages: 10, alertPageSize: 200 });
 	const cursor = NOW - 600_000;
 	// 15,000 distinct timestamps inside the overlap before a completed cursor, then two alerts past it.
 	const dense = Array.from({ length: 15_000 }, (_, index) =>
@@ -631,7 +562,7 @@ test('Under a budget a read pages past the manual page cap until the budget stop
 		alerts.map((row) => row.id),
 	);
 	assert.equal(final.checkpointMs, NOW);
-	assert.ok(polls >= 3 && polls <= 6, `${polls} polls, each reading about 30 pages`);
+	assert.ok(polls >= 7 && polls <= 9, `${polls} polls, each reading at most ten pages`);
 });
 
 test('A budget stop in one scope batch preserves progress from batches that were reached', async () => {
@@ -659,7 +590,7 @@ test('A budget stop in one scope batch preserves progress from batches that were
 });
 
 test('Budgeted alert polling drains an 8,000 alert storm with fixed page latency in bounded work', async () => {
-	const triggerConfig = config({ events: ['alert.new'], alertPageSize: 100, maxAlertPages: 1 });
+	const triggerConfig = config({ events: ['alert.new'], alertPageSize: 100, maxAlertPages: 25 });
 	const start = NOW - 60_000;
 	const alerts = Array.from({ length: 8_000 }, (_, index) =>
 		alert(`fixed-${String(index).padStart(5, '0')}`, start + Math.floor((index * 60_000) / 7_999)),
@@ -686,7 +617,7 @@ test('Budgeted alert polling drains an 8,000 alert storm with fixed page latency
 });
 
 test('Budgeted alert polling drains an 8,000 alert storm with jittered page latency in bounded work', async () => {
-	const triggerConfig = config({ events: ['alert.new'], alertPageSize: 100, maxAlertPages: 1 });
+	const triggerConfig = config({ events: ['alert.new'], alertPageSize: 100, maxAlertPages: 25 });
 	const start = NOW - 60_000;
 	const alerts = Array.from({ length: 8_000 }, (_, index) =>
 		alert(`jitter-${String(index).padStart(5, '0')}`, start + Math.floor((index * 60_000) / 7_999)),
@@ -712,141 +643,6 @@ test('Budgeted alert polling drains an 8,000 alert storm with jittered page late
 	assert.ok(result.requestCount <= 8_000 / 100 + result.polls * 2);
 });
 
-test('Budgeted alert reads stop at seen-state capacity and save the last handled position', async () => {
-	const createdConfig = config({
-		events: ['alert.new'],
-		pollDeadlineMs: Date.now() + 60_000,
-	});
-	const createdAlerts = Array.from({ length: MAX_SEEN_ALERT_IDS + 1 }, (_, index) =>
-		alert(`capacity-new-${index}`, CHECKPOINT + index + 1),
-	);
-	const created = await pollSentinelOne(
-		tenant(createdAlerts).request,
-		createdConfig,
-		stateFor(createdConfig),
-		'scheduled',
-		NOW,
-	);
-	assert.equal(created.items.length, MAX_SEEN_ALERT_IDS);
-	assert.equal(created.nextState.seenAlertIds.length, MAX_SEEN_ALERT_IDS);
-	assert.equal(
-		created.nextState.alertCursors[Object.keys(created.nextState.alertCursors)[0]].resumeMs,
-		CHECKPOINT + MAX_SEEN_ALERT_IDS,
-	);
-
-	const updatedConfig = config({
-		events: ['alert.updated'],
-		pollDeadlineMs: Date.now() + 60_000,
-	});
-	const updatedAlerts = Array.from({ length: MAX_SEEN_ALERT_VERSIONS + 1 }, (_, index) =>
-		alert(`capacity-updated-${index}`, CHECKPOINT - 60_000, iso(CHECKPOINT + index + 1)),
-	);
-	const updated = await pollSentinelOne(
-		tenant(updatedAlerts).request,
-		updatedConfig,
-		stateFor(updatedConfig),
-		'scheduled',
-		NOW,
-	);
-	assert.equal(updated.items.length, MAX_SEEN_ALERT_VERSIONS);
-	assert.equal(updated.nextState.seenAlertVersions.length, MAX_SEEN_ALERT_VERSIONS);
-	assert.equal(
-		updated.nextState.alertCursors[Object.keys(updated.nextState.alertCursors)[0]].resumeMs,
-		CHECKPOINT + MAX_SEEN_ALERT_VERSIONS,
-	);
-});
-
-test('Budgeted scope batches reserve the last seen-state slot for the oldest alert regardless of response timing', async () => {
-	const scopeIds = Array.from({ length: 501 }, (_, index) => `scope-${index}`);
-	const triggerConfig = config({
-		events: ['alert.new'],
-		scopeIds,
-		pollDeadlineMs: Date.now() + 60_000,
-		alertPageSize: 10,
-	});
-	const seeded = {
-		...stateFor(triggerConfig),
-		seenAlertIds: Array.from(
-			{ length: MAX_SEEN_ALERT_IDS - 1 },
-			(_, index) => `prior-${index}\u0000${iso(NOW - 30_000)}\u0000${triggerConfig.scopeIds[0]}`,
-		),
-	};
-	const alerts = [
-		alert('older-batch-alert', NOW - 20_000, undefined, 'scope-0'),
-		alert('newer-batch-alert', NOW - 10_000, undefined, 'scope-500'),
-	];
-	const poll = async (olderDelay, newerDelay) => {
-		const source = tenant(alerts);
-		const request = async (options) => {
-			const firstScope = options.body.variables.scope.scopeIds[0];
-			await new Promise((resolve) =>
-				setTimeout(resolve, firstScope === 'scope-0' ? olderDelay : newerDelay),
-			);
-			return await source.request(options);
-		};
-		return await pollSentinelOne(request, triggerConfig, seeded, 'scheduled', NOW);
-	};
-	const slowerOlder = await poll(25, 0);
-	const fasterOlder = await poll(0, 25);
-	for (const result of [slowerOlder, fasterOlder]) {
-		assert.deepEqual(events(result), [['alert.new', 'older-batch-alert']]);
-		assert.ok(
-			result.nextState.seenAlertIds.some((entry) => entry.startsWith('older-batch-alert\u0000')),
-		);
-		assert.ok(
-			!result.nextState.seenAlertIds.some((entry) => entry.startsWith('newer-batch-alert\u0000')),
-		);
-	}
-	assert.deepEqual(slowerOlder.nextState.alertCursors, fasterOlder.nextState.alertCursors);
-	assert.deepEqual(slowerOlder.nextState.seenAlertIds, fasterOlder.nextState.seenAlertIds);
-
-	const repeat = await pollSentinelOne(
-		tenant(alerts).request,
-		triggerConfig,
-		slowerOlder.nextState,
-		'scheduled',
-		NOW + 1_000,
-	);
-	assert.deepEqual(repeat.items, []);
-	assert.ok(
-		Object.values(repeat.nextState.alertCursors).some((cursor) => cursor.throughMs === NOW + 1_000),
-	);
-});
-
-test('Updated waits when seen-state capacity holds back the alert New row', async () => {
-	const triggerConfig = config({
-		events: ['alert.new', 'alert.updated'],
-		scopeIds: Array.from({ length: 501 }, (_, index) => `scope-${String(index).padStart(3, '0')}`),
-		pollDeadlineMs: Date.now() + 60_000,
-		alertPageSize: 10,
-	});
-	const seeded = {
-		...stateFor(triggerConfig),
-		seenAlertIds: Array.from(
-			{ length: MAX_SEEN_ALERT_IDS - 1 },
-			(_, index) => `prior-${index}\u0000${iso(NOW - 30_000)}\u0000${triggerConfig.scopeIds[0]}`,
-		),
-	};
-	const alerts = [
-		alert('older-batch-alert', NOW - 20_000, undefined, 'scope-000'),
-		alert('newer-batch-alert', NOW - 10_000, NOW - 5_000, 'scope-500'),
-	];
-	const source = tenant(alerts);
-	const result = await pollSentinelOne(source.request, triggerConfig, seeded, 'scheduled', NOW);
-	assert.deepEqual(events(result), [['alert.new', 'older-batch-alert']]);
-	assert.ok(
-		!result.nextState.seenAlertVersions.some((entry) =>
-			entry.startsWith('newer-batch-alert\u0000'),
-		),
-	);
-	assert.equal(
-		Object.values(result.nextState.alertCursors).filter((cursor) => cursor.throughMs === CHECKPOINT)
-			.length,
-		2,
-		'the newer batch cursors stay before the alert whose New row did not fit',
-	);
-});
-
 test('Updated-only polling reads the updatedAt stream without querying createdAt', async () => {
 	const triggerConfig = config({
 		events: ['alert.updated'],
@@ -857,85 +653,6 @@ test('Updated-only polling reads the updatedAt stream without querying createdAt
 	assert.deepEqual(
 		[...new Set(source.state.requests.map((request) => request.body.variables.sortBy))],
 		['updatedAt'],
-	);
-});
-
-test('New is delivered before a later Updated event for the same alert', async () => {
-	const triggerConfig = config({
-		events: ['alert.new', 'alert.updated'],
-		alertPageSize: 1,
-		pollDeadlineMs: Date.now() + 60_000,
-	});
-	const created = CHECKPOINT + 60_000;
-	let alerts = [alert('Z', created), alert('A', created + 60_000, NOW - 60_000)];
-	const firstSource = tenant(alerts);
-	let createdRequests = 0;
-	const first = await pollSentinelOne(
-		async (options) => {
-			if (options.body.variables.sortBy === 'createdAt' && ++createdRequests > 1)
-				throw new PollBudgetError({ statusCode: 429 });
-			return await firstSource.request(options);
-		},
-		triggerConfig,
-		stateFor(triggerConfig),
-		'scheduled',
-		NOW,
-	);
-	assert.deepEqual(events(first), [['alert.new', 'Z']]);
-	const second = await pollSentinelOne(
-		tenant(alerts).request,
-		{ ...triggerConfig, pollDeadlineMs: Date.now() + 60_000 },
-		first.nextState,
-		'scheduled',
-		NOW + 1,
-	);
-	assert.deepEqual(events(second), [['alert.new', 'A']]);
-	alerts = alerts.map((row) => (row.id === 'A' ? { ...row, updatedAt: iso(NOW + 30_000) } : row));
-	const third = await pollSentinelOne(
-		tenant(alerts).request,
-		{ ...triggerConfig, pollDeadlineMs: Date.now() + 60_000 },
-		second.nextState,
-		'scheduled',
-		NOW + 60_000,
-	);
-	assert.deepEqual(events(third), [['alert.updated', 'A']]);
-});
-
-test('Seen identities retire by their own stream: created ids follow the slowest created cursor and versions the slowest updated cursor', async () => {
-	const triggerConfig = config({ events: ['alert.new', 'alert.updated'], alertPageSize: 1 });
-	const created = CHECKPOINT + 60_000;
-	const alerts = [
-		alert('A', created, NOW - 1_200_000),
-		alert('B', CHECKPOINT + 120_000),
-		alert('C', CHECKPOINT + 180_000),
-	];
-	const result = await withClock(async (clock) => {
-		// The created stream stops after one page, so Updated cannot pass its completed boundary.
-		const source = tenant(alerts, { clock, pageCostMs: 5_000 });
-		const createdDeadline = source.budgeted(clock.start + 6_000);
-		return await pollSentinelOne(
-			async (options) => {
-				if (options.body.variables.sortBy === 'updatedAt') return await source.request(options);
-				return await createdDeadline(options);
-			},
-			{ ...triggerConfig, pollDeadlineMs: clock.start + 60_000 },
-			stateFor(triggerConfig),
-			'scheduled',
-			NOW,
-		);
-	});
-	const cursors = Object.values(result.nextState.alertCursors)
-		.map((cursor) => cursor.throughMs)
-		.sort();
-	assert.deepEqual(cursors, [created - 1, created]);
-	assert.deepEqual(
-		result.nextState.seenAlertIds.map((entry) => entry.split('\u0000')[0]),
-		['A'],
-	);
-	assert.deepEqual(
-		result.nextState.seenAlertVersions,
-		[`A\u0000${iso(NOW - 1_200_000)}`],
-		'a version stays retained while Updated is capped behind the created cursor',
 	);
 });
 
@@ -1029,37 +746,6 @@ test('A regrouped batch starts from the slowest saved cursor and can never save 
 	assert.deepEqual(ids(second), ['late-2', 'fresh']);
 });
 
-test('A first-ever rate-limited stream records stalls and fails visibly after ten polls', async () => {
-	const triggerConfig = config();
-	let state = {};
-	for (let poll = 0; poll < 9; poll += 1) {
-		const pollStart = NOW + poll * 60_000;
-		const result = await pollSentinelOne(
-			async () => {
-				throw new PollBudgetError({ statusCode: 429 });
-			},
-			{ ...triggerConfig, pollDeadlineMs: pollStart + 60_000 },
-			state,
-			'scheduled',
-			pollStart,
-		);
-		state = result.nextState;
-	}
-	assert.deepEqual(Object.values(state.stalledAlertPolls), [9]);
-	await assert.rejects(
-		pollSentinelOne(
-			async () => {
-				throw new PollBudgetError({ statusCode: 429 });
-			},
-			{ ...triggerConfig, pollDeadlineMs: NOW + 9 * 60_000 + 60_000 },
-			state,
-			'scheduled',
-			NOW + 9 * 60_000,
-		),
-		/createdAt stream in scope batch 1 remained stalled at .*for 10 polls.*HTTP 429/,
-	);
-});
-
 test('Transport results are unchanged without a deadline and with an ample one', async () => {
 	const error = { retryable: false };
 	assert.deepEqual(
@@ -1101,54 +787,6 @@ test('Each attempt timeout is capped to the remaining budget and nothing starts 
 	);
 	assert.equal(sent, false);
 	assert.ok(spent.error instanceof PollBudgetError);
-});
-
-test('A Retry-After that ends past the deadline is a budget stop for every retry owner, while a permission failure after the deadline stays a permission failure', async () => {
-	await withClock(({ start, advance }) =>
-		(async () => {
-			let attempts = 0;
-			const blocked = await requestWithRetry(
-				async () => {
-					attempts++;
-					throw { retryable: true, retryAfterMs: 20_000, statusCode: 429 };
-				},
-				{ deadline: start + 1_000 },
-			);
-			assert.equal(attempts, 1);
-			assert.ok(blocked.error instanceof PollBudgetError);
-			assert.equal(blocked.error.blockedStatus, 429);
-			assert.match(blocked.error.message, /HTTP 429/);
-
-			// A single-attempt inner request under an outer retry loop: the inner reports the stop, so the outer neither sleeps nor retries.
-			let outerAttempts = 0;
-			const outer = await requestWithRetry(
-				async () => {
-					outerAttempts++;
-					const inner = await requestWithRetry(
-						async () => {
-							throw { retryable: true, retryAfterMs: 20_000, statusCode: 429 };
-						},
-						{ attempts: 1, deadline: start + 10_000 },
-					);
-					throw inner.error;
-				},
-				{ timeoutMs: 30_000 },
-			);
-			assert.equal(outerAttempts, 1);
-			assert.ok(outer.error instanceof PollBudgetError);
-			assert.equal(Date.now(), start, 'no backoff sleep ran');
-
-			const denied = { statusCode: 401, retryable: false };
-			const late = await requestWithRetry(
-				async () => {
-					advance(2_000);
-					throw denied;
-				},
-				{ deadline: start + 1_000 },
-			);
-			assert.equal(late.error, denied);
-		})(),
-	);
 });
 
 function nodeContext(request, budgetMs) {
@@ -1245,7 +883,7 @@ test('A permission failure that arrives after the budget passes surfaces as deni
 	const limited = nodeContext(async () => {
 		throw { statusCode: 429, retryable: true, retryAfterMs: 60_000 };
 	}, 1_000);
-	await assert.rejects(node.poll.call(limited), /poll time budget ran out \(HTTP 429/);
+	await assert.rejects(node.poll.call(limited), (error) => error.httpCode === '429');
 });
 
 const activityConfig = (extra = {}) =>
@@ -1256,11 +894,11 @@ const activityConfig = (extra = {}) =>
 		...extra,
 	});
 const activityState = (c, checkpoint) => ({
+	version: TRIGGER_STATE_VERSION,
 	configFingerprint: fingerprintConfig(c) + ':sdl-activities-v1',
 	initialized: true,
 	checkpointMs: checkpoint,
 	activityActivationMs: checkpoint - 1000,
-	seenActivityIds: [],
 	seenActivityTimestamps: {},
 });
 const activity = (id, timeNs, alertId = 'alert-1') => ({
@@ -1290,6 +928,7 @@ const feedWindow = (matches) => ({
 	data: { matches },
 });
 const feedFor = (activities) => (options) => {
+	if (options.method === 'DELETE') return {};
 	const body = JSON.parse(options.body);
 	const start = BigInt(Date.parse(body.startTime)) * 1000000n;
 	const end = BigInt(Date.parse(body.endTime)) * 1000000n;
@@ -1337,31 +976,6 @@ test('A lookup the budget cuts short delivers every activity before the first on
 		['activity-400'],
 	);
 	assert.equal(third.nextState.checkpointMs, NOW);
-});
-
-test('A lookup cut short before its first batch fails loudly on the second attempt without advancing activity state', async () => {
-	const checkpoint = NOW - 3600_000;
-	const c = activityConfig({ pollDeadlineMs: Date.now() + 60_000 });
-	const request = async (options) => {
-		if (!options.url.includes('/sdl/')) throw new PollBudgetError();
-		const end = Date.parse(JSON.parse(options.body).endTime);
-		return feedWindow([activity('first', BigInt(end - 1) * 1000000n)]);
-	};
-	const first = await pollAlertActivities(
-		request,
-		c,
-		activityState(c, checkpoint),
-		'scheduled',
-		NOW,
-	);
-	assert.deepEqual(first.items, []);
-	const previous = first.nextState;
-	const snapshot = structuredClone(previous);
-	await assert.rejects(
-		pollAlertActivities(request, c, previous, 'scheduled', NOW),
-		/poll time budget.*current alert lookup.*state was not advanced/,
-	);
-	assert.deepEqual(previous, snapshot);
 });
 
 test('An activity baseline the budget cuts short saves its completed slices and activation, resumes silently, and never replays pre-activation activity', async () => {
@@ -1416,7 +1030,7 @@ test('An activity baseline the budget cuts short saves its completed slices and 
 	assert.deepEqual(third.items, []);
 });
 
-test('Rate limits that reach the feed deadline end the read at its completed windows, while a permission failure still fails it', async () => {
+test('Real failures after completed activity windows reject the entire poll', async () => {
 	const checkpoint = NOW - 3600_000;
 	const run = async (failure) => {
 		const c = activityConfig({ pollDeadlineMs: Date.now() + 60_000 });
@@ -1441,11 +1055,264 @@ test('Rate limits that reach the feed deadline end the read at its completed win
 			{ now: () => time, sleep: async () => {}, deadlineMs: 5_000, lifecycleMs: 5_000 },
 		);
 	};
-	const stopped = await run({ statusCode: 429 });
-	assert.deepEqual(
-		stopped.items.map((item) => item.activityId),
-		['first-window'],
-	);
-	assert.equal(stopped.nextState.checkpointMs, checkpoint + 300_000);
+	await assert.rejects(run({ statusCode: 429 }), /429|rate limit|could not be completed/);
 	await assert.rejects(run({ statusCode: 403 }), /permission denied/);
+});
+
+test('New and Updated caches evict their oldest keys with a warning while poll progress continues', async () => {
+	for (const [event, key, limit] of [
+		['alert.new', 'seenAlertIds', MAX_SEEN_ALERT_IDS],
+		['alert.updated', 'seenAlertVersions', MAX_SEEN_ALERT_VERSIONS],
+	]) {
+		const warnings = [];
+		const triggerConfig = config({
+			events: [event],
+			warnLog: (message, details) => warnings.push({ message, details }),
+		});
+		const state = stateFor(triggerConfig, NOW - 60_000);
+		const retainedTime = iso(NOW - 100_000);
+		state[key] = Array.from(
+			{ length: limit },
+			(_, index) =>
+				`old-${index}\u0000${retainedTime}${event === 'alert.new' ? '\u0000account-1' : ''}`,
+		);
+		const row =
+			event === 'alert.new'
+				? alert('fresh', NOW - 30_000)
+				: alert('fresh', NOW - 3600_000, NOW - 30_000);
+		const result = await pollSentinelOne(
+			tenant([row]).request,
+			triggerConfig,
+			state,
+			'scheduled',
+			NOW,
+		);
+		assert.deepEqual(ids(result), ['fresh']);
+		assert.equal(result.nextState[key].length, limit);
+		assert.ok(!result.nextState[key].some((entry) => entry.startsWith('old-0\u0000')));
+		assert.ok(result.nextState[key].at(-1).startsWith('fresh\u0000'));
+		assert.equal(warnings.length, 1);
+		assert.match(warnings[0].message, /evicted.*Events may repeat/);
+		assert.equal(warnings[0].details.evicted, 1);
+		assert.equal(result.nextState.checkpointMs, NOW);
+	}
+});
+
+test('Alert envelopes expose stable host identities in both output modes and preserve exact revision timestamps', async () => {
+	const row = alert('id/with space', NOW - 3600_000, NOW - 30_000);
+	row.updatedAt = '2026-08-26T12:59:30.000+01:00';
+	for (const simplifyOutput of [true, false]) {
+		for (const event of ['alert.new', 'alert.updated']) {
+			const triggerConfig = config({
+				baseUrl: 'https://tenant.example:8443',
+				events: [event],
+				simplifyOutput,
+			});
+			const result = await pollSentinelOne(tenant([row]).request, triggerConfig, {}, 'manual', NOW);
+			const item = result.items[0];
+			const parts = [
+				'tenant.example:8443',
+				'alert',
+				row.id,
+				...(event === 'alert.new' ? ['new'] : ['updated', row.updatedAt]),
+			];
+			assert.equal(item.eventId, parts.map(encodeURIComponent).join('/'));
+			assert.equal(item.eventType, event);
+			assert.equal(item.eventTime, event === 'alert.new' ? row.createdAt : row.updatedAt);
+		}
+	}
+});
+
+test('Real API failures after a completed page reject the poll and retain their HTTP identity', async () => {
+	for (const statusCode of [401, 403, 429, 500]) {
+		const triggerConfig = config({ alertPageSize: 1 });
+		const saved = stateFor(triggerConfig);
+		const snapshot = structuredClone(saved);
+		const failure = Object.assign(new Error(`HTTP ${statusCode}`), { statusCode });
+		const source = tenant(backlog);
+		let calls = 0;
+		await assert.rejects(
+			pollSentinelOne(
+				async (options) => {
+					if (++calls === 2) throw failure;
+					return await source.request(options);
+				},
+				triggerConfig,
+				saved,
+				'scheduled',
+				NOW,
+			),
+			(error) => error === failure && error.statusCode === statusCode,
+		);
+		assert.deepEqual(saved, snapshot);
+	}
+});
+
+test('An oversized ordinary resume marker fails visibly without evicting cursor IDs', async () => {
+	const triggerConfig = config();
+	const saved = stateFor(triggerConfig);
+	const cursor = Object.values(saved.alertCursors)[0];
+	cursor.resumeMs = CHECKPOINT;
+	cursor.resumeIds = Array.from({ length: 1001 }, (_, index) => `id-${index}`);
+	const snapshot = structuredClone(saved);
+	await assert.rejects(
+		pollSentinelOne(
+			async () => assert.fail('the guard must run before listing'),
+			triggerConfig,
+			saved,
+			'scheduled',
+			NOW,
+		),
+		/createdAt stream in scope batch 1.*1000 cursor IDs.*state was not advanced/,
+	);
+	assert.deepEqual(saved, snapshot);
+});
+
+test('Old checkpoint versions rebaseline without replaying historical alerts', async () => {
+	const triggerConfig = config();
+	const old = { ...stateFor(triggerConfig), version: TRIGGER_STATE_VERSION - 1 };
+	const result = await pollSentinelOne(
+		tenant(backlog).request,
+		triggerConfig,
+		old,
+		'scheduled',
+		NOW,
+	);
+	assert.deepEqual(result.items, []);
+	assert.equal(result.nextState.version, TRIGGER_STATE_VERSION);
+	assert.equal(result.nextState.activationMs, NOW);
+});
+
+test('Late New rows behind an interrupted cursor are picked up by the completed poll overlap', async () => {
+	const triggerConfig = config({ alertPageSize: 1 });
+	const rows = [alert('first', NOW - 120_000), alert('second', NOW - 60_000)];
+	const source = tenant(rows);
+	let calls = 0;
+	const first = await pollSentinelOne(
+		async (options) => {
+			if (++calls === 2) throw new PollBudgetError();
+			return await source.request(options);
+		},
+		triggerConfig,
+		stateFor(triggerConfig, NOW - 180_000),
+		'scheduled',
+		NOW,
+	);
+	assert.deepEqual(ids(first), ['first']);
+	const late = [...rows, alert('late', NOW - 150_000)];
+	const second = await pollSentinelOne(
+		tenant(late).request,
+		triggerConfig,
+		first.nextState,
+		'scheduled',
+		NOW,
+	);
+	assert.deepEqual(ids(second), ['second']);
+	const third = await pollSentinelOne(
+		tenant(late).request,
+		triggerConfig,
+		second.nextState,
+		'scheduled',
+		NOW + 60_000,
+	);
+	assert.deepEqual(ids(third), ['late']);
+	const fourth = await pollSentinelOne(
+		tenant(late).request,
+		triggerConfig,
+		third.nextState,
+		'scheduled',
+		NOW + 120_000,
+	);
+	assert.deepEqual(ids(fourth), []);
+});
+
+test('A lagging Updated stream reads first under the same one-request budget every poll', async () => {
+	const triggerConfig = config({
+		events: ['alert.new', 'alert.updated'],
+		alertPageSize: 1,
+		concurrentRequests: 1,
+	});
+	let state = stateFor(triggerConfig, NOW - 60_000);
+	const updatedKey = Object.keys(state.alertCursors).find((key) => key.startsWith('updatedAt:'));
+	state.alertCursors[updatedKey] = { throughMs: CHECKPOINT, ids: [] };
+	const rows = [
+		alert('old-1', CHECKPOINT - 60_000, CHECKPOINT + 30_000),
+		alert('old-2', CHECKPOINT - 60_000, CHECKPOINT + 60_000),
+	];
+	const delivered = [];
+	await withClock(async (clock) => {
+		for (let poll = 0; poll < 3; poll++) {
+			const deadline = clock.now() + 7_000;
+			const source = tenant(rows, { pageCostMs: 6_000, clock });
+			const result = await pollSentinelOne(
+				source.budgeted(deadline),
+				{ ...triggerConfig, pollDeadlineMs: deadline },
+				state,
+				'scheduled',
+				NOW,
+			);
+			assert.equal(source.state.requests[0].body.variables.sortBy, 'updatedAt');
+			assert.ok(
+				result.nextState.alertCursors[updatedKey].throughMs >
+					state.alertCursors[updatedKey].throughMs ||
+					result.nextState.alertCursors[updatedKey].resumeMs >
+						(state.alertCursors[updatedKey].resumeMs ?? 0),
+			);
+			delivered.push(...ids(result));
+			state = result.nextState;
+		}
+	});
+	assert.deepEqual(delivered, ['old-1', 'old-2']);
+});
+
+test('A fresh baseline records alerts exactly at activation without emitting them', async () => {
+	const triggerConfig = config();
+	const row = alert('at-activation', NOW);
+	const baseline = await pollSentinelOne(
+		tenant([row]).request,
+		triggerConfig,
+		{},
+		'scheduled',
+		NOW,
+	);
+	assert.deepEqual(baseline.items, []);
+	assert.ok(
+		baseline.nextState.seenAlertIds.some((entry) => entry.startsWith('at-activation\u0000')),
+	);
+	const next = await pollSentinelOne(
+		tenant([row, alert('later', NOW + 1000)]).request,
+		triggerConfig,
+		baseline.nextState,
+		'scheduled',
+		NOW + 60_000,
+	);
+	assert.deepEqual(ids(next), ['later']);
+});
+
+test('cache eviction uses source age when late alerts arrive after newer retained keys', async () => {
+	for (const [event, key, limit] of [
+		['alert.new', 'seenAlertIds', MAX_SEEN_ALERT_IDS],
+		['alert.updated', 'seenAlertVersions', MAX_SEEN_ALERT_VERSIONS],
+	]) {
+		const triggerConfig = config({ events: [event] });
+		const saved = stateFor(triggerConfig, NOW - 60_000);
+		saved[key] = Array.from(
+			{ length: limit },
+			(_, index) =>
+				`retained-${index}\u0000${iso(NOW - 100_000)}${event === 'alert.new' ? '\u0000account-1' : ''}`,
+		);
+		const late =
+			event === 'alert.new'
+				? alert('late', NOW - 200_000)
+				: alert('late', NOW - 3_600_000, NOW - 200_000);
+		const result = await pollSentinelOne(
+			tenant([late]).request,
+			triggerConfig,
+			saved,
+			'scheduled',
+			NOW,
+		);
+		assert.deepEqual(ids(result), ['late']);
+		assert.deepEqual(result.nextState[key], saved[key]);
+	}
 });

@@ -5,6 +5,7 @@ const {
 } = require('../../dist/nodes/SentinelOnePlatformTrigger/ActivityNotePoll.js');
 const {
 	fingerprintConfig,
+	TRIGGER_STATE_VERSION,
 } = require('../../dist/nodes/SentinelOnePlatformTrigger/SentinelOneTriggerHelpers.js');
 const { PollBudgetError } = require('../../dist/nodes/shared/transport/request.js');
 const PREVIEW_START = Date.UTC(2020, 0, 1);
@@ -30,11 +31,11 @@ const cfg = (extra = {}) => ({
 });
 const ns = (time) => (BigInt(time) * 1000000n).toString();
 const state = (c, extra = {}) => ({
+	version: TRIGGER_STATE_VERSION,
 	configFingerprint: fingerprintConfig(c) + ':sdl-activities-v1',
 	initialized: true,
 	checkpointMs: NOW - 1000,
 	activityActivationMs: NOW - 100000,
-	seenActivityIds: [],
 	seenActivityTimestamps: {},
 	...extra,
 });
@@ -105,6 +106,7 @@ const logFeed = (table) => ({
 const request =
 	(options = {}) =>
 	async (r) => {
+		if (r.method === 'DELETE') return {};
 		if (r.url.includes('/sdl/')) {
 			const source = options.feed ?? feed();
 			const body = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
@@ -122,6 +124,7 @@ test('direct SDL baseline only reads the feed and seeds activity identities', as
 	let calls = 0;
 	const result = await pollAlertActivities(
 		async (r) => {
+			if (r.method === 'DELETE') return {};
 			calls++;
 			assert.ok(r.url.includes('/sdl/'));
 			return logFeed(feed());
@@ -134,7 +137,7 @@ test('direct SDL baseline only reads the feed and seeds activity identities', as
 	assert.equal(calls, 1);
 	assert.deepEqual(result.items, []);
 	assert.equal(result.nextState.activityActivationMs, NOW);
-	assert.deepEqual(result.nextState.seenActivityIds, ['activity']);
+	assert.deepEqual(Object.keys(result.nextState.seenActivityTimestamps), ['activity']);
 	assert.equal(result.nextState.pendingNoteBalances, undefined);
 	assert.equal(result.nextState.seenNoteIds, undefined);
 });
@@ -198,7 +201,7 @@ test('scope, severity and account-name exclusions apply before SDL output', asyn
 	]) {
 		const result = await pollAlertActivities(request(), c, state(c), 'scheduled', NOW);
 		assert.deepEqual(result.items, []);
-		assert.deepEqual(result.nextState.seenActivityIds, ['activity']);
+		assert.deepEqual(Object.keys(result.nextState.seenActivityTimestamps), ['activity']);
 	}
 });
 
@@ -254,6 +257,7 @@ test('manual preview stops searching older windows after its first matching note
 	let queries = 0;
 	const result = await pollAlertActivities(
 		async (r) => {
+			if (r.method === 'DELETE') return {};
 			if (!r.url.includes('/sdl/')) return page([alert()]);
 			queries++;
 			assert.equal(queries, 1, 'must not search another window after finding a note');
@@ -281,21 +285,26 @@ test('activity retention drops only timestamps older than next overlap', async (
 		'scheduled',
 		NOW,
 	);
-	assert.deepEqual(result.nextState.seenActivityIds, ['keep']);
+	assert.deepEqual(Object.keys(result.nextState.seenActivityTimestamps), ['keep']);
 	assert.equal(previous.seenActivityTimestamps.old, ns(NOW - 301000));
 });
 
-test('activity state capacity fails instead of evicting identities inside overlap', async () => {
-	const c = cfg(),
-		previous = state(c, {
-			seenActivityTimestamps: Object.fromEntries(
-				Array.from({ length: 40000 }, (_, i) => ['id-' + i, ns(NOW - 1000)]),
-			),
-		});
-	await assert.rejects(
-		() => pollAlertActivities(request(), c, previous, 'scheduled', NOW),
-		/capacity inside the overlap/,
-	);
+test('activity recent cache evicts oldest keys with a warning and keeps the checkpoint', async () => {
+	const warnings = [];
+	const c = cfg({ warnLog: (message, details) => warnings.push({ message, details }) });
+	const previous = state(c, {
+		seenActivityTimestamps: Object.fromEntries(
+			Array.from({ length: 40000 }, (_, i) => ['id-' + i, ns(NOW - 1000 + (i % 100))]),
+		),
+	});
+	const result = await pollAlertActivities(request(), c, previous, 'scheduled', NOW);
+	assert.equal(Object.keys(result.nextState.seenActivityTimestamps).length, 40000);
+	assert.equal(result.nextState.seenActivityTimestamps['id-0'], undefined);
+	assert.equal(result.nextState.seenActivityTimestamps['id-1'], ns(NOW - 999));
+	assert.equal(result.nextState.seenActivityTimestamps.activity, ns(NOW - 500));
+	assert.equal(result.nextState.checkpointMs, NOW);
+	assert.equal(warnings.length, 1);
+	assert.deepEqual(warnings[0].details, { evictedActivityCount: 1 });
 	assert.equal(Object.keys(previous.seenActivityTimestamps).length, 40000);
 });
 
@@ -304,6 +313,7 @@ test('metadata scope queries stay within 500 account IDs', async () => {
 	const lengths = [];
 	const result = await pollAlertActivities(
 		async (r) => {
+			if (r.method === 'DELETE') return {};
 			if (r.url.includes('/sdl/')) return logFeed(feed());
 			lengths.push(r.body.variables.scope.scopeIds.length);
 			return page(r.body.variables.scope.scopeIds.includes('a') ? [alert()] : []);
@@ -349,6 +359,7 @@ test('manual SDL preview visits newest split first and returns up to ten eligibl
 	const windows = [];
 	const result = await pollAlertActivities(
 		async (r) => {
+			if (r.method === 'DELETE') return {};
 			if (!r.url.includes('/sdl/')) return page([alert()]);
 			const body = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
 			windows.push([Date.parse(body.startTime), Date.parse(body.endTime)]);
@@ -379,6 +390,7 @@ test('manual preview continues into older windows after newer notes fail filters
 	let queries = 0;
 	const result = await pollAlertActivities(
 		async (r) => {
+			if (r.method === 'DELETE') return {};
 			if (r.url.includes('/sdl/')) {
 				queries++;
 				if (queries === 1)
@@ -443,7 +455,8 @@ test('SDL author exclusions apply in scheduled and manual polls while missing na
 			result.items.map((x) => x.activityId),
 			mode === 'scheduled' ? ['human', 'unknown'] : ['unknown', 'human'],
 		);
-		if (mode === 'scheduled') assert.ok(result.nextState.seenActivityIds.includes('robot'));
+		if (mode === 'scheduled')
+			assert.ok(Object.keys(result.nextState.seenActivityTimestamps).includes('robot'));
 	}
 });
 
@@ -485,7 +498,7 @@ test('exact actor IDs exclude independently of mutable names', async () => {
 		NOW,
 	);
 	assert.deepEqual(result.items, []);
-	assert.deepEqual(result.nextState.seenActivityIds, ['activity']);
+	assert.deepEqual(Object.keys(result.nextState.seenActivityTimestamps), ['activity']);
 });
 test('historical transition matches before optional current alert enrichment', async () => {
 	const c = cfg({
@@ -526,6 +539,7 @@ test('name-filter lookup with unresolved selected scope fails without advance', 
 	});
 	let lookups = 0;
 	const read = async (r) => {
+		if (r.method === 'DELETE') return {};
 		if (r.url.includes('/sdl/')) return logFeed(feed());
 		const parent = alert();
 		if (++lookups === 2) parent.realTime.scope.site = null;
@@ -640,6 +654,7 @@ test('manual preview skips expired unavailable parents and finds the first eligi
 	let queries = 0;
 	const result = await pollAlertActivities(
 		async (r) => {
+			if (r.method === 'DELETE') return {};
 			if (r.url.includes('/sdl/')) {
 				const source = logFeed(
 					feed([
@@ -676,6 +691,7 @@ test('sparse outage catch-up reaches the advancing wall clock at supported polli
 			let queries = 0;
 			const result = await pollAlertActivities(
 				async (r) => {
+					if (r.method === 'DELETE') return {};
 					assert.ok(r.url.includes('/sdl/'));
 					queries++;
 					return logFeed(feed([]));
@@ -702,6 +718,7 @@ test('exhausted shared query budget commits only the completed chronological pre
 	const windows = [];
 	const previous = state(c, { checkpointMs: checkpoint, activityActivationMs: checkpoint - 1000 });
 	const read = async (r) => {
+		if (r.method === 'DELETE') return {};
 		if (!r.url.includes('/sdl/')) return page([alert()]);
 		const body = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
 		const start = Date.parse(body.startTime),
@@ -725,6 +742,7 @@ test('an incomplete first slice fails without advancing the saved checkpoint', a
 		() =>
 			pollAlertActivities(
 				async (r) => {
+					if (r.method === 'DELETE') return {};
 					const body = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
 					const start = Date.parse(body.startTime);
 					return logFeed(
@@ -749,6 +767,7 @@ test('no-progress errors identify the activity stream and saved checkpoint posit
 		() =>
 			pollAlertActivities(
 				async (r) => {
+					if (r.method === 'DELETE') return {};
 					const body = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
 					const start = Date.parse(body.startTime);
 					return logFeed(
@@ -790,6 +809,7 @@ test('a budget cut inside the overlap keeps the checkpoint and deduplicates the 
 	};
 	let cutLookup = true;
 	const read = async (r) => {
+		if (r.method === 'DELETE') return {};
 		if (r.url.includes('/sdl/')) return makeFeed();
 		const ids = r.body.variables.filters[0].stringIn.values;
 		if (cutLookup && ids.includes(alertIds.at(-1))) throw new PollBudgetError();
@@ -859,6 +879,7 @@ test('repeated budgeted prefixes shrink an outage backlog while wall time advanc
 		const beforeLag = wallClock - previous.checkpointMs;
 		const result = await pollAlertActivities(
 			async (r) => {
+				if (r.method === 'DELETE') return {};
 				if (!r.url.includes('/sdl/')) return page([alert()]);
 				const body = typeof r.body === 'string' ? JSON.parse(r.body) : r.body;
 				const start = Date.parse(body.startTime),
@@ -895,6 +916,7 @@ test('activity output leads with alert identity and includes current context wit
 			analystVerdict: 'FALSE_POSITIVE_BENIGN',
 		};
 		const read = async (r) => {
+			if (r.method === 'DELETE') return {};
 			if (r.url.includes('/sdl/')) return logFeed(feed());
 			lookups++;
 			assert.match(r.body.query, /\bexternalId\b/);
@@ -944,4 +966,102 @@ test('missing current alert context stays null and never borrows historical acti
 		assert.equal(item[key], null);
 	assert.equal(item.alertId, 'old-alert');
 	assert.deepEqual(item.changes, [{ field: 'status', oldValue: 'NEW', newValue: 'RESOLVED' }]);
+});
+
+test('one finite-budget activity reader drains a sorted fake-server backlog with timestamp ties every poll', async () => {
+	const start = NOW - 3600000;
+	const events = Array.from({ length: 72 }, (_, index) => {
+		const timestamp = start + Math.floor(index / 2) * 100000 + 1;
+		return [`event-${String(index).padStart(3, '0')}`, timestamp, 'backlog'];
+	});
+	const c = cfg({ pollDeadlineMs: 15000 });
+	let previous = state(c, { checkpointMs: start, activityActivationMs: start });
+	const delivered = [];
+	let polls = 0;
+	for (; polls < 12 && previous.checkpointMs < NOW; polls++) {
+		let time = 0;
+		const result = await pollAlertActivities(
+			async (r) => {
+				assert.ok(r.timeout > 0 && r.timeout <= 15000 - time);
+				if (r.method === 'DELETE') {
+					time += 100;
+					return {};
+				}
+				if (!r.url.includes('/sdl/')) {
+					time += 100;
+					return page([alert()]);
+				}
+				time += 1200;
+				const body = JSON.parse(r.body);
+				const from = Date.parse(body.startTime),
+					to = Date.parse(body.endTime);
+				const rows = events
+					.filter(([, timestamp]) => timestamp >= from && timestamp < to)
+					.sort(([left, a], [right, b]) => a - b || left.localeCompare(right))
+					.slice(0, body.log.limit);
+				return logFeed(feed(rows));
+			},
+			c,
+			previous,
+			'scheduled',
+			NOW,
+			{ now: () => time },
+		);
+		assert.ok(time <= 15000);
+		assert.ok(result.nextState.checkpointMs > previous.checkpointMs);
+		delivered.push(...result.items.map((item) => item.activityId));
+		previous = result.nextState;
+	}
+	assert.ok(polls > 1, 'the backlog must exceed one finite poll');
+	assert.equal(previous.checkpointMs, NOW);
+	assert.deepEqual(
+		delivered,
+		events.map(([id]) => id),
+	);
+	assert.equal(new Set(delivered).size, delivered.length);
+});
+
+test('every activity output mode has an encoded stable event envelope', async () => {
+	for (const includeRawActivity of [false, true]) {
+		for (const includeCurrentAlert of [false, true]) {
+			const c = cfg({
+				baseUrl: 'https://tenant.example:8443',
+				includeRawActivity,
+				includeCurrentAlert,
+			});
+			const source = logFeed(feed([['activity:id/%', NOW - 500, 'text']]));
+			source.data.matches[0].values['data.alert.id'] = 'alert:id/%';
+			const parent = { ...alert(), id: 'alert:id/%' };
+			const result = await pollAlertActivities(
+				async (r) => {
+					if (r.method === 'DELETE') return {};
+					return r.url.includes('/sdl/') ? source : page([parent]);
+				},
+				c,
+				state(c),
+				'scheduled',
+				NOW,
+			);
+			assert.equal(
+				result.items[0].eventId,
+				'tenant.example%3A8443/alert/alert%3Aid%2F%25/activity/activity%3Aid%2F%25',
+			);
+			assert.equal(result.items[0].eventType, 'alert.activity');
+			assert.equal(result.items[0].eventTime, new Date(NOW - 500).toISOString());
+		}
+	}
+});
+
+test('old activity state schema establishes a baseline rather than replaying saved progress', async () => {
+	const c = cfg();
+	const result = await pollAlertActivities(
+		request(),
+		c,
+		state(c, { version: 1 }),
+		'scheduled',
+		NOW,
+	);
+	assert.deepEqual(result.items, []);
+	assert.equal(result.nextState.version, TRIGGER_STATE_VERSION);
+	assert.equal(result.nextState.activityActivationMs, NOW);
 });

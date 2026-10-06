@@ -1,6 +1,6 @@
 import { sleep as workflowSleep, type IDataObject } from 'n8n-workflow';
 import type { AuthenticatedRequest } from './SentinelOneTriggerHelpers';
-import { isRetryableReadError, responseStatus } from '../shared/transport/retry';
+import { responseStatus, retryAfterMs } from '../shared/transport/retry';
 import { PollBudgetError } from '../shared/transport/request';
 
 export const ACTIVITY_FEED_LIMIT = 1000;
@@ -98,7 +98,11 @@ function complete(payload: IDataObject): boolean {
 	);
 }
 
-function requestFailure(stage: 'launch' | 'polling', error: unknown): Error {
+function requestFailure(
+	stage: 'launch' | 'polling' | 'cleanup',
+	error: unknown,
+	now = Date.now(),
+): Error {
 	const status = responseStatus(error);
 	let reason: string;
 
@@ -125,7 +129,10 @@ function requestFailure(stage: 'launch' | 'polling', error: unknown): Error {
 			}
 	}
 
-	return failure(`SDL query ${stage} failed: ${reason}`);
+	return Object.assign(failure(`SDL query ${stage} failed: ${reason}`), {
+		statusCode: status ?? undefined,
+		retryAfterMs: retryAfterMs(error, now),
+	});
 }
 
 function parseLogJson(text: string): unknown {
@@ -427,11 +434,12 @@ async function readActivityFeedRun(
 	async function queryWindow(start: number, end: number): Promise<ActivityFeedEvent[] | null> {
 		if (++queries > Math.min(maxQueries, 128) || now() >= deadline)
 			throw new ActivityFeedBudgetError('deadline', 'exceeded the query budget or deadline');
-		const expires = Math.min(deadline, now() + Math.min(lifecycleMs, 100_000));
+		// Leave time to delete a query whose data polling reaches the read deadline.
+		const expires = Math.min(deadline - 1000, now() + Math.min(lifecycleMs, 100_000));
 		let id: string | undefined;
-		let accepted = false;
+		let failed = false;
 		let routingTag: string | undefined;
-		let lastPollStatus: number | null = null;
+		let nextDelayMs = 1500;
 
 		const captureRouting = (response: unknown): void => {
 			const wrapper = record(response);
@@ -468,21 +476,16 @@ async function readActivityFeedRun(
 		const remaining = () => {
 			const milliseconds = expires - now();
 
-			if (milliseconds <= 0) {
-				// Rate limits that outlast one query's lifecycle fail it; ones that reach the whole read's deadline end the read at its completed prefix.
-				if (lastPollStatus === 429 && now() < deadline)
-					throw requestFailure('polling', { statusCode: 429 });
+			if (milliseconds <= 0)
 				throw new ActivityFeedBudgetError('deadline', 'exceeded the query deadline');
-			}
 
 			return Math.max(1, Math.min(milliseconds, 30_000));
 		};
 
-		// A request the poll budget stopped, or a transient failure once the deadline has passed, ends the read at its completed prefix; permanent failures still fail it.
 		const stopped = (stage: 'launch' | 'polling', error: unknown): Error =>
-			error instanceof PollBudgetError || (now() >= deadline && isRetryableReadError(error))
+			error instanceof PollBudgetError
 				? new ActivityFeedBudgetError('deadline', 'exceeded the query deadline')
-				: requestFailure(stage, error);
+				: requestFailure(stage, error, now());
 
 		try {
 			const queryBody = {
@@ -500,20 +503,35 @@ async function readActivityFeedRun(
 				...(accountIds.length ? { tenant: false, accountIds } : { tenant: true }),
 			};
 
-			let payload = unwrap(
-				await request({
-					method: 'POST',
-					returnFullResponse: true,
-					url: endpoint,
-					timeout: remaining(),
-					json: false,
-					encoding: 'text',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify(queryBody),
-				}).catch((error: unknown) => {
-					throw stopped('launch', error);
-				}),
-			);
+			const launch = async () => {
+				for (let attempt = 0; ; attempt++) {
+					const timeout = remaining();
+
+					try {
+						return await request(
+							{
+								method: 'POST',
+								returnFullResponse: true,
+								url: endpoint,
+								timeout,
+								json: false,
+								encoding: 'text',
+								headers: { 'Content-Type': 'application/json' },
+								body: JSON.stringify(queryBody),
+							},
+							expires,
+						);
+					} catch (error) {
+						if (responseStatus(error) !== 429 || attempt >= 2) throw stopped('launch', error);
+						const delay = Math.max(1500, retryAfterMs(error, now()));
+
+						if (now() + delay >= expires) throw requestFailure('launch', error, now());
+						await sleep(delay);
+					}
+				}
+			};
+
+			let payload = unwrap(await launch());
 
 			if (typeof payload?.id !== 'string' || !payload.id.trim())
 				throw failure('create response omitted its query ID');
@@ -560,29 +578,30 @@ async function readActivityFeedRun(
 				const bytes = new TextEncoder().encode(JSON.stringify(payload)).byteLength;
 
 				if (externalResult || bytes > Math.min(inlineBytes, ACTIVITY_FEED_INLINE_BYTES)) {
-					accepted = complete(payload);
-
 					return null;
 				}
 
 				if (complete(payload)) {
 					const rows = decodeLog(payload);
-					accepted = true;
 
 					return rows;
 				}
 
-				await sleep(Math.min(1500, remaining()));
+				await sleep(Math.min(nextDelayMs, remaining()));
+				nextDelayMs = 1500;
 
-				const result = await request({
-					method: 'GET',
-					returnFullResponse: true,
-					headers: routedHeaders(),
-					url: `${endpoint}/${encodeURIComponent(id)}`,
-					timeout: remaining(),
-					json: false,
-					encoding: 'text',
-				}).then(
+				const result = await request(
+					{
+						method: 'GET',
+						returnFullResponse: true,
+						headers: routedHeaders(),
+						url: `${endpoint}/${encodeURIComponent(id)}`,
+						timeout: remaining(),
+						json: false,
+						encoding: 'text',
+					},
+					expires,
+				).then(
 					(value) => ({ value, error: undefined }),
 					(error: unknown) => ({ value: undefined, error }),
 				);
@@ -592,28 +611,42 @@ async function readActivityFeedRun(
 					const errorResponse = record(record(result.error)?.response);
 
 					if (errorResponse?.headers) captureRouting(errorResponse);
-					lastPollStatus = responseStatus(result.error);
+					const status = responseStatus(result.error);
 
-					if (lastPollStatus === 404 || lastPollStatus === 429) continue;
+					if (status === 429) {
+						const delay = Math.max(1500, retryAfterMs(result.error, now()));
+
+						if (now() + delay >= expires) throw requestFailure('polling', result.error, now());
+						nextDelayMs = delay;
+						continue;
+					}
+
 					throw stopped('polling', result.error);
 				}
 
-				lastPollStatus = null;
 				payload = unwrap(result.value);
 			}
+		} catch (error) {
+			failed = !(error instanceof ActivityFeedBudgetError);
+			// The trigger boundary adds its node context to this sanitized error.
+			// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+			throw error;
 		} finally {
-			if (id && !accepted) {
-				await request({
-					method: 'DELETE',
-					returnFullResponse: true,
-					headers: routedHeaders(),
-					url: `${endpoint}/${encodeURIComponent(id)}`,
-					timeout: 1000,
-					json: false,
-				}).then(
-					() => undefined,
-					() => undefined,
-				);
+			if (id && now() < deadline) {
+				await request(
+					{
+						method: 'DELETE',
+						returnFullResponse: true,
+						headers: routedHeaders(),
+						url: `${endpoint}/${encodeURIComponent(id)}`,
+						timeout: Math.max(1, Math.min(1000, deadline - now())),
+						json: false,
+					},
+					deadline,
+				).catch((error: unknown) => {
+					if (!failed && !(error instanceof PollBudgetError))
+						throw requestFailure('cleanup', error, now());
+				});
 			}
 		}
 	}
