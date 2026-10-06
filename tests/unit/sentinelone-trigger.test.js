@@ -704,7 +704,7 @@ test('simplified alert output resolves the actual scope hierarchy without config
 	assert.equal(item.groupName, 'Group One');
 	assert.equal(item.alertId, 'simplified-alert');
 	assert.equal('scopeIds' in item, false);
-	assert.equal('accountId' in item, false);
+	assert.equal(typeof item.accountId, 'string');
 	assert.equal('scopeId' in item, false);
 	assert.equal('alert' in item, false);
 });

@@ -890,8 +890,11 @@ function alertOutput(
 			eventId,
 			eventType,
 			eventTime: eventTimestamp,
+			accountId: asRecord(scope.account)?.id ?? null,
 			accountName: asRecord(scope.account)?.name ?? null,
+			siteId: asRecord(scope.site)?.id ?? null,
 			siteName: asRecord(scope.site)?.name ?? null,
+			groupId: asRecord(scope.group)?.id ?? null,
 			groupName: asRecord(scope.group)?.name ?? null,
 			...Object.fromEntries(
 				Object.entries(additionalAlertOutput(config.additionalAlertFields, alert)).map(

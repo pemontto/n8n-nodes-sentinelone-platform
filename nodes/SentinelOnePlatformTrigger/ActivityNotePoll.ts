@@ -386,6 +386,8 @@ function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEv
 			eventType: item.eventType,
 			eventTime: item.eventTime,
 			activityKind: event.activityKind,
+			// An unrecognised type keeps its numeric id, the only thing that identifies it.
+			...(event.activityKind === 'unknown' ? { activityTypeId: event.activityTypeId } : {}),
 			...(field && event.changes.length
 				? {
 						change: {
@@ -404,11 +406,15 @@ function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEv
 			actor: { id: event.authorId, name: event.authorName },
 			alertId: event.alertId,
 			alertName: alert.name ?? null,
+			alertExternalId: alert.externalId ?? null,
 			alertStatus: alert.status ?? null,
 			alertSeverity: alert.severity ?? null,
 			alertAnalystVerdict: alert.analystVerdict ?? null,
+			accountId: record(scope.account)?.id ?? null,
 			accountName: record(scope.account)?.name ?? null,
+			siteId: record(scope.site)?.id ?? null,
 			siteName: record(scope.site)?.name ?? null,
+			groupId: record(scope.group)?.id ?? null,
 			groupName: record(scope.group)?.name ?? null,
 		};
 
