@@ -6,25 +6,21 @@
 
 SentinelOne Platform provides n8n nodes to read and update SentinelOne alerts, manage alert notes, and run SDL PowerQueries. Triggers fire on new or updated alerts and on alert activity.
 
-![The inactive note test workflow with the Alert Activity trigger filtered to Note Created; only the trigger preview has run](https://raw.githubusercontent.com/pemontto/n8n-nodes-sentinelone-platform/main/docs/images/note-trigger-workflow.png)
+![Two flows: High and Critical alerts open a ServiceNow incident and save its number as the alert's ticket ID; new analyst notes are added as comments on the alert's linked Jira issue](https://raw.githubusercontent.com/pemontto/n8n-nodes-sentinelone-platform/main/docs/images/alert-escalation-workflow.png)
 
-Example: a new alert note starts the workflow, then Alert > Get fetches its parent using the event's `alertId`. No account or site selection is required for that lookup.
+For example, escalate High and Critical alerts to ServiceNow and write the incident number back to the alert, or copy analyst notes to the linked Jira issue as comments.
 
 ## Actions
 
-| Resource   | Operations            |
-| ---------- | --------------------- |
-| Alert      | Get, Get Many, Update |
-| Alert Note | Get Many, Create      |
-| SDL Query  | Execute               |
+| Resource   | Operations                                                 |
+| ---------- | ---------------------------------------------------------- |
+| Alert      | Get, Get Many, Update (status, analyst verdict, ticket ID) |
+| Alert Note | Get Many, Create                                           |
+| SDL Query  | Execute                                                    |
 
 Common alert fields are always returned. Options > Additional Alert Fields adds extras; Raw Data is opt-in. ID-based operations need no scope selection. Searches and triggers have optional Account, Site, and Group selections.
 
-Update supports status, analyst verdict, and ticket ID. Verification reads changed fields after the mutation. Failed readback does not turn an acknowledged write into a rejected write. Return All on Alert Get Many is capped at 10,000 alerts.
-
 ## Trigger
-
-Add **SentinelOne Platform Trigger** as the first node in a workflow and choose an event:
 
 | Resource       | Events                       |
 | -------------- | ---------------------------- |
