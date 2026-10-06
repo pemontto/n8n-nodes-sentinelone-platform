@@ -381,11 +381,14 @@ export function readManagementScopeIds(
 	context: ILoadOptionsFunctions | IPollFunctions | IExecuteFunctions,
 	name: 'accountIds' | 'siteIds' | 'groupIds',
 	itemIndex?: number,
+	topLevel = false,
 ): string[] {
 	const get = (key: string, fallback: IDataObject | string[]) =>
 		itemIndex === undefined
 			? (context as ILoadOptionsFunctions).getNodeParameter(key, fallback)
 			: (context as IExecuteFunctions).getNodeParameter(key, itemIndex, fallback);
+
+	if (topLevel) return scopeIds(withoutPlaceholders(get(name, [])));
 
 	const configuration = get('options', {});
 
@@ -411,10 +414,11 @@ export function readManagementScopeIds(
 export async function loadListScopeOptions(
 	context: ILoadOptionsFunctions,
 	scopeType: ScopeType,
+	topLevel = false,
 ): Promise<INodePropertyOptions[]> {
 	try {
-		const accountIds = readManagementScopeIds(context, 'accountIds');
-		const siteIds = readManagementScopeIds(context, 'siteIds');
+		const accountIds = readManagementScopeIds(context, 'accountIds', undefined, topLevel);
+		const siteIds = readManagementScopeIds(context, 'siteIds', undefined, topLevel);
 
 		if (scopeType === 'SITE' && accountIds.length === 0) {
 			try {

@@ -33,7 +33,9 @@ function triggerContext(resource, statusCode) {
 		resource,
 		operation: resource === 'alertActivity' ? 'occurred' : 'new',
 		activityTypes: ['any'],
-		options: { scope: { selection: { accountIds: ['account-1'], siteIds: [], groupIds: [] } } },
+		accountIds: ['account-1'],
+		siteIds: [],
+		groupIds: [],
 	};
 	return {
 		staticData,

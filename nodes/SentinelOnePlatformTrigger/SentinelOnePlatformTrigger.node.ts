@@ -1,7 +1,7 @@
 import {
 	additionalAlertFields,
 	analystVerdictOptions,
-	managementScopeOption,
+	managementScopeFields,
 	severityOptions,
 	statusOptions,
 } from '../shared/Descriptions';
@@ -79,7 +79,7 @@ const activityFields: INodeProperties[] = [
 			{
 				name: 'Any Alert Activity',
 				value: 'any',
-				description: 'All alert-linked activity types, including unknown IDs',
+				description: 'All activity on alerts, including unrecognised types',
 			},
 			{ name: 'Assignee Changed', value: '16004' },
 			{ name: 'Mitigation Activity', value: '16005' },
@@ -90,7 +90,7 @@ const activityFields: INodeProperties[] = [
 		],
 	},
 	{
-		displayName: 'Recorded Activity Conditions',
+		displayName: 'Activity Conditions',
 		name: 'activityConditions',
 		type: 'fixedCollection',
 		default: {},
@@ -98,7 +98,7 @@ const activityFields: INodeProperties[] = [
 		typeOptions: { multipleValues: true },
 		displayOptions: { show: { resource: ['alertActivity'] } },
 		description:
-			'Recorded values from one activity. Lists match any selected value; From and To must match the same change. Status, verdict and severity require present, unequal endpoints.',
+			'Filter one activity at a time. Previous and new values must belong to the same change. Status, verdict and severity must have changed.',
 		options: [
 			{
 				name: 'conditions',
@@ -113,7 +113,7 @@ const activityFields: INodeProperties[] = [
 						default: 'status',
 						options: [
 							{ name: 'Analyst Verdict', value: 'analystVerdict' },
-							{ name: 'Assignment', value: 'assignment' },
+							{ name: 'Assignee', value: 'assignment' },
 							{ name: 'Mitigation', value: 'mitigation' },
 							{ name: 'Severity', value: 'severity' },
 							{ name: 'Status', value: 'status' },
@@ -133,63 +133,63 @@ const activityFields: INodeProperties[] = [
 
 							return ['from', 'to'].map(
 								(endpoint): INodeProperties => ({
-									displayName: endpoint === 'from' ? 'From' : 'To',
+									displayName: endpoint === 'from' ? 'Previous Value' : 'New Value',
 									name: `${endpoint}${suffix}`,
 									type: 'multiOptions',
 									default: [],
 									options,
 									displayOptions: { show: { field: [field] } },
 									description:
-										'Optional recorded values. Leave empty for any present value; selected values use OR.',
+										'Match any selected value. Leave empty for any value. Both previous and new values must be present and different.',
 								}),
 							);
 						},
 					),
 					{
-						displayName: 'Previous Email Equals',
+						displayName: 'Previous Assignee Email',
 						name: 'previousEmail',
 						type: 'string',
 						default: '',
 						displayOptions: { show: { field: ['assignment'] } },
 						description:
-							'Optional comma-separated exact email values. Requires the recorded previous email; a missing value cannot match.',
+							'Comma-separated email addresses to match exactly. Activities without a previous assignee email do not match.',
 					},
 					{
-						displayName: 'New Email Equals',
+						displayName: 'New Assignee Email',
 						name: 'newEmail',
 						type: 'string',
 						default: '',
 						displayOptions: { show: { field: ['assignment'] } },
 						description:
-							'Optional comma-separated exact email values. Matches the destination email even when the previous email is absent.',
+							'Comma-separated email addresses to match exactly. A previous assignee email is not required.',
 					},
 					{
-						displayName: 'Destination ID Equals',
+						displayName: 'New Assignee ID',
 						name: 'destinationIds',
 						type: 'string',
 						default: '',
 						displayOptions: { show: { field: ['assignment'] } },
 						description:
-							'Optional comma-separated exact destination assignee IDs. Does not require a previous assignee value.',
+							'Comma-separated assignee IDs to match exactly. A previous assignee is not required.',
 					},
 					{
-						displayName: 'Action Type Equals',
+						displayName: 'Mitigation Action',
 						name: 'actionTypes',
 						type: 'multiOptions',
 						default: [],
 						options: mitigationActionTypeOptions,
 						displayOptions: { show: { field: ['mitigation'] } },
-						description: 'Optional recorded action types. Selected values use OR.',
+						description: 'Match any selected mitigation action. Leave empty for any action.',
 					},
 					{
-						displayName: 'Activity Status Equals',
+						displayName: 'Mitigation Status',
 						name: 'activityStatuses',
 						type: 'multiOptions',
 						default: [],
 						options: mitigationActivityStatusOptions,
 						displayOptions: { show: { field: ['mitigation'] } },
 						description:
-							'Optional recorded activity statuses. Selected values use OR. Mitigation activity does not by itself mean successful remediation.',
+							'Match any selected mitigation status. Leave empty for any status. A mitigation activity does not always mean the action succeeded.',
 					},
 				],
 			},
@@ -210,7 +210,7 @@ const activityFields: INodeProperties[] = [
 			{ name: 'Match Any', value: 'any' },
 		],
 		description:
-			'Only matters when there are two or more conditions. Evaluate them against one activity.',
+			'Choose whether one activity must match all conditions or any condition. Applies when two or more conditions are set.',
 	},
 ];
 
@@ -255,7 +255,7 @@ function readStringArray(
 	context: IPollFunctions | ILoadOptionsFunctions,
 	name: 'accountIds' | 'siteIds' | 'groupIds',
 ): string[] {
-	return readManagementScopeIds(context, name);
+	return readManagementScopeIds(context, name, undefined, true);
 }
 
 function credentialIdentity(context: IPollFunctions): IDataObject {
@@ -449,7 +449,11 @@ export class SentinelOnePlatformTrigger implements INodeType {
 			},
 		],
 		properties: [
-			debugSetting,
+			{
+				...debugSetting,
+				description:
+					'Whether to log requests and timing in the n8n server logs. Sensitive values are hidden.',
+			},
 			{
 				displayName: 'Resource',
 				name: 'resource',
@@ -472,26 +476,60 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					{
 						name: 'New',
 						value: 'new',
-						description: 'Emit an alert once when its ID is first found',
+						description: 'Start the workflow when a new alert is found',
 						action: 'Trigger on new alerts',
 					},
 					{
 						name: 'New or Updated',
 						value: 'newOrUpdated',
-						description:
-							'Emit new alerts and the latest changed state observed for existing alerts',
+						description: 'Start the workflow for new alerts and updates to existing alerts',
 						action: 'Trigger on new or updated alerts',
 					},
 					{
 						name: 'Updated',
 						value: 'updated',
-						description:
-							'Emit the latest changed state observed when an existing alert update time advances',
+						description: 'Start the workflow when an existing alert is updated',
 						action: 'Trigger on updated alerts',
 					},
 				],
 			},
-			...activityFields,
+			activityFields[0],
+			...managementScopeFields().map(
+				(field): INodeProperties => ({
+					...field,
+					displayName:
+						field.name === 'accountIds'
+							? 'Accounts'
+							: field.name === 'siteIds'
+								? 'Sites'
+								: 'Groups',
+					displayOptions: {
+						show: {
+							resource: ['alert', 'alertActivity'],
+							...(field.name === 'siteIds' ? { accountIds: [{ _cnd: { exists: true } }] } : {}),
+							...(field.name === 'groupIds' ? { siteIds: [{ _cnd: { exists: true } }] } : {}),
+						},
+					},
+				}),
+			),
+			// n8n removes hidden controls before polling. Retain saved child selections for validation.
+			...(['siteIds', 'groupIds'] as const).map(
+				(name): INodeProperties => ({
+					displayName: name === 'siteIds' ? 'Sites' : 'Groups',
+					name,
+					type: 'hidden',
+					default: [],
+					displayOptions: {
+						show: {
+							resource: ['alert', 'alertActivity'],
+						},
+						hide: {
+							[name === 'siteIds' ? 'accountIds' : 'siteIds']: [{ _cnd: { exists: true } }],
+						},
+					},
+				}),
+			),
+			...activityFields.slice(1),
 			{
 				displayName: 'Options',
 				name: 'options',
@@ -500,7 +538,6 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				default: {},
 				displayOptions: { show: { resource: ['alert'] } },
 				options: [
-					managementScopeOption(),
 					additionalAlertFields('list'),
 					{
 						displayName: 'Advanced Filters',
@@ -508,7 +545,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						type: 'json',
 						default: '[]',
 						description:
-							'Add custom SentinelOne filters as JSON. Use an array to require every filter, or use or groups when any group may match. Severity, status, name, and time filters still apply. <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#advanced-filters">See examples</a>.',
+							'Add SentinelOne filters as JSON. Match all filters in an array, or any group in an or array. Alert severity, status, name and time filters still apply. <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#advanced-filters">See examples</a>.',
 					},
 					{
 						displayName: 'Alert Name',
@@ -516,7 +553,23 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						type: 'string',
 						default: '',
 						placeholder: 'Suspicious process',
-						description: 'Optional full-text match against the SentinelOne alert name',
+						description: 'Search for text in the alert name',
+					},
+					{
+						displayName: 'Alert Severity',
+						name: 'severities',
+						type: 'multiOptions',
+						default: [],
+						options: severityOptions,
+						description: 'Limit alerts to the selected severities',
+					},
+					{
+						displayName: 'Alert Status',
+						name: 'statuses',
+						type: 'multiOptions',
+						default: [],
+						options: statusOptions,
+						description: 'Limit alerts to the selected statuses',
 					},
 					{
 						displayName: 'Exclude Account Name',
@@ -525,7 +578,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
+							'Regular expression to exclude matching names, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Exclude Group Name',
@@ -534,7 +587,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
+							'Regular expression to exclude matching names, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Exclude Site Name',
@@ -543,25 +596,9 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
-					},
-					{
-						displayName: 'Severity',
-						name: 'severities',
-						type: 'multiOptions',
-						default: [],
-						options: severityOptions,
-						description: 'Limit alerts to the selected severities',
+							'Regular expression to exclude matching names, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					simplifyOption,
-					{
-						displayName: 'Status',
-						name: 'statuses',
-						type: 'multiOptions',
-						default: [],
-						options: statusOptions,
-						description: 'Limit alerts to the selected statuses',
-					},
 				],
 			},
 			{
@@ -572,40 +609,31 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				default: {},
 				displayOptions: { show: { resource: ['alertActivity'] } },
 				options: [
-					managementScopeOption(),
 					{
 						displayName: 'Alert Name',
 						name: 'alertName',
 						type: 'string',
 						default: '',
 						placeholder: 'Suspicious process',
-						description: 'Optional full-text match against the SentinelOne alert name',
+						description: 'Search for text in the alert name',
 					},
 					{
-						displayName: 'Current Parent Alert Severity',
+						displayName: 'Alert Severity',
 						name: 'severities',
 						type: 'multiOptions',
 						default: [],
 						options: severityOptions,
 						description:
-							'Only emit activities whose parent alert currently has a selected severity. This does not filter the recorded change. Leave empty for any severity.',
+							'Only activity on alerts whose severity is now one of these. Leave empty for any severity.',
 					},
 					{
-						displayName: 'Current Parent Alert Status',
+						displayName: 'Alert Status',
 						name: 'statuses',
 						type: 'multiOptions',
 						default: [],
 						options: statusOptions,
 						description:
-							'Only emit activities whose parent alert currently has a selected status. This does not filter the recorded change. Leave empty for any status.',
-					},
-					{
-						displayName: 'Custom Activity Type IDs',
-						name: 'customActivityTypeIds',
-						type: 'string',
-						default: '',
-						description:
-							'Advanced: comma-separated numeric activity type IDs to include with named selections. Any Alert Activity includes these IDs already.',
+							'Only activity on alerts whose status is now one of these. Leave empty for any status.',
 					},
 					{
 						displayName: 'Exclude Account Name',
@@ -614,24 +642,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
-					},
-					{
-						displayName: 'Exclude Actor IDs',
-						name: 'excludeActorIds',
-						type: 'string',
-						default: '',
-						description:
-							'Comma-separated actor IDs to exclude by exact match. Activities without an actor ID are kept.',
-					},
-					{
-						displayName: 'Exclude Actor Name',
-						name: 'excludeActorName',
-						type: 'string',
-						default: '',
-						placeholder: 'automation|integration',
-						description:
-							'Case-insensitive exclusion regex for the SDL user name. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
+							'Regular expression to exclude matching names, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Exclude Group Name',
@@ -640,7 +651,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
+							'Regular expression to exclude matching names, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Exclude Site Name',
@@ -649,7 +660,24 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Case-insensitive exclusion regex. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
+							'Regular expression to exclude matching names, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
+					},
+					{
+						displayName: 'Exclude User IDs',
+						name: 'excludeActorIds',
+						type: 'string',
+						default: '',
+						description:
+							'Comma-separated IDs of people or services to exclude. Activities without an ID are kept.',
+					},
+					{
+						displayName: 'Exclude User Name',
+						name: 'excludeActorName',
+						type: 'string',
+						default: '',
+						placeholder: 'automation|integration',
+						description:
+							'Regular expression to exclude people or services by name, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Include Current Alert',
@@ -657,15 +685,14 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						type: 'boolean',
 						default: false,
 						description:
-							'Whether to add the raw current parent alert lookup object. Current parent summary fields are always included; recorded changes remain unchanged.',
+							'Whether to include the full alert as it is now. Alert summary fields are always included.',
 					},
 					{
 						displayName: 'Include Raw Activity',
 						name: 'includeRawActivity',
 						type: 'boolean',
 						default: false,
-						description:
-							'Whether to add the complete raw activity alongside the stable activity envelope',
+						description: 'Whether to include the full activity data alongside the summary',
 					},
 					simplifyOption,
 				],
@@ -693,7 +720,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				}
 			},
 			async getSites(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
-				return await loadListScopeOptions(this, 'SITE');
+				return await loadListScopeOptions(this, 'SITE', true);
 			},
 			async getGroups(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const accountIds = readStringArray(this, 'accountIds');
@@ -844,10 +871,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					excludeGroupName: String(options.excludeGroupName ?? ''),
 					activityTypeIds:
 						resource === 'alertActivity'
-							? parseActivitySelection(
-									this.getNodeParameter('activityTypes', ['any']),
-									options.customActivityTypeIds,
-								)
+							? parseActivitySelection(this.getNodeParameter('activityTypes', ['any']))
 							: undefined,
 					activityConditions:
 						resource === 'alertActivity'

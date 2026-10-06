@@ -160,20 +160,14 @@ test('mitigation filters accept every schema action and status as values', () =>
 		false,
 	);
 });
-test('selection supports any, named types and custom-only numeric IDs', () => {
-	assert.equal(parseActivitySelection(['any'], '16006'), undefined);
-	assert.deepEqual(parseActivitySelection(['16007'], '16006, 16006'), ['16006', '16007']);
-	assert.deepEqual(parseActivitySelection([], '16006'), ['16006']);
-	assert.deepEqual(parseActivitySelection(['16008', 'unknown'], ''), ['16008', 'unknown']);
-	assert.deepEqual(parseActivitySelection(['16001', 'unknown'], ''), ['16001', 'unknown']);
-	assert.equal(parseActivitySelection(['any', 'unknown', '16008'], ''), undefined);
-	for (const args of [
-		[[], ''],
-		[['16006'], ''],
-		[['16007'], '1 or true'],
-		[['16007'], ['16006']],
-	])
-		assert.throws(() => parseActivitySelection(...args));
+test('selection accepts only Any or named choices including Other', () => {
+	assert.equal(parseActivitySelection(['any']), undefined);
+	assert.deepEqual(parseActivitySelection(['16007']), ['16007']);
+	assert.deepEqual(parseActivitySelection(['16008', 'unknown']), ['16008', 'unknown']);
+	assert.deepEqual(parseActivitySelection(['16001', 'unknown']), ['16001', 'unknown']);
+	assert.equal(parseActivitySelection(['any', 'unknown', '16008']), undefined);
+	for (const value of [[], ['16006'], ['99999'], '16007', ['16007', 16006]])
+		assert.throws(() => parseActivitySelection(value));
 });
 test('invalid builder values and unknown condition types fail before matching', () => {
 	for (const conditions of [

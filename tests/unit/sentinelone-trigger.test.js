@@ -155,7 +155,7 @@ test('trigger polling preserves sanitised HTTP status and distinguishes authenti
 				resource: 'alertActivity',
 				operation: 'occurred',
 				activityTypes: ['16007'],
-				options: { scope: { selection: { accountIds: ['account-1'] } } },
+				accountIds: ['account-1'],
 			},
 			async (request) => {
 				if (request.url.includes('/sdl/v2/api/queries'))
@@ -293,9 +293,11 @@ test('empty scope selection discovers all accounts and the deepest selected scop
 	const baseParams = {
 		resource: 'alert',
 		operation: 'new',
+		accountIds: [],
+		siteIds: [],
+		groupIds: [],
 		options: {
 			simplifyOutput: false,
-			scope: { selection: { accountIds: [], siteIds: [], groupIds: [] } },
 		},
 	};
 	let discoveredQuery;
@@ -337,12 +339,9 @@ test('empty scope selection discovers all accounts and the deepest selected scop
 	const hierarchyContext = createNodeContext(
 		{
 			...baseParams,
-			options: {
-				...baseParams.options,
-				scope: {
-					selection: { accountIds: ['account-1'], siteIds: ['site-1'], groupIds: ['group-1'] },
-				},
-			},
+			accountIds: ['account-1'],
+			siteIds: ['site-1'],
+			groupIds: ['group-1'],
 		},
 		async (options) => {
 			if (options.method === 'GET') {
@@ -381,15 +380,9 @@ test('poll rejects stale descendant scopes that do not belong to the selected pa
 		{
 			resource: 'alert',
 			operation: 'new',
-			options: {
-				scope: {
-					selection: {
-						accountIds: ['account-b'],
-						siteIds: ['site-from-account-a'],
-						groupIds: ['group-from-account-a'],
-					},
-				},
-			},
+			accountIds: ['account-b'],
+			siteIds: ['site-from-account-a'],
+			groupIds: ['group-from-account-a'],
 		},
 		async (options) => {
 			if (options.method !== 'GET') {
@@ -428,7 +421,9 @@ test('overlapping polls are coalesced before they can read or overwrite the same
 		{
 			resource: 'alert',
 			operation: 'new',
-			options: { scope: { selection: { accountIds: [], siteIds: [], groupIds: [] } } },
+			accountIds: [],
+			siteIds: [],
+			groupIds: [],
 		},
 		async (options) => {
 			if (options.method === 'GET') {
@@ -1096,31 +1091,49 @@ test('ActivityFeed access requirements belong in credential docs, not a trigger 
 	assert.match(documentation, /Alert Activity > Occurred trigger requires SDL query access/);
 });
 
-test('optional scopes stay together under Options without root fields', () => {
+test('trigger scope controls are top-level and site and group loaders depend on their parents', () => {
 	const properties = new SentinelOnePlatformTrigger().description.properties;
-	for (const name of ['accountIds', 'siteIds', 'groupIds'])
-		assert.equal(
-			properties.some((p) => p.name === name),
-			false,
-		);
+	const scopeFields = Object.fromEntries(
+		['accountIds', 'siteIds', 'groupIds'].map((name) => [
+			name,
+			properties.find((property) => property.name === name),
+		]),
+	);
+	assert.ok(scopeFields.accountIds);
+	assert.ok(scopeFields.siteIds);
+	assert.ok(scopeFields.groupIds);
+	assert.deepEqual(
+		properties
+			.slice(
+				properties.indexOf(properties.find((property) => property.name === 'activityTypes')) + 1,
+				properties.indexOf(properties.find((property) => property.name === 'activityTypes')) + 4,
+			)
+			.map((property) => property.name),
+		['accountIds', 'siteIds', 'groupIds'],
+	);
+	assert.deepEqual(scopeFields.siteIds.typeOptions.loadOptionsDependsOn, ['accountIds']);
+	assert.deepEqual(scopeFields.groupIds.typeOptions.loadOptionsDependsOn, [
+		'accountIds',
+		'siteIds',
+	]);
 	for (const resource of ['alert', 'alertActivity']) {
-		const options = properties.find(
-			(p) => p.name === 'options' && p.displayOptions.show.resource.includes(resource),
-		);
-		const scope = options.options.find((p) => p.name === 'scope');
-		assert.equal(scope.type, 'fixedCollection');
-		const fields = scope.options[0].values;
-		assert.deepEqual(
-			fields.map((p) => p.name),
-			['accountIds', 'siteIds', 'groupIds'],
-		);
-		assert.deepEqual(fields[1].typeOptions.loadOptionsDependsOn, ['&accountIds']);
-		assert.deepEqual(fields[2].typeOptions.loadOptionsDependsOn, ['&accountIds', '&siteIds']);
+		assert.deepEqual(scopeFields.accountIds.displayOptions.show, {
+			resource: ['alert', 'alertActivity'],
+		});
+		assert.deepEqual(scopeFields.siteIds.displayOptions.show, {
+			resource: ['alert', 'alertActivity'],
+			accountIds: [{ _cnd: { exists: true } }],
+		});
+		assert.deepEqual(scopeFields.groupIds.displayOptions.show, {
+			resource: ['alert', 'alertActivity'],
+			siteIds: [{ _cnd: { exists: true } }],
+		});
 	}
 });
 
 test('trigger UI uses resource, operation, and resource-specific options', () => {
 	const node = new SentinelOnePlatformTrigger();
+	const properties = node.description.properties;
 	const source = readFileSync(
 		join(packageRoot, 'nodes/SentinelOnePlatformTrigger/SentinelOnePlatformTrigger.node.ts'),
 		'utf8',
@@ -1165,19 +1178,76 @@ test('trigger UI uses resource, operation, and resource-specific options', () =>
 	);
 	assert.equal(
 		alertOptions.options.find((property) => property.name === 'severities').displayName,
-		'Severity',
+		'Alert Severity',
 	);
 	assert.equal(
 		alertOptions.options.find((property) => property.name === 'statuses').displayName,
-		'Status',
+		'Alert Status',
 	);
 	assert.equal(
 		noteOptions.options.find((property) => property.name === 'severities').displayName,
-		'Current Parent Alert Severity',
+		'Alert Severity',
 	);
 	assert.equal(
 		noteOptions.options.find((property) => property.name === 'statuses').displayName,
-		'Current Parent Alert Status',
+		'Alert Status',
+	);
+	const activityConditionFields = properties.find(
+		(property) => property.name === 'activityConditions',
+	).options[0].values;
+	const conditionField = activityConditionFields.find((property) => property.name === 'field');
+	assert.ok(
+		conditionField.options.some(
+			(option) => option.name === 'Assignee' && option.value === 'assignment',
+		),
+	);
+	for (const [name, label] of [
+		['fromStatus', 'Previous Value'],
+		['toStatus', 'New Value'],
+		['previousEmail', 'Previous Assignee Email'],
+		['newEmail', 'New Assignee Email'],
+		['destinationIds', 'New Assignee ID'],
+		['actionTypes', 'Mitigation Action'],
+		['activityStatuses', 'Mitigation Status'],
+	])
+		assert.equal(
+			activityConditionFields.find((property) => property.name === name).displayName,
+			label,
+		);
+	assert.deepEqual(
+		activityConditionFields
+			.find((property) => property.name === 'actionTypes')
+			.options.map((option) => option.name),
+		[
+			'Add to Blocklist',
+			'Add Exclusion',
+			'Identity',
+			'Kill Process',
+			'Partner',
+			'Quarantine',
+			'Remediate',
+			'Remove Macros',
+			'Restore Macros',
+			'Rollback',
+			'Remove from Quarantine',
+			'Workflow',
+		],
+	);
+	assert.deepEqual(
+		activityConditionFields
+			.find((property) => property.name === 'activityStatuses')
+			.options.map((option) => option.name),
+		[
+			'Added',
+			'Cancelled',
+			'Failed',
+			'Partial',
+			'Pending',
+			'Pending Reboot',
+			'Running',
+			'Sent',
+			'Success',
+		],
 	);
 	const advancedFilters = alertOptions.options.find(
 		(property) => property.name === 'advancedFilters',
@@ -1387,7 +1457,8 @@ test('site-scoped node polls accessible sites without account-list permission', 
 		{
 			resource: 'alert',
 			operation: 'new',
-			options: { scope: { selection: { accountIds: [], siteIds: [] } } },
+			accountIds: [],
+			siteIds: [],
 		},
 		request,
 	);
@@ -1399,7 +1470,8 @@ test('site-scoped node polls accessible sites without account-list permission', 
 		{
 			resource: 'alert',
 			operation: 'new',
-			options: { scope: { selection: { accountIds: [], siteIds: ['site-1'] } } },
+			accountIds: [],
+			siteIds: ['site-1'],
 		},
 		request,
 	);
@@ -1571,9 +1643,10 @@ test('activity dispatch defaults to simplified output and ignores removed saved 
 			resource: 'alertActivity',
 			operation,
 			activityTypes: ['16007'],
+			accountIds: ['account-1'],
 			options: {
 				...(simplifyOutput ? {} : { simplifyOutput: false }),
-				scope: { selection: { accountIds: ['account-1'] } },
+				customActivityTypeIds: ['16006'],
 			},
 		};
 		let sdlCalls = 0;
@@ -1688,11 +1761,11 @@ test('activity builder exposes every shared enum and only recorded value control
 	);
 	assert.match(
 		controls.find((p) => p.name === 'previousEmail').description,
-		/Requires the recorded previous email/,
+		/previous assignee email/,
 	);
 	assert.match(
 		controls.find((p) => p.name === 'destinationIds').description,
-		/Does not require a previous/,
+		/previous assignee is not required/,
 	);
 	const activityOptions = properties.find(
 		(p) => p.name === 'options' && p.displayOptions?.show?.resource?.includes('alertActivity'),
@@ -1702,9 +1775,18 @@ test('activity builder exposes every shared enum and only recorded value control
 		'includeCurrentAlert',
 		'excludeActorName',
 		'excludeActorIds',
-		'customActivityTypeIds',
 	])
 		assert.ok(activityOptions.find((p) => p.name === name));
+	assert.deepEqual(
+		['excludeActorName', 'excludeActorIds'].map(
+			(name) => activityOptions.find((property) => property.name === name).displayName,
+		),
+		['Exclude User Name', 'Exclude User IDs'],
+	);
+	assert.equal(
+		activityOptions.some((p) => p.name === 'customActivityTypeIds'),
+		false,
+	);
 	assert.equal(
 		activityOptions.some((p) => p.type === 'json' || p.name === 'advancedFilters'),
 		false,
@@ -1756,7 +1838,7 @@ test('an alert resource treats a retained activity operation as the alert defaul
 			{
 				resource: 'alert',
 				operation: savedOperation,
-				options: { scope: { selection: { accountIds: ['account-1'] } } },
+				accountIds: ['account-1'],
 			},
 			true,
 			false,
@@ -1795,15 +1877,16 @@ test('saved groups without sites fail before requests for both trigger resources
 			{
 				resource,
 				operation,
-				options: {
-					scope: { selection: { accountIds: ['account-1'], siteIds: [], groupIds: ['group-1'] } },
-				},
+				accountIds: ['account-1'],
+				siteIds: [],
+				groupIds: ['group-1'],
 			},
 			true,
 			false,
 			{ typeVersion: 1 },
 			node.description,
 		);
+		assert.deepEqual(params.groupIds, ['group-1']);
 		let requests = 0;
 		const context = createNodeContext(
 			params,
@@ -1841,16 +1924,16 @@ test('runtime parameter filtering preserves selected sites after accounts are cl
 		{
 			resource: 'alert',
 			operation: 'new',
-			options: {
-				scope: { selection: { accountIds: [], siteIds: ['site-1'], groupIds: [] } },
-			},
+			accountIds: [],
+			siteIds: ['site-1'],
+			groupIds: [],
 		},
 		true,
 		false,
 		{ typeVersion: 1 },
 		node.description,
 	);
-	assert.deepEqual(params.options.scope.selection.siteIds, ['site-1']);
+	assert.deepEqual(params.siteIds, ['site-1']);
 	let scopedQuery = false;
 	const context = createNodeContext(
 		params,
@@ -1877,16 +1960,16 @@ test('runtime parameter filtering preserves blank scope IDs for validation', asy
 		{
 			resource: 'alert',
 			operation: 'new',
-			options: {
-				scope: { selection: { accountIds: [], siteIds: [''], groupIds: [] } },
-			},
+			accountIds: [],
+			siteIds: [''],
+			groupIds: [],
 		},
 		true,
 		false,
 		{ typeVersion: 1 },
 		node.description,
 	);
-	assert.deepEqual(params.options.scope.selection.siteIds, ['']);
+	assert.deepEqual(params.siteIds, ['']);
 	const context = createNodeContext(
 		params,
 		async () => {
@@ -1903,11 +1986,9 @@ test('activity trigger retains valid group selections and resolves their account
 		{
 			resource: 'alertActivity',
 			operation: 'occurred',
-			options: {
-				scope: {
-					selection: { accountIds: ['account-1'], siteIds: ['site-1'], groupIds: ['group-1'] },
-				},
-			},
+			accountIds: ['account-1'],
+			siteIds: ['site-1'],
+			groupIds: ['group-1'],
 		},
 		async (request) => {
 			if (request.method === 'DELETE') return {};
@@ -1959,7 +2040,7 @@ test('Match Conditions is always visible for activity immediately after recorded
 	}
 	assert.equal(NodeHelpers.displayParameter({ resource: 'alert' }, control, null, null), false);
 });
-test('nested trigger scopes keep the group guard', async () => {
+test('top-level trigger scopes keep the group guard', async () => {
 	for (const [resource, operation] of [
 		['alert', 'new'],
 		['alertActivity', 'occurred'],
@@ -1968,7 +2049,7 @@ test('nested trigger scopes keep the group guard', async () => {
 			{
 				resource,
 				operation,
-				options: { scope: { selection: { groupIds: ['new-group'] } } },
+				groupIds: ['new-group'],
 			},
 			async () => assert.fail('Must fail before requests'),
 		);
@@ -2113,7 +2194,7 @@ test('SDL error routing survives the node authenticated request wrapper on 404 a
 		{
 			resource: 'alertActivity',
 			activityTypes: ['16007'],
-			options: { scope: { selection: { accountIds: ['account-1'] } } },
+			accountIds: ['account-1'],
 		},
 		request,
 	);

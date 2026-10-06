@@ -28,13 +28,33 @@ export const mitigationActivityStatuses = [
 	'SUCCESS',
 ];
 
+const mitigationActionLabels: Record<string, string> = {
+	BLOCKLIST_ADD: 'Add to Blocklist',
+	EXCLUSION_ADD: 'Add Exclusion',
+	IDENTITY: 'Identity',
+	KILL: 'Kill Process',
+	PARTNER: 'Partner',
+	QUARANTINE: 'Quarantine',
+	REMEDIATE: 'Remediate',
+	REMOVE_MACROS: 'Remove Macros',
+	RESTORE_MACROS: 'Restore Macros',
+	ROLLBACK: 'Rollback',
+	UNQUARANTINE: 'Remove from Quarantine',
+	WORKFLOW: 'Workflow',
+};
+
 export const mitigationActionTypeOptions = mitigationActionTypes.map((value) => ({
-	name: value,
+	name: mitigationActionLabels[value],
 	value,
 }));
 
 export const mitigationActivityStatusOptions = mitigationActivityStatuses.map((value) => ({
-	name: value,
+	name: value
+		.toLowerCase()
+		.replace(
+			/(^|_)([a-z])/g,
+			(_match, prefix: string, letter: string) => `${prefix ? ' ' : ''}${letter.toUpperCase()}`,
+		),
 	value,
 }));
 
@@ -78,20 +98,17 @@ export function parseExactValues(value: unknown): string[] {
 	return values;
 }
 
-export function parseActivitySelection(value: unknown, custom: unknown): string[] | undefined {
+export function parseActivitySelection(value: unknown): string[] | undefined {
 	if (!Array.isArray(value) || value.some((id) => typeof id !== 'string')) return invalid();
 	const known = ['16000', '16001', '16002', '16003', '16004', '16005', '16007', '16008', 'unknown'];
 
 	if (value.some((id) => id !== 'any' && !known.includes(id))) return invalid();
-	const extra = parseExactValues(custom);
-
-	if (extra.some((id) => !/^\d{1,30}$/.test(id))) return invalid();
 
 	if (value.includes('any')) return undefined;
 
-	if (!value.length && !extra.length) return invalid();
+	if (!value.length) return invalid();
 
-	return [...new Set([...value, ...extra])].sort();
+	return [...new Set(value)].sort();
 }
 
 function selected(value: unknown, allowed: string[]): string[] {
