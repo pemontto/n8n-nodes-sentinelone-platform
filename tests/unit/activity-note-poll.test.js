@@ -1242,7 +1242,7 @@ test('simplified assignee changes keep the id beside, not in place of, email end
 	assert.equal('changes' in result.items[0], false);
 });
 
-test('simplified mitigation is a change; other types retain change arrays and mitigation objects', async () => {
+test('simplified other types retain change arrays and mitigation event objects', async () => {
 	for (const type of ['19999', '16005']) {
 		for (const withData of [false, true]) {
 			const c = cfg({ simplifyOutput: true });
@@ -1266,24 +1266,16 @@ test('simplified mitigation is a change; other types retain change arrays and mi
 				NOW,
 			);
 			const item = result.items[0];
+			assert.equal('change' in item, false);
 			assert.equal('changes' in item, withData);
-			if (withData) assert.deepEqual(item.changes, [{ field: 'status', newValue: 'RESOLVED' }]);
-			if (type === '16005') {
-				assert.equal('mitigation' in item, false);
-				assert.deepEqual(
-					item.change,
-					withData
-						? { field: 'mitigation', action: 'quarantine', to: 'completed' }
-						: { field: 'mitigation' },
-				);
-			} else {
-				assert.equal('change' in item, false);
-				assert.equal('mitigation' in item, withData);
-				if (withData)
-					assert.deepEqual(item.mitigation, {
-						actionType: 'quarantine',
-						activityStatus: 'completed',
-					});
+			assert.equal('mitigation' in item, withData || type === '16005');
+			if (!withData && type === '16005') assert.deepEqual(item.mitigation, {});
+			if (withData) {
+				assert.deepEqual(item.changes, [{ field: 'status', newValue: 'RESOLVED' }]);
+				assert.deepEqual(item.mitigation, {
+					actionType: 'quarantine',
+					activityStatus: 'completed',
+				});
 			}
 		}
 	}

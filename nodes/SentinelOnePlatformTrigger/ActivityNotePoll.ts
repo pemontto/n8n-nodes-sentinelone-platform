@@ -381,35 +381,23 @@ function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEv
 				? event.changes.find((entry) => entry.field === 'assigneeId')
 				: undefined;
 
-		// Mitigation is reported as a change too, so every simplified activity reads the same way.
-		const mitigation = event.activityTypeId === '16005' ? (event.mitigation ?? {}) : undefined;
-
 		const simplified: IDataObject = {
 			eventId: item.eventId,
 			eventType: item.eventType,
 			eventTime: item.eventTime,
 			activityKind: event.activityKind,
-			...(mitigation
+			...(field && event.changes.length
 				? {
 						change: {
-							field: 'mitigation',
-							...(mitigation.actionType !== undefined ? { action: mitigation.actionType } : {}),
-							...(mitigation.activityStatus !== undefined ? { to: mitigation.activityStatus } : {}),
+							field: field === 'assigneeEmail' ? 'assignee' : field,
+							...(change && 'oldValue' in change ? { from: change.oldValue } : {}),
+							...(change && 'newValue' in change ? { to: change.newValue } : {}),
+							...(assigneeId && 'newValue' in assigneeId ? { toId: assigneeId.newValue } : {}),
 						},
-						...(event.changes.length ? { changes: event.changes } : {}),
 					}
-				: field && event.changes.length
-					? {
-							change: {
-								field: field === 'assigneeEmail' ? 'assignee' : field,
-								...(change && 'oldValue' in change ? { from: change.oldValue } : {}),
-								...(change && 'newValue' in change ? { to: change.newValue } : {}),
-								...(assigneeId && 'newValue' in assigneeId ? { toId: assigneeId.newValue } : {}),
-							},
-						}
-					: event.changes.length
-						? { changes: event.changes }
-						: {}),
+				: event.changes.length
+					? { changes: event.changes }
+					: {}),
 			...(event.activityKind === 'noteCreated' && typeof event.noteText === 'string'
 				? { note: event.noteText }
 				: {}),
@@ -424,7 +412,7 @@ function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEv
 			groupName: record(scope.group)?.name ?? null,
 		};
 
-		if (!mitigation && event.mitigation !== undefined) simplified.mitigation = event.mitigation;
+		if (event.mitigation !== undefined) simplified.mitigation = event.mitigation;
 
 		if (config.includeRawActivity) {
 			if (!event.rawActivity) throw fail('omitted the full activity record');
