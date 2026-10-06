@@ -330,18 +330,16 @@ export function readManagementScopeIds(
 	const configuration = get('options', {});
 	if (!configuration || typeof configuration !== 'object' || Array.isArray(configuration))
 		throw new Error('Options must be an object.');
-	if (Object.prototype.hasOwnProperty.call(configuration, 'scope')) {
-		const scope = (configuration as IDataObject).scope;
-		if (!scope || typeof scope !== 'object' || Array.isArray(scope))
-			throw new Error('Scope must be an object.');
-		const selection = (scope as IDataObject).selection;
-		if (selection === undefined) return [];
-		if (!selection || typeof selection !== 'object' || Array.isArray(selection))
-			throw new Error('Scope selection must be an object.');
-		const value = (selection as IDataObject)[name];
-		return scopeIds(withoutPlaceholders(value === undefined ? [] : value));
-	}
-	return scopeIds(withoutPlaceholders(get(name, [])));
+	const scope = (configuration as IDataObject).scope;
+	if (scope === undefined) return [];
+	if (!scope || typeof scope !== 'object' || Array.isArray(scope))
+		throw new Error('Scope must be an object.');
+	const selection = (scope as IDataObject).selection;
+	if (selection === undefined) return [];
+	if (!selection || typeof selection !== 'object' || Array.isArray(selection))
+		throw new Error('Scope selection must be an object.');
+	const value = (selection as IDataObject)[name];
+	return scopeIds(withoutPlaceholders(value === undefined ? [] : value));
 }
 
 export async function loadListScopeOptions(

@@ -61,12 +61,12 @@ export interface AlertCursor extends IDataObject {
 export interface TriggerState extends IDataObject {
 	configFingerprint?: string;
 	initialized?: boolean;
-	/** The earliest cursor; kept for diagnostics and for state saved before per-unit cursors existed. */
+	/** The earliest cursor, kept for diagnostics. */
 	checkpointMs?: number;
 	/** Poll start of the first scheduled poll; alerts created or updated before it are recorded, never emitted. */
 	activationMs?: number;
 	alertCursors?: Record<string, AlertCursor>;
-	/** Seen alert IDs, each followed by a NUL and its creation time so resumed and overlap reads do not repeat deliveries. */
+	/** Seen alert IDs with creation time and selected scope separated by NULs, so resumed and overlap reads do not repeat deliveries. */
 	seenAlertIds?: string[];
 	seenAlertVersions?: string[];
 	/** Consecutive budget stops with no cursor progress, keyed by stream and scope batch. */
@@ -322,7 +322,7 @@ export function fingerprintConfig(config: TriggerConfig): string {
 							detection: 'activityFeed-v2-once-per-id',
 						},
 					}
-				: { excludeNoteAuthorName: '', noteDetection: null }),
+				: {}),
 		}),
 	);
 }
@@ -992,7 +992,7 @@ function classifyAlerts(
 			seenId: seenEntry(
 				alert.id,
 				String(alert.createdAt),
-				typeof scopeId === 'string' ? scopeId : undefined,
+				typeof scopeId === 'string' ? scopeId : '',
 			),
 		};
 		// Alerts created before activation are recorded, never replayed as new.
@@ -1067,11 +1067,11 @@ function readCursor(value: unknown, key: string, budgeted: boolean): AlertCursor
 	};
 }
 
-/** Keeps the entries still inside a replay window, oldest first; entries with no known time retire first when the limit is reached, and a window that needs more than the limit fails visibly. */
+/** Keeps entries inside the replay window; a window that needs more than the limit fails visibly. */
 function retainSeen(
 	previous: string[],
 	current: string[],
-	timeOf: (entry: string) => number | undefined,
+	timeOf: (entry: string) => number,
 	retireBeforeMs: number,
 	limit: number,
 	label: string,
@@ -1081,19 +1081,12 @@ function retainSeen(
 		ordered.delete(entry);
 		ordered.set(entry, true);
 	}
-	const entries = [...ordered.keys()].filter((entry) => {
-		const time = timeOf(entry);
-		return time === undefined || time >= retireBeforeMs;
-	});
-	const timeless = entries.filter((entry) => timeOf(entry) === undefined);
-	const excess = entries.length - limit;
-	if (excess > timeless.length)
+	const entries = [...ordered.keys()].filter((entry) => timeOf(entry) >= retireBeforeMs);
+	if (entries.length > limit)
 		throw new Error(
-			`The overlap window holds ${entries.length - timeless.length} ${label}, which exceeds the safe state limit of ${limit}. Narrow the scope or filters so the overlap fits; state was not advanced.`,
+			`The overlap window holds ${entries.length} ${label}, which exceeds the safe state limit of ${limit}. Narrow the scope or filters so the overlap fits; state was not advanced.`,
 		);
-	if (excess <= 0) return entries;
-	const retire = new Set(timeless.slice(0, excess));
-	return entries.filter((entry) => !retire.has(entry));
+	return entries;
 }
 
 interface Unit {
@@ -1147,13 +1140,10 @@ async function readUnit(
 				: unit.start;
 		if (tie?.resumeMs !== undefined)
 			unit.resumeOverlapStartMs = tie.resumeOverlapStartMs ?? overlapStart;
-		const exclusions = new Map<string, number | undefined>();
-		const addExclusion = (id: string, time: number | undefined) => {
+		const exclusions = new Map<string, number>();
+		const addExclusion = (id: string, time: number) => {
 			const previousTime = exclusions.get(id);
-			if (
-				!exclusions.has(id) ||
-				(time !== undefined && (previousTime === undefined || time < previousTime))
-			)
+			if (!exclusions.has(id) || (previousTime !== undefined && time < previousTime))
 				exclusions.set(id, time);
 		};
 		if (tie?.resumeMs !== undefined && tie.resumeMs >= start && tie.resumeMs <= end)
@@ -1162,13 +1152,12 @@ async function readUnit(
 			for (const id of tie.ids) addExclusion(id, tie.throughMs);
 		for (const entry of previousSeenEntries) {
 			const time = seenTime(entry);
-			if (time === undefined || (time >= start && time <= end)) addExclusion(seenId(entry), time);
+			if (time >= start && time <= end) addExclusion(seenId(entry), time);
 		}
 		const excludeIds = [...exclusions]
 			.sort(
 				([leftId, leftTime], [rightId, rightTime]) =>
-					(leftTime ?? Number.POSITIVE_INFINITY) - (rightTime ?? Number.POSITIVE_INFINITY) ||
-					leftId.localeCompare(rightId),
+					leftTime - rightTime || leftId.localeCompare(rightId),
 			)
 			.slice(0, MAX_RESUME_EXCLUSION_IDS)
 			.map(([id]) => id);
@@ -1216,29 +1205,32 @@ async function readUnit(
 	return total;
 }
 
-/** Seen entries carry their timestamp and selected scope after NUL separators; older entries may lack both. */
-function seenEntry(id: string, time: string, scopeId?: string): string {
-	return scopeId === undefined ? `${id} ${time}` : `${id} ${time} ${scopeId}`;
+/** Alert identities carry creation time and selected scope; versions carry update time. */
+function seenEntry(id: string, time: string, scopeId: string): string {
+	return `${id}\u0000${time}\u0000${scopeId}`;
 }
 function seenId(entry: string): string {
-	const separator = entry.indexOf(' ');
-	return separator < 0 ? entry : entry.slice(0, separator);
+	return entry.split('\u0000')[0];
 }
-function seenTime(entry: string): number | undefined {
-	const separator = entry.indexOf(' ');
-	const scopeSeparator = entry.indexOf(' ', separator + 1);
-	const time =
-		separator < 0
-			? NaN
-			: Date.parse(entry.slice(separator + 1, scopeSeparator < 0 ? undefined : scopeSeparator));
-	return Number.isNaN(time) ? undefined : time;
+function seenTime(entry: string): number {
+	return Date.parse(entry.split('\u0000')[1]);
 }
-function seenScope(entry: string): string | undefined {
-	const separator = entry.indexOf(' ');
-	const scopeSeparator = entry.indexOf(' ', separator + 1);
-	if (separator < 0 || scopeSeparator < 0) return undefined;
-	const scopeId = entry.slice(scopeSeparator + 1);
-	return scopeId.length ? scopeId : undefined;
+function seenScope(entry: string): string {
+	return entry.split('\u0000')[2];
+}
+function readSeenEntries(value: unknown, scoped: boolean): string[] {
+	if (
+		!Array.isArray(value) ||
+		value.some((entry) => {
+			if (typeof entry !== 'string') return true;
+			const parts = entry.split('\u0000');
+			return (
+				parts.length !== (scoped ? 3 : 2) || !parts[0] || !Number.isFinite(Date.parse(parts[1]))
+			);
+		})
+	)
+		throw new Error('The saved alert identities are invalid; state was not advanced.');
+	return value as string[];
 }
 
 export async function pollSentinelOne(
@@ -1311,21 +1303,18 @@ export async function pollSentinelOne(
 	}
 
 	// Each stream and scope batch keeps one forward-only cursor. A completed range restarts at the overlap; an interrupted range resumes at its last timestamp and the IDs already handled there.
-	// State saved before the activation watermark existed suppresses nothing.
-	const activationMs = stateMatches ? (previousState.activationMs ?? 0) : pollStartMs;
-	const firstStartMs = stateMatches ? (previousState.activationMs ?? pollStartMs) : pollStartMs;
-	const savedCursors = stateMatches ? (asRecord(previousState.alertCursors) ?? {}) : {};
-	const previousSeenIds = stateMatches ? (previousState.seenAlertIds ?? []) : [];
-	const previousSeenVersions = stateMatches ? (previousState.seenAlertVersions ?? []) : [];
+	const activationMs = stateMatches ? previousState.activationMs : pollStartMs;
+	const savedCursors = stateMatches ? asRecord(previousState.alertCursors) : {};
+	if (typeof activationMs !== 'number' || !Number.isFinite(activationMs) || !savedCursors)
+		throw new Error('The saved alert activation or cursors are invalid; state was not advanced.');
+	const previousSeenIds = stateMatches ? readSeenEntries(previousState.seenAlertIds, true) : [];
+	const previousSeenVersions = stateMatches
+		? readSeenEntries(previousState.seenAlertVersions, false)
+		: [];
 	const batches = scopeBatches(config);
 	const previousSeenByScope = new Map<string, string[]>();
-	const previousUnscopedSeenIds: string[] = [];
 	for (const entry of previousSeenIds) {
 		const scopeId = seenScope(entry);
-		if (scopeId === undefined) {
-			previousUnscopedSeenIds.push(entry);
-			continue;
-		}
 		const entries = previousSeenByScope.get(scopeId) ?? [];
 		entries.push(entry);
 		previousSeenByScope.set(scopeId, entries);
@@ -1344,17 +1333,10 @@ export async function pollSentinelOne(
 		config.pollDeadlineMs === undefined
 			? undefined
 			: { alertIds: new Set(previousAlertIds), versions: new Set(previousVersions) };
-	// State saved before per-unit cursors existed carries one checkpoint; it becomes every unit's cursor once.
-	const legacyCheckpoint: AlertCursor | undefined =
-		stateMatches &&
-		previousState.alertCursors === undefined &&
-		typeof previousState.checkpointMs === 'number'
-			? { throughMs: previousState.checkpointMs, ids: [] }
-			: undefined;
 	const units: Unit[] = [];
 	for (const [batchIndex, scopeIds] of batches.entries()) {
 		for (const fieldId of streams) {
-			const key = `${fieldId}:${simpleHash(scopeIds.join(' '))}`;
+			const key = `${fieldId}:${simpleHash(scopeIds.join('\u0000'))}`;
 			// A batch whose membership changed takes the slowest saved cursor of its stream, so nothing that cursor had not reached is skipped and it can never save an earlier one.
 			const saved = [
 				...Object.entries(savedCursors)
@@ -1363,14 +1345,13 @@ export async function pollSentinelOne(
 						const cursor = readCursor(value, savedKey, config.pollDeadlineMs !== undefined);
 						return cursor ? [cursor.throughMs] : [];
 					}),
-				...(legacyCheckpoint ? [legacyCheckpoint.throughMs] : []),
 			];
 			const previous =
 				readCursor(savedCursors[key], key, config.pollDeadlineMs !== undefined) ??
 				(saved.length ? { throughMs: Math.min(...saved), ids: [] } : undefined);
 			const start = previous
 				? (previous.resumeMs ?? Math.max(0, previous.throughMs - overlapMs))
-				: Math.max(0, firstStartMs - overlapMs);
+				: Math.max(0, activationMs - overlapMs);
 			units.push({ key, fieldId, scopeIds, batchNumber: batchIndex + 1, previous, start });
 		}
 	}
@@ -1395,7 +1376,8 @@ export async function pollSentinelOne(
 				activationMs,
 				[
 					...createdUnit.scopeIds.flatMap((scopeId) => previousSeenByScope.get(scopeId) ?? []),
-					...(batches.length === 1 ? previousUnscopedSeenIds : []),
+					// Alerts without scope metadata are recorded under an empty scope.
+					...(batches.length === 1 ? (previousSeenByScope.get('') ?? []) : []),
 				],
 			);
 		if (updatedUnit) {

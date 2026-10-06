@@ -106,18 +106,6 @@ export function managementScopeFields(): INodeProperties[] {
 	];
 }
 
-export function legacyManagementScopeFields(
-	displayOptions?: INodeProperties['displayOptions'],
-): INodeProperties[] {
-	return ['accountIds', 'siteIds', 'groupIds'].map((name) => ({
-		displayName: name,
-		name,
-		type: 'hidden',
-		default: [],
-		...(displayOptions ? { displayOptions } : {}),
-	}));
-}
-
 export function managementScopeOption(): INodeProperties {
 	const descriptors: Record<string, Partial<INodeProperties>> = {
 		accountIds: { typeOptions: { loadOptionsMethod: 'getAccounts' } },

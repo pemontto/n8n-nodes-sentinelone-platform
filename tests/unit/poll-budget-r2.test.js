@@ -34,12 +34,30 @@ function config(overrides = {}) {
 	};
 }
 
+function cursorsFor(triggerConfig, checkpointMs) {
+	const cursors = {};
+	const scopes = [...triggerConfig.scopeIds].sort();
+	for (let offset = 0; offset < scopes.length; offset += 500) {
+		let hash = 2166136261;
+		for (const character of scopes.slice(offset, offset + 500).join('\u0000')) {
+			hash ^= character.charCodeAt(0);
+			hash = Math.imul(hash, 16777619);
+		}
+		for (const event of triggerConfig.events) {
+			const field = event === 'alert.new' ? 'createdAt' : 'updatedAt';
+			cursors[`${field}:${(hash >>> 0).toString(16)}`] = { throughMs: checkpointMs, ids: [] };
+		}
+	}
+	return cursors;
+}
+
 function stateFor(triggerConfig, checkpointMs = NOW - 600_000) {
 	return {
 		configFingerprint: fingerprintConfig(triggerConfig),
 		initialized: true,
 		activationMs: NOW - 3_600_000,
 		checkpointMs,
+		alertCursors: cursorsFor(triggerConfig, checkpointMs),
 		seenAlertIds: [],
 		seenAlertVersions: [],
 	};
@@ -309,50 +327,6 @@ test('Budgeted overlap exclusions include only seen alerts from the current scop
 	}
 });
 
-test('Legacy unscoped seen IDs still suppress duplicate alerts across scope batches', async () => {
-	const triggerConfig = config({
-		scopeIds: Array.from({ length: 501 }, (_, index) => `account-${index}`),
-		pollDeadlineMs: NOW + 36_000,
-	});
-	const seed = await pollSentinelOne(
-		fakeServer([]).request,
-		triggerConfig,
-		stateFor(triggerConfig),
-		'scheduled',
-		NOW,
-	);
-	const sortedScopes = [...triggerConfig.scopeIds].sort();
-	const firstScopeId = sortedScopes[0];
-	const cursors = structuredClone(seed.nextState.alertCursors);
-	for (const key of Object.keys(cursors).filter((cursorKey) => cursorKey.startsWith('createdAt:')))
-		cursors[key] = {
-			throughMs: NOW - 120_000,
-			ids: [],
-			resumeMs: NOW - 120_000,
-			resumeIds: [],
-		};
-	const createdAt = NOW - 60_000;
-	const state = {
-		...seed.nextState,
-		alertCursors: cursors,
-		seenAlertIds: [`already-delivered\u0000${iso(createdAt)}`],
-	};
-	const result = await pollSentinelOne(
-		fakeServer([alert('already-delivered', createdAt, firstScopeId)]).request,
-		triggerConfig,
-		state,
-		'scheduled',
-		NOW,
-	);
-	assert.deepEqual(result.items, []);
-	assert.ok(
-		result.nextState.seenAlertIds.includes(
-			`already-delivered\u0000${iso(createdAt)}\u0000${firstScopeId}`,
-		),
-		'the fetched legacy identity is saved with its scope for later bounded exclusions',
-	);
-});
-
 test('A repeatedly starved batch warns after three polls and fails only when the whole poll makes no progress', async () => {
 	const warnings = [];
 	const triggerConfig = config({
@@ -454,7 +428,7 @@ test('Seen IDs stay available for a lagging cursor within the bounded state limi
 	};
 	const seenAlertIds = Array.from(
 		{ length: MAX_SEEN_ALERT_IDS },
-		(_, index) => `old-${index}\u0000${iso(NOW - 600_000)}`,
+		(_, index) => `old-${index}\u0000${iso(NOW - 600_000)}\u0000${secondBatchScopeId}`,
 	);
 	const state = { ...seed.nextState, alertCursors: cursors, seenAlertIds };
 	const result = await pollSentinelOne(
@@ -477,7 +451,7 @@ test('Seen IDs stay available for a lagging cursor within the bounded state limi
 test('A seen-state capacity error tells the operator how to recover', async () => {
 	const seenAlertIds = Array.from(
 		{ length: MAX_SEEN_ALERT_IDS },
-		(_, index) => `old-${index}\u0000${iso(NOW - 120_000)}`,
+		(_, index) => `old-${index}\u0000${iso(NOW - 120_000)}\u0000account-1`,
 	);
 	const triggerConfig = config({ pollDeadlineMs: NOW + 36_000 });
 	let state = { ...stateFor(triggerConfig), seenAlertIds };

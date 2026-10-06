@@ -79,7 +79,10 @@ function context(parameters, request) {
 			httpRequestWithAuthentication: async (credential, options) =>
 				options.method === 'GET'
 					? {
-							data: (parameters.accountIds ?? []).map((id) => ({ id, name: 'Demo' })),
+							data: (parameters.options?.scope?.selection?.accountIds ?? []).map((id) => ({
+								id,
+								name: 'Demo',
+							})),
 							pagination: { nextCursor: null },
 						}
 					: request(credential, options),
@@ -90,8 +93,7 @@ function context(parameters, request) {
 function baseParameters(extra = {}) {
 	return {
 		useAdvancedUpdatePayload: Object.prototype.hasOwnProperty.call(extra, 'advancedUpdatePayload'),
-		scopeType: 'ACCOUNT',
-		accountIds: [ACCOUNT_ID],
+		options: { scope: { selection: { accountIds: [ACCOUNT_ID] } } },
 		alertId: ALERT_ID,
 		...extra,
 	};
@@ -122,7 +124,7 @@ test('Get sends a fixed scoped document and returns the matching alert', async (
 });
 
 test('Get accepts an alert ID without scope and still rejects a different returned ID', async () => {
-	const params = { alertId: ALERT_ID, scopeIds: [] };
+	const params = { alertId: ALERT_ID };
 	const result = await getUnifiedAlert(
 		context(params, async (_credential, options) => {
 			assert.equal(options.body.variables.scope, undefined);
@@ -233,20 +235,6 @@ test('Get Many validates runtime-filtered scope selections without widening', as
 	);
 });
 
-test('Get ignores saved scope parameters when an alert ID is supplied', async () => {
-	await getUnifiedAlert(
-		context({ alertId: ALERT_ID, accountIds: [ACCOUNT_ID] }, async (_credential, options) => {
-			assert.equal(options.body.variables.scope, undefined);
-			return envelope('alert', alert());
-		}),
-		0,
-	);
-	await getUnifiedAlert(
-		context(baseParameters({ scopeIds: [] }), async () => envelope('alert', alert())),
-		0,
-	);
-});
-
 test('HTTP 200 GraphQL errors fail even when partial data is present', async () => {
 	const secretText = 'note text that must not leak';
 	await assert.rejects(
@@ -331,9 +319,12 @@ test('numeric alert and scope IDs are rejected instead of coerced', async (t) =>
 	await t.test('numeric scope ID', async () => {
 		await assert.rejects(
 			getManyUnifiedAlerts(
-				context(baseParameters({ accountIds: [9007199254740992] }), async () => {
-					throw new Error('request should not run');
-				}),
+				context(
+					baseParameters({ options: { scope: { selection: { accountIds: [9007199254740992] } } } }),
+					async () => {
+						throw new Error('request should not run');
+					},
+				),
 				0,
 			),
 			/every selected.*non-empty string or safe integer ID/i,
@@ -514,7 +505,7 @@ test('Update discovers actions, orders dependencies, sends an exact ID filter, a
 							data: [
 								{
 									id: 'S1/alert/statusUpdate',
-									title: 'Disabled legacy hint',
+									title: 'Disabled status action',
 									isDisabled: true,
 									disabledReason: 'tenant-specific reason',
 									types: ['STATUS_UPDATE'],

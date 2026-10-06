@@ -58,14 +58,26 @@ function config(overrides = {}) {
 }
 
 function initializedState(triggerConfig, overrides = {}) {
+	const checkpointMs = overrides.checkpointMs ?? NOW - 60_000;
+	const alertCursors = {};
+	if (triggerConfig.events.includes('alert.new'))
+		alertCursors['createdAt:fixture'] = { throughMs: checkpointMs, ids: [] };
+	if (triggerConfig.events.includes('alert.updated'))
+		alertCursors['updatedAt:fixture'] = { throughMs: checkpointMs, ids: [] };
 	return {
 		configFingerprint: fingerprintConfig(triggerConfig),
 		initialized: true,
-		checkpointMs: NOW - 60_000,
+		activationMs: 0,
+		checkpointMs,
+		alertCursors,
 		seenAlertIds: [],
 		seenAlertVersions: [],
 		...overrides,
 	};
+}
+
+function alertIdentity(record, scopeId = 'account-1') {
+	return `${record.id}\u0000${record.createdAt}\u0000${scopeId}`;
 }
 
 function alert(id, createdAt = '2026-08-26T11:59:00.000Z', updatedAt = createdAt) {
@@ -141,7 +153,7 @@ test('trigger polling preserves sanitised HTTP status and distinguishes authenti
 				resource: 'alertActivity',
 				operation: 'occurred',
 				activityTypes: ['16007'],
-				accountIds: ['account-1'],
+				options: { scope: { selection: { accountIds: ['account-1'] } } },
 			},
 			async (request) => {
 				if (request.url.includes('/sdl/v2/api/queries'))
@@ -277,12 +289,12 @@ test('empty scope selection discovers all accounts and the deepest selected scop
 	assert.equal(typeof SentinelOnePlatformTrigger, 'function');
 	const node = new SentinelOnePlatformTrigger();
 	const baseParams = {
-		accountIds: [],
-		siteIds: [],
-		groupIds: [],
 		resource: 'alert',
 		operation: 'new',
-		options: { simplifyOutput: false },
+		options: {
+			simplifyOutput: false,
+			scope: { selection: { accountIds: [], siteIds: [], groupIds: [] } },
+		},
 	};
 	let discoveredQuery;
 	let discoveredVariables;
@@ -323,9 +335,12 @@ test('empty scope selection discovers all accounts and the deepest selected scop
 	const hierarchyContext = createNodeContext(
 		{
 			...baseParams,
-			accountIds: ['account-1'],
-			siteIds: ['site-1'],
-			groupIds: ['group-1'],
+			options: {
+				...baseParams.options,
+				scope: {
+					selection: { accountIds: ['account-1'], siteIds: ['site-1'], groupIds: ['group-1'] },
+				},
+			},
 		},
 		async (options) => {
 			if (options.method === 'GET') {
@@ -362,12 +377,17 @@ test('poll rejects stale descendant scopes that do not belong to the selected pa
 	let graphQlRequests = 0;
 	const context = createNodeContext(
 		{
-			accountIds: ['account-b'],
-			siteIds: ['site-from-account-a'],
-			groupIds: ['group-from-account-a'],
 			resource: 'alert',
 			operation: 'new',
-			options: {},
+			options: {
+				scope: {
+					selection: {
+						accountIds: ['account-b'],
+						siteIds: ['site-from-account-a'],
+						groupIds: ['group-from-account-a'],
+					},
+				},
+			},
 		},
 		async (options) => {
 			if (options.method !== 'GET') {
@@ -404,12 +424,9 @@ test('overlapping polls are coalesced before they can read or overwrite the same
 	let graphQlRequests = 0;
 	const context = createNodeContext(
 		{
-			accountIds: [],
-			siteIds: [],
-			groupIds: [],
 			resource: 'alert',
 			operation: 'new',
-			options: {},
+			options: { scope: { selection: { accountIds: [], siteIds: [], groupIds: [] } } },
 		},
 		async (options) => {
 			if (options.method === 'GET') {
@@ -485,7 +502,9 @@ test('GraphQL requests use the configured finite timeout', async () => {
 
 test('manual poll previews a previously seen alert without mutating durable state', async () => {
 	const triggerConfig = config();
-	const previous = initializedState(triggerConfig, { seenAlertIds: ['preview-alert'] });
+	const previous = initializedState(triggerConfig, {
+		seenAlertIds: [alertIdentity(alert('preview-alert'))],
+	});
 	const snapshot = structuredClone(previous);
 	const result = await pollSentinelOne(
 		async () => alertResponse([alert('preview-alert')]),
@@ -513,7 +532,7 @@ test('manual alert preview ignores durable version dedupe state', async () => {
 		async () => alertResponse([updatedAlert]),
 		updatedConfig,
 		initializedState(updatedConfig, {
-			seenAlertIds: [updatedAlert.id],
+			seenAlertIds: [alertIdentity(updatedAlert)],
 			seenAlertVersions: [updatedVersion],
 		}),
 		'manual',
@@ -714,7 +733,9 @@ test('overlap query emits a late unseen alert older than the checkpoint', async 
 test('configuration change fully rebaselines without historical output', async () => {
 	const oldConfig = config();
 	const newConfig = config({ statuses: ['RESOLVED'] });
-	const previous = initializedState(oldConfig, { seenAlertIds: ['old-alert'] });
+	const previous = initializedState(oldConfig, {
+		seenAlertIds: [alertIdentity(alert('old-alert'))],
+	});
 	const result = await pollSentinelOne(
 		async () => alertResponse([alert('resolved-alert')]),
 		newConfig,
@@ -919,19 +940,19 @@ test('without a poll budget the page cap splits the range exactly as before', as
 			endCursor: offset + 2 < page.length ? String(offset + 2) : null,
 		});
 	};
-	const legacyConfig = config({ maxAlertPages: 1 });
-	const legacy = await pollSentinelOne(
+	const noBudgetConfig = config({ maxAlertPages: 1 });
+	const noBudgetResult = await pollSentinelOne(
 		request,
-		legacyConfig,
-		initializedState(legacyConfig, { checkpointMs: NOW - 600_000 }),
+		noBudgetConfig,
+		initializedState(noBudgetConfig, { checkpointMs: NOW - 600_000 }),
 		'scheduled',
 		NOW,
 	);
 	assert.deepEqual(
-		legacy.items.map((item) => item.alert.id),
+		noBudgetResult.items.map((item) => item.alert.id),
 		alerts.map((time) => `alert-${time}`),
 	);
-	assert.equal(legacy.nextState.checkpointMs, NOW);
+	assert.equal(noBudgetResult.nextState.checkpointMs, NOW);
 	assert.ok(ranges.length > 1, 'the capped range was split');
 	assert.equal(ranges[1][1], NOW, 'the newer half is read first, as before');
 	assert.ok(ranges[1][0] > ranges[0][0]);
@@ -939,7 +960,9 @@ test('without a poll budget the page cap splits the range exactly as before', as
 
 test('pagination failure does not mutate or replace prior state', async () => {
 	const triggerConfig = config();
-	const previous = initializedState(triggerConfig, { seenAlertIds: ['safe'] });
+	const previous = initializedState(triggerConfig, {
+		seenAlertIds: [alertIdentity(alert('safe'))],
+	});
 	const snapshot = structuredClone(previous);
 	await assert.rejects(
 		pollSentinelOne(
@@ -1114,13 +1137,18 @@ test('poll fails before emission when one overlap exceeds the alert state capaci
 	}
 });
 
-test('seen alert and version state remains within documented limits', async () => {
+test('expired seen identities retire while current identities remain within documented limits', async () => {
 	const triggerConfig = config({ events: ['alert.new', 'alert.updated'] });
 	const previous = initializedState(triggerConfig, {
-		seenAlertIds: Array.from({ length: MAX_SEEN_ALERT_IDS + 5 }, (_, index) => `alert-${index}`),
+		seenAlertIds: Array.from({ length: MAX_SEEN_ALERT_IDS + 5 }, (_, index) =>
+			alertIdentity(
+				alert(`alert-${index}`, new Date(NOW - (index < 5 ? 600_000 : 60_000)).toISOString()),
+			),
+		),
 		seenAlertVersions: Array.from(
 			{ length: MAX_SEEN_ALERT_VERSIONS + 5 },
-			(_, index) => `version-${index}`,
+			(_, index) =>
+				`version-${index}\u0000${new Date(NOW - (index < 5 ? 600_000 : 60_000)).toISOString()}`,
 		),
 	});
 	const result = await pollSentinelOne(
@@ -1145,10 +1173,13 @@ test('ActivityFeed access requirements belong in credential docs, not a trigger 
 	assert.match(documentation, /Alert Activity > Occurred trigger requires SDL query access/);
 });
 
-test('optional scopes stay together under Options while legacy roots are hidden', () => {
+test('optional scopes stay together under Options without root fields', () => {
 	const properties = new SentinelOnePlatformTrigger().description.properties;
 	for (const name of ['accountIds', 'siteIds', 'groupIds'])
-		assert.equal(properties.find((p) => p.name === name).type, 'hidden');
+		assert.equal(
+			properties.some((p) => p.name === name),
+			false,
+		);
 	for (const resource of ['alert', 'alertActivity']) {
 		const options = properties.find(
 			(p) => p.name === 'options' && p.displayOptions.show.resource.includes(resource),
@@ -1436,7 +1467,11 @@ test('site-scoped node polls accessible sites without account-list permission', 
 		return alertResponse([alert('accessible')]);
 	};
 	const context = createNodeContext(
-		{ resource: 'alert', operation: 'new', accountIds: [], siteIds: [] },
+		{
+			resource: 'alert',
+			operation: 'new',
+			options: { scope: { selection: { accountIds: [], siteIds: [] } } },
+		},
 		request,
 	);
 	assert.deepEqual(await node.methods.loadOptions.getAccounts.call(context), []);
@@ -1444,7 +1479,11 @@ test('site-scoped node polls accessible sites without account-list permission', 
 	assert.equal((await node.poll.call(context))[0][0].json.alertId, 'accessible');
 	calls.length = 0;
 	const selected = createNodeContext(
-		{ resource: 'alert', operation: 'new', accountIds: [], siteIds: ['site-1'] },
+		{
+			resource: 'alert',
+			operation: 'new',
+			options: { scope: { selection: { accountIds: [], siteIds: ['site-1'] } } },
+		},
 		request,
 	);
 	assert.equal((await node.poll.call(selected))[0][0].json.alertId, 'accessible');
@@ -1591,8 +1630,7 @@ test('the activity node dispatches through V2 LOG with a generic note envelope',
 		resource: 'alertActivity',
 		operation: 'occurred',
 		activityTypes: ['16007'],
-		accountIds: ['account-1'],
-		options: { advancedFilters: 'ignored obsolete hidden JSON' },
+		options: { scope: { selection: { accountIds: ['account-1'] } } },
 	};
 	let sdlCalls = 0;
 	const request = async (r) => {
@@ -1710,19 +1748,38 @@ test('activity builder exposes every shared enum and only recorded value control
 	);
 });
 
-test('removed note resource and unsupported operation pairs fail before requests', async () => {
-	for (const params of [
-		{ resource: 'alertNote', operation: 'created' },
-		{ resource: 'alertActivity', operation: 'created' },
-	]) {
-		const context = createNodeContext(params, async () =>
-			assert.fail('Unsupported configuration must not request data'),
-		);
-		await assert.rejects(
-			new SentinelOnePlatformTrigger().poll.call(context),
-			/Unsupported trigger resource or operation.*Migrate Alert Note/,
-		);
-		assert.equal(context.staticData.sentinelOneTrigger, undefined);
+test('all unsupported trigger resource and operation pairs fail before requests', async () => {
+	const supportedPairs = new Set([
+		'alert:new',
+		'alert:newOrUpdated',
+		'alert:updated',
+		'alertActivity:occurred',
+		// n8n retains the other resource's operation; these are remapped, not rejected.
+		'alert:occurred',
+		'alertActivity:new',
+		'alertActivity:newOrUpdated',
+		'alertActivity:updated',
+	]);
+	for (const resource of ['alert', 'alertActivity', 'alertNote', 'unsupported']) {
+		for (const operation of [
+			'new',
+			'newOrUpdated',
+			'updated',
+			'occurred',
+			'created',
+			'unsupported',
+		]) {
+			if (supportedPairs.has(`${resource}:${operation}`)) continue;
+			const params = { resource, operation };
+			const context = createNodeContext(params, async () =>
+				assert.fail('Unsupported configuration must not request data'),
+			);
+			await assert.rejects(
+				new SentinelOnePlatformTrigger().poll.call(context),
+				(error) => error.message === 'Unsupported trigger resource or operation.',
+			);
+			assert.equal(context.staticData.sentinelOneTrigger, undefined);
+		}
 	}
 });
 
@@ -1760,15 +1817,6 @@ test('an alert resource treats a retained activity operation as the alert defaul
 		fingerprints.push(context.staticData.sentinelOneTrigger.configFingerprint);
 	}
 	assert.equal(fingerprints[0], fingerprints[1]);
-});
-
-test('snapshot triggers preserve their pre-activity-upgrade fingerprints', () => {
-	for (const [events, expected] of [
-		[['alert.new'], '6f507841'],
-		[['alert.updated'], '698f6236'],
-		[['alert.new', 'alert.updated'], 'ba4dbdec'],
-	])
-		assert.equal(fingerprintConfig(config({ events })), expected);
 });
 
 test('saved groups without sites fail before requests for both trigger resources', async () => {
@@ -1891,9 +1939,11 @@ test('activity trigger retains valid group selections and resolves their account
 		{
 			resource: 'alertActivity',
 			operation: 'occurred',
-			accountIds: ['account-1'],
-			siteIds: ['site-1'],
-			groupIds: ['group-1'],
+			options: {
+				scope: {
+					selection: { accountIds: ['account-1'], siteIds: ['site-1'], groupIds: ['group-1'] },
+				},
+			},
 		},
 		async (request) => {
 			if (request.method === 'GET') {
@@ -1943,7 +1993,7 @@ test('Match Conditions only appears when recorded conditions exist', () => {
 	);
 });
 
-test('nested trigger scopes override hidden legacy values and keep the group guard', async () => {
+test('nested trigger scopes keep the group guard', async () => {
 	for (const [resource, operation] of [
 		['alert', 'new'],
 		['alertActivity', 'occurred'],
@@ -1952,7 +2002,6 @@ test('nested trigger scopes override hidden legacy values and keep the group gua
 			{
 				resource,
 				operation,
-				siteIds: ['legacy-site'],
 				options: { scope: { selection: { groupIds: ['new-group'] } } },
 			},
 			async () => assert.fail('Must fail before requests'),
@@ -1961,39 +2010,5 @@ test('nested trigger scopes override hidden legacy values and keep the group gua
 			new SentinelOnePlatformTrigger().poll.call(context),
 			/Group selections require a site selection/,
 		);
-	}
-});
-
-test('resource switches with retained snapshot operations dispatch the activity operation', async () => {
-	const { NodeHelpers } = require('n8n-workflow');
-	const node = new SentinelOnePlatformTrigger();
-	for (const savedOperation of ['new', 'newOrUpdated', 'updated']) {
-		const params = NodeHelpers.getNodeParameters(
-			node.description.properties,
-			{
-				resource: 'alertActivity',
-				operation: savedOperation,
-				options: { scope: { selection: { accountIds: ['account-1'] } } },
-			},
-			true,
-			false,
-			{ typeVersion: 1 },
-			node.description,
-		);
-		assert.equal(params.operation, savedOperation, 'n8n retains the prior resource operation');
-		let sdlRequests = 0;
-		const context = createNodeContext(
-			params,
-			async (request) => {
-				if (request.method === 'GET') return { data: [{ id: 'account-1', name: 'Account One' }] };
-				assert.match(request.url, /\/sdl\/v2\/api\/queries$/);
-				sdlRequests++;
-				return { id: 'empty-job', stepsCompleted: 1, stepsTotal: 1, data: { matches: [] } };
-			},
-			'trigger',
-		);
-		assert.equal(await node.poll.call(context), null);
-		assert.equal(sdlRequests, 1);
-		assert.ok(context.staticData.sentinelOneTrigger.configFingerprint);
 	}
 });

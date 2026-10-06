@@ -1,7 +1,6 @@
 import type { INodeProperties, IDataObject, IExecuteFunctions } from 'n8n-workflow';
 import {
 	additionalAlertFields,
-	legacyManagementScopeFields,
 	managementScopeOption,
 	severityOptions,
 	statusOptions,
@@ -124,7 +123,6 @@ export async function getManyUnifiedAlerts(
 }
 
 export const description: INodeProperties[] = [
-	...legacyManagementScopeFields({ show: { resource: ['alert'], operation: ['getAll'] } }),
 	{
 		displayName: 'Return All',
 		name: 'returnAll',

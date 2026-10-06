@@ -1,7 +1,6 @@
 import {
 	additionalAlertFields,
 	analystVerdictOptions,
-	legacyManagementScopeFields,
 	managementScopeOption,
 	severityOptions,
 	statusOptions,
@@ -449,7 +448,6 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				],
 			},
 			...activityFields,
-			...legacyManagementScopeFields(),
 			{
 				displayName: 'Options',
 				name: 'options',
@@ -704,10 +702,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					(resource === 'alertActivity' && operation !== 'occurred') ||
 					(resource === 'alert' && !['new', 'newOrUpdated', 'updated'].includes(operation))
 				) {
-					throw new NodeOperationError(
-						node,
-						'Unsupported trigger resource or operation. Migrate Alert Note triggers to Alert Activity > Occurred and select Note Created.',
-					);
+					throw new NodeOperationError(node, 'Unsupported trigger resource or operation.');
 				}
 				const events: TriggerEvent[] =
 					resource === 'alertActivity'

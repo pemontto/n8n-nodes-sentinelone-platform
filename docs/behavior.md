@@ -2,9 +2,9 @@
 
 ## Scope and fields
 
-Alert Get and Update and Alert Note Get Many and Create target IDs and need no scope selection. Alert Get Many and triggers accept optional Account, Site, and Group selections. Groups require at least one selected Site. Blank IDs are rejected, including values supplied through expressions and legacy top-level scope fields. Site-scoped credentials can resolve accessible sites even when account-list access is unavailable. An expression that resolves to an empty selection means all records accessible to the credential. A parent alert's current scope must still be validated before an activity is emitted.
+Alert Get and Update and Alert Note Get Many and Create target IDs and need no scope selection. Alert Get Many and triggers accept optional Account, Site, and Group selections under Options > Scope. Groups require at least one selected Site. Blank IDs are rejected, including values supplied through expressions. Site-scoped credentials can resolve accessible sites even when account-list access is unavailable. An expression that resolves to an empty selection means all records accessible to the credential. A parent alert's current scope must still be validated before an activity is emitted.
 
-When a scope is selected, omitted child selections mean all accessible children beneath it. Hidden child selections are retained and validated by Get Many and triggers, including legacy saved fields. A Groups selection without Sites is rejected rather than widened. Common alert fields remain present; Additional Alert Fields and Raw Data are opt-in. The common response intentionally exceeds the n8n ten-field simplification recommendation.
+When a scope is selected, omitted child selections mean all accessible children beneath it. Child selections are validated by Get Many and triggers, including selections hidden by their parent choice. A Groups selection without Sites is rejected rather than widened. Common alert fields remain present; Additional Alert Fields and Raw Data are opt-in. The common response intentionally exceeds the n8n ten-field simplification recommendation.
 
 ## Requests and outcomes
 

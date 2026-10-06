@@ -1,9 +1,8 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { NodeApiError, NodeOperationError } = require('n8n-workflow');
+const { NodeApiError } = require('n8n-workflow');
 const {
 	loadListScopeOptions,
-	readListScope,
 	discoverVisibleScopes,
 } = require('../../dist/nodes/shared/Scopes.js');
 const {
@@ -33,11 +32,8 @@ function triggerContext(resource, statusCode) {
 	const parameters = {
 		resource,
 		operation: resource === 'alertActivity' ? 'occurred' : 'new',
-		accountIds: ['account-1'],
-		siteIds: [],
-		groupIds: [],
 		activityTypes: ['any'],
-		options: {},
+		options: { scope: { selection: { accountIds: ['account-1'], siteIds: [], groupIds: [] } } },
 	};
 	return {
 		staticData,
@@ -139,36 +135,11 @@ test('Sites uses the selected account directly without loading every account', a
 					pagination: { nextCursor: null },
 				};
 			},
-			{ accountIds: ['account-1'] },
+			{ options: { scope: { selection: { accountIds: ['account-1'] } } } },
 		),
 		'SITE',
 	);
 	assert.deepEqual(paths, ['https://tenant.example/web/api/v2.1/sites']);
-});
-
-test('legacy Get Many rejects group selections without a site', async () => {
-	let calls = 0;
-	const context = {
-		getNode: () => ({ name: 'SentinelOne' }),
-		getNodeParameter(name, _itemIndex, fallback) {
-			return (
-				{ options: {}, accountIds: ['account-1'], siteIds: [], groupIds: ['group-1'] }[name] ??
-				fallback
-			);
-		},
-		getCredentials: async () => ({ baseUrl: 'https://tenant.example' }),
-		helpers: {
-			httpRequestWithAuthentication: async () => {
-				calls++;
-			},
-		},
-	};
-	await assert.rejects(readListScope(context, 0), (error) => {
-		assert.ok(error instanceof NodeOperationError);
-		assert.match(error.message, /Group selections require a site selection/);
-		return true;
-	});
-	assert.equal(calls, 0);
 });
 
 function updateContext(request) {

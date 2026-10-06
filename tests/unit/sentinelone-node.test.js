@@ -62,7 +62,11 @@ function executionContext(parametersByItem, request, { continueOnFail = false, o
 			httpRequestWithAuthentication: async (credential, options) =>
 				options.method === 'GET'
 					? {
-							data: [...new Set(parametersByItem.flatMap((p) => p.accountIds ?? []))].map((id) => ({
+							data: [
+								...new Set(
+									parametersByItem.flatMap((p) => p.options?.scope?.selection?.accountIds ?? []),
+								),
+							].map((id) => ({
 								id,
 								name: 'Demo',
 							})),
@@ -109,8 +113,7 @@ function alertParameters(overrides = {}) {
 	return {
 		resource: 'alert',
 		operation: 'get',
-		scopeType: 'ACCOUNT',
-		accountIds: [ACCOUNT_ID],
+		options: { scope: { selection: { accountIds: [ACCOUNT_ID] } } },
 		alertId: ALERT_ID,
 		...overrides,
 	};
@@ -183,14 +186,9 @@ test('action node description exposes the intended v1 resources, operations, and
 	assert.equal(advancedPayload.type, 'json');
 	assert.equal(advancedPayload.typeOptions.rows, 5);
 	assert.equal(propertiesByName(description, 'scopeIds').length, 0);
-	for (const name of ['accountIds', 'siteIds', 'groupIds']) {
-		const [field] = propertiesByName(description, name);
-		assert.deepEqual(field.default, []);
-		assert.deepEqual(field.displayOptions.show, {
-			resource: ['alert'],
-			operation: ['getAll'],
-		});
-	}
+	assert.equal(propertiesByName(description, 'siteIds').length, 0);
+	assert.equal(propertiesByName(description, 'groupIds').length, 0);
+	assert.equal(propertiesByName(description, 'accountIds').length, 1);
 
 	assert.deepEqual(
 		propertiesByName(description, 'alertId').map((property) => property.displayOptions.show),
@@ -248,7 +246,7 @@ test('execute pairs every fanned-out result with its source input item', async (
 		}),
 		alertParameters({
 			operation: 'getAll',
-			accountIds: [accountTwo],
+			options: { scope: { selection: { accountIds: [accountTwo] } } },
 			returnAll: false,
 			limit: 50,
 			filters: {},
@@ -384,8 +382,7 @@ test('Continue On Fail preserves an indeterminate note mutation outcome', async 
 	const parameters = {
 		resource: 'alertNote',
 		operation: 'create',
-		scopeType: 'ACCOUNT',
-		accountIds: [ACCOUNT_ID],
+
 		alertId: ALERT_ID,
 		text: submittedText,
 		contentType: 'MARKDOWN',

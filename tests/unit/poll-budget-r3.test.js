@@ -36,12 +36,30 @@ function config(overrides = {}) {
 	};
 }
 
+function cursorsFor(triggerConfig, checkpointMs) {
+	const cursors = {};
+	const scopes = [...triggerConfig.scopeIds].sort();
+	for (let offset = 0; offset < scopes.length; offset += 500) {
+		let hash = 2166136261;
+		for (const character of scopes.slice(offset, offset + 500).join('\u0000')) {
+			hash ^= character.charCodeAt(0);
+			hash = Math.imul(hash, 16777619);
+		}
+		for (const event of triggerConfig.events) {
+			const field = event === 'alert.new' ? 'createdAt' : 'updatedAt';
+			cursors[`${field}:${(hash >>> 0).toString(16)}`] = { throughMs: checkpointMs, ids: [] };
+		}
+	}
+	return cursors;
+}
+
 function stateFor(triggerConfig) {
 	return {
 		configFingerprint: fingerprintConfig(triggerConfig),
 		initialized: true,
 		activationMs: NOW - 3_600_000,
 		checkpointMs: NOW - 600_000,
+		alertCursors: cursorsFor(triggerConfig, NOW - 600_000),
 		seenAlertIds: [],
 		seenAlertVersions: [],
 	};
@@ -359,15 +377,15 @@ test('Hosts without a poll budget ignore budget-only cursor fields and keep desc
 				ids: [],
 				resumeMs: NOW - 30_000,
 				resumeIds: [],
-				resumeOverlapStartMs: 'ignored by legacy hosts',
+				resumeOverlapStartMs: 'ignored without a budget',
 			},
 		},
 	};
-	const source = fakeServer([alert('legacy-host', NOW - 10_000)]);
+	const source = fakeServer([alert('unbudgeted-host', NOW - 10_000)]);
 	const result = await pollSentinelOne(source.request, triggerConfig, state, 'scheduled', NOW);
 	assert.deepEqual(
 		result.items.map((item) => item.alertId),
-		['legacy-host'],
+		['unbudgeted-host'],
 	);
 	assert.ok(source.requests.every((request) => request.body.variables.sortOrder === 'DESC'));
 	assert.equal('resumeOverlapStartMs' in result.nextState.alertCursors[cursorKey], false);

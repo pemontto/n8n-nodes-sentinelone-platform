@@ -32,12 +32,30 @@ function config(overrides = {}) {
 	};
 }
 
+function cursorsFor(triggerConfig, checkpointMs) {
+	const cursors = {};
+	const scopes = [...triggerConfig.scopeIds].sort();
+	for (let offset = 0; offset < scopes.length; offset += 500) {
+		let hash = 2166136261;
+		for (const character of scopes.slice(offset, offset + 500).join('\u0000')) {
+			hash ^= character.charCodeAt(0);
+			hash = Math.imul(hash, 16777619);
+		}
+		for (const event of triggerConfig.events) {
+			const field = event === 'alert.new' ? 'createdAt' : 'updatedAt';
+			cursors[`${field}:${(hash >>> 0).toString(16)}`] = { throughMs: checkpointMs, ids: [] };
+		}
+	}
+	return cursors;
+}
+
 function stateFor(triggerConfig) {
 	return {
 		configFingerprint: fingerprintConfig(triggerConfig),
 		initialized: true,
 		activationMs: NOW - 3_600_000,
 		checkpointMs: NOW - 600_000,
+		alertCursors: cursorsFor(triggerConfig, NOW - 600_000),
 		seenAlertIds: [],
 		seenAlertVersions: [],
 	};

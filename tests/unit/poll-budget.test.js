@@ -43,12 +43,31 @@ function config(overrides = {}) {
 	};
 }
 
-/** State as a host that predates per-unit cursors saved it. */
-function legacyState(triggerConfig, checkpointMs = CHECKPOINT) {
+/** Current saved state with one cursor per selected stream and scope batch. */
+function cursorsFor(triggerConfig, checkpointMs) {
+	const cursors = {};
+	const scopes = [...triggerConfig.scopeIds].sort();
+	for (let offset = 0; offset < scopes.length; offset += 500) {
+		let hash = 2166136261;
+		for (const character of scopes.slice(offset, offset + 500).join('\u0000')) {
+			hash ^= character.charCodeAt(0);
+			hash = Math.imul(hash, 16777619);
+		}
+		for (const event of triggerConfig.events) {
+			const field = event === 'alert.new' ? 'createdAt' : 'updatedAt';
+			cursors[`${field}:${(hash >>> 0).toString(16)}`] = { throughMs: checkpointMs, ids: [] };
+		}
+	}
+	return cursors;
+}
+
+function stateFor(triggerConfig, checkpointMs = CHECKPOINT) {
 	return {
 		configFingerprint: fingerprintConfig(triggerConfig),
 		initialized: true,
+		activationMs: 0,
 		checkpointMs,
+		alertCursors: cursorsFor(triggerConfig, checkpointMs),
 		seenAlertIds: [],
 		seenAlertVersions: [],
 	};
@@ -190,13 +209,37 @@ async function drain(triggerConfig, initialState, alerts, { budgetMs, pageCostMs
 	});
 }
 
-test('Without a budget the scheduled read keeps its legacy shape: one descending query per stream from the overlap before the checkpoint, every alert delivered, checkpoint at the poll start', async () => {
+test('Invalid current saved activation or identity data fails before requests and leaves state unchanged', async () => {
+	const triggerConfig = config();
+	for (const overrides of [
+		{ activationMs: NaN },
+		{ alertCursors: null },
+		{ seenAlertIds: ['alert-1\u0000invalid-time\u0000account-1'] },
+		{ seenAlertVersions: ['alert-1\u0000invalid-time'] },
+	]) {
+		const state = { ...stateFor(triggerConfig), ...overrides };
+		const saved = structuredClone(state);
+		await assert.rejects(
+			pollSentinelOne(
+				async () => assert.fail('invalid saved state must fail before a request'),
+				triggerConfig,
+				state,
+				'scheduled',
+				NOW,
+			),
+			/invalid; state was not advanced/,
+		);
+		assert.deepEqual(state, saved);
+	}
+});
+
+test('Without a budget the scheduled read uses descending pagination: one descending query per stream from the overlap before the checkpoint, every alert delivered, checkpoint at the poll start', async () => {
 	const triggerConfig = config({ events: ['alert.new', 'alert.updated'] });
 	const source = tenant(backlog);
 	const result = await pollSentinelOne(
 		source.request,
 		triggerConfig,
-		legacyState(triggerConfig),
+		stateFor(triggerConfig),
 		'scheduled',
 		NOW,
 	);
@@ -242,7 +285,7 @@ test('A capped timeout at the budget stops pagination: the pages read are delive
 		const result = await pollSentinelOne(
 			source.budgeted(clock.start + 14_000),
 			{ ...triggerConfig, pollDeadlineMs: clock.start + 14_000 },
-			legacyState(triggerConfig),
+			stateFor(triggerConfig),
 			'scheduled',
 			NOW,
 		);
@@ -285,7 +328,7 @@ test('A large backlog drains over polls that each get the same finite budget, in
 	const alerts = Array.from({ length: 14 }, (_, index) =>
 		alert(`alert-${String(index).padStart(2, '0')}`, CHECKPOINT + 10_000 + index * 600_000),
 	);
-	const { emitted, polls } = await drain(triggerConfig, legacyState(triggerConfig), alerts, {
+	const { emitted, polls } = await drain(triggerConfig, stateFor(triggerConfig), alerts, {
 		budgetMs: 14_000,
 		pageCostMs: 6_000,
 	});
@@ -302,7 +345,7 @@ test('A 1,000-alert bulk edit sharing one timestamp drains with the same finite 
 	const alerts = Array.from({ length: 1_000 }, (_, index) =>
 		alert(`tied-${String(index).padStart(4, '0')}`, CHECKPOINT - 3600_000, edited),
 	);
-	const { emitted, state, polls } = await drain(triggerConfig, legacyState(triggerConfig), alerts, {
+	const { emitted, state, polls } = await drain(triggerConfig, stateFor(triggerConfig), alerts, {
 		budgetMs: 20_000,
 		pageCostMs: 6_000,
 	});
@@ -323,7 +366,7 @@ test('An alert delivered from a tie block and revised later is delivered again: 
 		return await pollSentinelOne(
 			source.budgeted(clock.start + 14_000),
 			{ ...triggerConfig, pollDeadlineMs: clock.start + 14_000 },
-			legacyState(triggerConfig),
+			stateFor(triggerConfig),
 			'scheduled',
 			NOW,
 		);
@@ -394,7 +437,7 @@ test('A drain past the seen-ID limit keeps every identity still inside an overla
 	);
 	const { emitted, state } = await drain(
 		triggerConfig,
-		legacyState(triggerConfig, NOW - count * 1_000),
+		stateFor(triggerConfig, NOW - count * 1_000),
 		alerts,
 		{ budgetMs: 5_000, pageCostMs: 100 },
 	);
@@ -423,7 +466,7 @@ test('An overlap that needs more identities than the limit fails visibly instead
 	const first = await pollSentinelOne(
 		tenant(alerts.slice(0, 12_000)).request,
 		triggerConfig,
-		legacyState(triggerConfig, NOW - 200_000),
+		stateFor(triggerConfig, NOW - 200_000),
 		'scheduled',
 		NOW,
 	);
@@ -458,7 +501,7 @@ test('Cursors follow scope membership: reordering scopes keeps them, and a chang
 		return await pollSentinelOne(
 			source.budgeted(clock.start + 16_000),
 			{ ...triggerConfig, pollDeadlineMs: clock.start + 16_000 },
-			legacyState(triggerConfig),
+			stateFor(triggerConfig),
 			'scheduled',
 			NOW,
 		);
@@ -515,7 +558,7 @@ test('Cursors follow scope membership: reordering scopes keeps them, and a chang
 
 test('A budget stop with no progress fails after repeated stalls, and a descending page is a hard error', async () => {
 	const triggerConfig = config();
-	const previous = legacyState(triggerConfig);
+	const previous = stateFor(triggerConfig);
 	const snapshot = structuredClone(previous);
 	let stalled = previous;
 	for (let poll = 0; poll < 9; poll += 1) {
@@ -571,7 +614,7 @@ test('Under a budget a read pages past the manual page cap until the budget stop
 	const seeded = await pollSentinelOne(
 		tenant([]).request,
 		triggerConfig,
-		legacyState(triggerConfig, cursor - 1),
+		stateFor(triggerConfig, cursor - 1),
 		'scheduled',
 		cursor,
 	);
@@ -602,7 +645,7 @@ test('A budget stop in one scope batch preserves progress from batches that were
 	const alerts = Array.from({ length: 6 }, (_, index) =>
 		alert(`batch-${index}`, CHECKPOINT + 60_000 + index * 60_000, undefined, scopeIds[index * 500]),
 	);
-	const result = await drain(triggerConfig, legacyState(triggerConfig), alerts, {
+	const result = await drain(triggerConfig, stateFor(triggerConfig), alerts, {
 		budgetMs: 5_000,
 		pageCostMs: 1_200,
 		maxPolls: 8,
@@ -624,7 +667,7 @@ test('Budgeted alert polling drains an 8,000 alert storm with fixed page latency
 	const seeded = await pollSentinelOne(
 		tenant([]).request,
 		triggerConfig,
-		legacyState(triggerConfig, start - 1),
+		stateFor(triggerConfig, start - 1),
 		'scheduled',
 		start,
 	);
@@ -651,7 +694,7 @@ test('Budgeted alert polling drains an 8,000 alert storm with jittered page late
 	const seeded = await pollSentinelOne(
 		tenant([]).request,
 		triggerConfig,
-		legacyState(triggerConfig, start - 1),
+		stateFor(triggerConfig, start - 1),
 		'scheduled',
 		start,
 	);
@@ -680,7 +723,7 @@ test('Budgeted alert reads stop at seen-state capacity and save the last handled
 	const created = await pollSentinelOne(
 		tenant(createdAlerts).request,
 		createdConfig,
-		legacyState(createdConfig),
+		stateFor(createdConfig),
 		'scheduled',
 		NOW,
 	);
@@ -701,7 +744,7 @@ test('Budgeted alert reads stop at seen-state capacity and save the last handled
 	const updated = await pollSentinelOne(
 		tenant(updatedAlerts).request,
 		updatedConfig,
-		legacyState(updatedConfig),
+		stateFor(updatedConfig),
 		'scheduled',
 		NOW,
 	);
@@ -722,10 +765,10 @@ test('Budgeted scope batches reserve the last seen-state slot for the oldest ale
 		alertPageSize: 10,
 	});
 	const seeded = {
-		...legacyState(triggerConfig),
+		...stateFor(triggerConfig),
 		seenAlertIds: Array.from(
 			{ length: MAX_SEEN_ALERT_IDS - 1 },
-			(_, index) => `prior-${index}\u0000${iso(NOW - 30_000)}`,
+			(_, index) => `prior-${index}\u0000${iso(NOW - 30_000)}\u0000${triggerConfig.scopeIds[0]}`,
 		),
 	};
 	const alerts = [
@@ -778,10 +821,10 @@ test('Updated waits when seen-state capacity holds back the alert New row', asyn
 		alertPageSize: 10,
 	});
 	const seeded = {
-		...legacyState(triggerConfig),
+		...stateFor(triggerConfig),
 		seenAlertIds: Array.from(
 			{ length: MAX_SEEN_ALERT_IDS - 1 },
-			(_, index) => `prior-${index}\u0000${iso(NOW - 30_000)}`,
+			(_, index) => `prior-${index}\u0000${iso(NOW - 30_000)}\u0000${triggerConfig.scopeIds[0]}`,
 		),
 	};
 	const alerts = [
@@ -810,13 +853,7 @@ test('Updated-only polling reads the updatedAt stream without querying createdAt
 		pollDeadlineMs: Date.now() + 60_000,
 	});
 	const source = tenant(backlog);
-	await pollSentinelOne(
-		source.request,
-		triggerConfig,
-		legacyState(triggerConfig),
-		'scheduled',
-		NOW,
-	);
+	await pollSentinelOne(source.request, triggerConfig, stateFor(triggerConfig), 'scheduled', NOW);
 	assert.deepEqual(
 		[...new Set(source.state.requests.map((request) => request.body.variables.sortBy))],
 		['updatedAt'],
@@ -840,7 +877,7 @@ test('New is delivered before a later Updated event for the same alert', async (
 			return await firstSource.request(options);
 		},
 		triggerConfig,
-		legacyState(triggerConfig),
+		stateFor(triggerConfig),
 		'scheduled',
 		NOW,
 	);
@@ -882,7 +919,7 @@ test('Seen identities retire by their own stream: created ids follow the slowest
 				return await createdDeadline(options);
 			},
 			{ ...triggerConfig, pollDeadlineMs: clock.start + 60_000 },
-			legacyState(triggerConfig),
+			stateFor(triggerConfig),
 			'scheduled',
 			NOW,
 		);
@@ -950,7 +987,7 @@ test('A regrouped batch starts from the slowest saved cursor and can never save 
 		alertPageSize: 1,
 	});
 	const state = {
-		...legacyState(triggerConfig),
+		...stateFor(triggerConfig),
 		alertCursors: {
 			'createdAt:fast': { throughMs: NOW - 60_000, ids: [] },
 			'createdAt:slow': { throughMs: lagging, ids: [] },
@@ -1156,8 +1193,8 @@ test('The node passes its host budget to the transport, stops at it, and a host 
 	await node.poll.call(seeded);
 	Object.assign(seeded.staticData.sentinelOneTrigger, {
 		checkpointMs: CHECKPOINT,
-		alertCursors: undefined,
-		activationMs: undefined,
+		alertCursors: cursorsFor(config(), CHECKPOINT),
+		activationMs: 0,
 	});
 
 	const first = await withClock(async (clock) => {
@@ -1182,9 +1219,9 @@ test('The node passes its host budget to the transport, stops at it, and a host 
 	);
 	assert.equal(first.state.sentinelOneTrigger.checkpointMs, CHECKPOINT + 120_000);
 
-	const legacyHost = nodeContext(withAccounts(tenant(alerts).request));
-	Object.assign(legacyHost.staticData, first.state);
-	const second = await node.poll.call(legacyHost);
+	const unbudgetedHost = nodeContext(withAccounts(tenant(alerts).request));
+	Object.assign(unbudgetedHost.staticData, first.state);
+	const second = await node.poll.call(unbudgetedHost);
 	assert.deepEqual(
 		second[0].map((item) => item.json.alertId),
 		['C'],
@@ -1201,7 +1238,7 @@ test('A permission failure that arrives after the budget passes surfaces as deni
 			}),
 			1_000,
 		);
-		context.staticData.sentinelOneTrigger = legacyState(config());
+		context.staticData.sentinelOneTrigger = stateFor(config());
 		await assert.rejects(node.poll.call(context), /denied access/);
 		assert.equal(context.staticData.sentinelOneTrigger.checkpointMs, CHECKPOINT);
 	});

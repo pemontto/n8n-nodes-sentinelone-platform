@@ -99,7 +99,7 @@ test('update captures original state and enables verification; reads add raw dat
 	);
 });
 
-test('note listener migrates to note-only Alert Activity and snapshot listener stays unchanged', () => {
+test('example listeners use note-only Alert Activity and alert snapshots', () => {
 	const listeners = workflows
 		.flatMap((w) => w.nodes)
 		.filter((n) => n.type.endsWith('Trigger') && n.type.includes('sentinelOnePlatform'));
