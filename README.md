@@ -25,7 +25,25 @@ For example, escalate High and Critical alerts to ServiceNow and write the incid
 | Alert          | New, Updated, New or Updated |
 | Alert Activity | Activity types               |
 
-Alert Activity covers alert creation, status, verdict, severity and assignee changes, mitigation activity and notes. Choose activity types with the Operation multi-select, which defaults to Any. Simplify defaults to enabled; see [trigger output examples](docs/trigger.md#output) for simplified and full activity and alert records, plus filters, conditions and delivery limits.
+Alert Activity covers alert creation, status, verdict, severity and assignee changes, mitigation activity and notes. Choose activity types with the Operation multi-select, which defaults to Any. Simplify defaults to enabled and returns concise changes such as `{ "field": "status", "from": "NEW", "to": "IN_PROGRESS" }`. Alert summaries include flat scope names, and Additional Alert Fields are prefixed with `alert`. See [trigger output examples](docs/trigger.md#output) for simplified and full activity and alert records, plus filters, conditions and delivery limits.
+
+For example, a simplified Alert trigger item can contain:
+
+```json
+{
+	"eventId": "tenant.example/alert/alert-123/new",
+	"eventType": "alert.new",
+	"eventTime": "2025-02-03T09:55:00Z",
+	"alertId": "alert-123",
+	"alertName": "Example detection",
+	"alertSeverity": "HIGH",
+	"alertStatus": "NEW",
+	"alertAnalystVerdict": "UNDEFINED",
+	"accountName": "Example account",
+	"siteName": "London",
+	"groupName": "Workstations"
+}
+```
 
 Every trigger event includes a stable `eventId` for downstream deduplication. Rare duplicates can occur after crashes, state restores, overlapping runs, or overload; see the [trigger delivery limits](docs/trigger.md#polling-and-test-events).
 

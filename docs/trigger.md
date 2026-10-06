@@ -46,11 +46,11 @@ Options > Scope groups the optional Account, Site, and Group selections that res
 
 ## Output
 
-Simplify is an activity Option that defaults to true. Simplified output is flat and contains `eventId`, `eventType`, `eventTime`, `activityKind`, `actorName`, `alertId`, `alertName`, `alertStatus`, `alertSeverity`, `alertAnalystVerdict`, `accountName`, `siteName`, and `groupName`. `changes` is included only when present. `note` is a string included only for `noteCreated`. The alert summary fields remain present as `null` when the lookup has no value. The activity's external identifier, `activityId`, `activityTypeId`, `eventTimestamp`, nested actor, and full parent object are available in the full output when Simplify is disabled.
+Simplify is an activity Option that defaults to true. Simplified output is flat and contains `eventId`, `eventType`, `eventTime`, `activityKind`, `actorName`, `alertId`, `alertName`, `alertStatus`, `alertSeverity`, `alertAnalystVerdict`, `accountName`, `siteName`, and `groupName`. For status (`16001`), analyst verdict (`16002`), severity (`16003`), and assignee (`16004`) events, a supplied change is returned as `change: { field, from?, to? }`; the assignee field is `assignee` and its values are email addresses. If an old value was not supplied, `from` is omitted. Other activity types use `changes` with `oldValue` and `newValue` when supplied. `change` and `changes` are omitted when there is no change. `note` is a string included only for `noteCreated`, and mitigation details appear when supplied. Alert summary fields remain present as `null` when the lookup has no value. Include Raw Activity and Include Current Alert can add `rawActivity` and `currentAlert` in either output mode. The activity's external identifier, `activityId`, `activityTypeId`, `eventTimestamp`, nested actor, and full parent object are available in the full output when Simplify is disabled.
 
-Each recognised change appears in `changes[]` as `{field, oldValue?, newValue?}`. One activity can contain several changes. In full output, an empty array means no recognised changes were supplied; simplified output omits that empty array. A missing endpoint stays absent; an explicit null stays null. The full output includes note and mitigation details when supplied. Unknown types retain the generic envelope.
+In full output, each recognised change appears in `changes[]` as `{field, oldValue?, newValue?}`. One activity can contain several changes. An empty array means no recognised changes were supplied; simplified output omits it. A missing endpoint stays absent; an explicit null stays null. Unknown types retain the generic envelope.
 
-With Simplify disabled, output preserves the existing full activity shape, including fields that are optional, `rawActivity` when Include Raw Activity is enabled, and `currentAlert` when Include Current Alert is enabled. These raw and current objects are available only in full output. They do not replace the event envelope or historical changes. The full activity output uses the same activity selection and current V2 LOG endpoint.
+With Simplify disabled, output preserves the full activity shape, including fields that are optional. Include Raw Activity adds `rawActivity`; Include Current Alert adds `currentAlert`. Both options also work with Simplify enabled. These objects do not replace the event envelope or recorded changes. SDL LOG returns complete source records; Include Raw Activity controls whether those records appear in your workflow items. The full activity output uses the same activity selection and current V2 LOG endpoint.
 
 A simplified status change has this shape (all values are synthetic):
 
@@ -60,7 +60,7 @@ A simplified status change has this shape (all values are synthetic):
 	"eventType": "alert.activity",
 	"eventTime": "2025-02-03T10:00:00Z",
 	"activityKind": "statusChanged",
-	"changes": [{ "field": "status", "oldValue": "NEW", "newValue": "IN_PROGRESS" }],
+	"change": { "field": "status", "from": "NEW", "to": "IN_PROGRESS" },
 	"actorName": "analyst@example.test",
 	"alertId": "alert-123",
 	"alertName": "Example detection",
@@ -73,7 +73,7 @@ A simplified status change has this shape (all values are synthetic):
 }
 ```
 
-With Simplify disabled, the event keeps its full envelope. Optional `note`, `mitigation`, `rawActivity`, and `currentAlert` are present only when their corresponding source data or options provide them; `rawActivity` and `currentAlert` are only available in full output. For example:
+With Simplify disabled, the event keeps its full envelope. Optional `note`, `mitigation`, `rawActivity`, and `currentAlert` are present only when their corresponding source data or options provide them. For example:
 
 ```json
 {
@@ -159,26 +159,22 @@ With Simplify disabled, the event keeps its full envelope. Optional `note`, `mit
 }
 ```
 
-Alert trigger outputs use the same Simplify option. Simplified alerts rename `name`, `status`, `severity`, and `externalId` to `alertName`, `alertStatus`, `alertSeverity`, and `alertExternalId`, and omit `eventTimestamp`; other common fields, Additional Alert Fields, and `scope` are unchanged. Raw output keeps the original alert object under `alert`. Examples:
+Alert trigger outputs use the same Simplify option. Simplified alerts rename `name`, `status`, `severity`, and `externalId` to `alertName`, `alertStatus`, `alertSeverity`, and `alertExternalId`, flatten scope names into `accountName`, `siteName`, and `groupName`, and omit `scope` and `eventTimestamp`. Additional Alert Fields are prefixed with `alert`, such as `alertAnalystVerdict`. Raw output keeps the original alert object under `alert`. Examples:
 
 ```json
 {
 	"eventId": "tenant.example/alert/alert-123/new",
 	"eventType": "alert.new",
 	"eventTime": "2025-02-03T09:55:00Z",
-	"scope": {
-		"type": "ACCOUNT",
-		"id": "account-101",
-		"name": "Example account",
-		"account": { "id": "account-101", "name": "Example account" },
-		"site": { "id": "site-202", "name": "London" },
-		"group": { "id": "group-303", "name": "Workstations" }
-	},
 	"alertId": "alert-123",
 	"alertExternalId": "source-789",
 	"alertName": "Example detection",
 	"alertSeverity": "HIGH",
 	"alertStatus": "NEW",
+	"alertAnalystVerdict": "UNDEFINED",
+	"accountName": "Example account",
+	"siteName": "London",
+	"groupName": "Workstations",
 	"createdAt": "2025-02-03T09:55:00Z",
 	"updatedAt": "2025-02-03T09:55:00Z",
 	"detectedAt": "2025-02-03T09:54:50Z",
@@ -188,7 +184,7 @@ Alert trigger outputs use the same Simplify option. Simplified alerts rename `na
 }
 ```
 
-With Simplify disabled, the raw alert is nested under `alert`, and the output includes `eventTimestamp`:
+With Simplify disabled, the raw alert is nested under `alert`, and the output includes `eventTimestamp` and the scope object:
 
 ```json
 {
@@ -222,13 +218,13 @@ With Simplify disabled, the raw alert is nested under `alert`, and the output in
 
 ## Polling and test events
 
-The activation poll establishes a fresh baseline on first use or after relevant configuration changes and does not replay earlier events. The first following scheduled poll uses that baseline and can emit later matching events. A pending activation baseline is held in memory by workflow, node, and configuration fingerprint until committed state is observed; activation returns no items, so its static data may be discarded. Checkpoint state is version 2. Missing, old, or unrecognised state causes a new baseline rather than migration. Alert activity uses a 300-second overlap. Reads are chronological and budgeted against n8n's scheduled poll deadline (`getPollBudgetMs`, with a five-minute fallback). Each stream and scope batch resumes from its own `resumeMs` and `resumeIds`; New reads `createdAt`, and Updated reads `updatedAt`. A batch resumes from the saved position and IDs.
+The activation poll establishes a fresh baseline on first use or after relevant configuration changes and does not replay earlier events. The first following scheduled poll uses that baseline and can emit later matching events. Updated events can arrive before New events because the streams progress independently. A pending activation baseline is held in memory by workflow and node with its configuration fingerprint. n8n 2.38.1 can discard static data when a poll returns no items. A configuration change resets the pending baseline, including a change from A to B and back to A; it expires after one hour, and only empty scheduled polls refresh it. Checkpoint state is version 2. Missing, old, or unrecognised state causes a new baseline rather than migration. Alert activity uses a 300-second overlap. Reads are chronological and budgeted against n8n's scheduled poll deadline (`getPollBudgetMs`, with a five-minute fallback). Each stream and scope batch resumes from its own `resumeMs` and `resumeIds`; New reads `createdAt`, and Updated reads `updatedAt`. An interrupted New read retains its overlap so late arrivals can still be found.
 
-Requests, retries, and delays are bounded by the remaining deadline. A deadline or page-cap stop can emit the completed prefix and its cursor. API failures, including HTTP 429, fail the poll without emitting partial results or advancing state. If polling emits or advances nothing, it fails immediately with a positioned error. Alert Activity splits SDL ranges and caps its own work while reserving time for parent lookups. A query, lookup, scope, or permission failure remains an error; only this trigger's own deadline or page cap can stop work successfully with a completed prefix. The trigger makes no per-alert detail requests; use Alert > Get for alert fields.
+Requests, retries, and delays are bounded by the remaining deadline. A request timeout caused by the poll deadline is treated as a deadline stop. A deadline or page-cap stop can emit the completed prefix and its cursor. If a retryable 429 or 5xx cannot be retried before the deadline, the trigger returns the completed prefix and hands the unfinished range to the next poll when progress has been made; it logs the response status. Without progress, the HTTP error is returned. Other API failures, including 401, 403, and 404, fail the poll without emitting partial results or advancing state. If polling emits or advances nothing, it fails immediately with a positioned error. Alert Activity splits SDL ranges and caps its own work while reserving time for parent lookups. A query, lookup, scope, or permission failure remains an error; only this trigger's own deadline or page cap can stop work successfully with a completed prefix. The trigger makes no per-alert detail requests; use Alert > Get for alert fields.
 
 Alert and activity checkpoint caches are bounded: 20,000 New alert IDs, 40,000 alert version entries, and 40,000 activity IDs. When a cache is full, the oldest entry is evicted and a warning is logged. Cursor IDs are never evicted. A resume position with more than 1,000 tied alert IDs fails visibly; it is not split into larger exclusion lists. An SDL result saturated inside one millisecond also fails because its window cannot be split further. Narrow the selected scope or filters for these limits. Rare duplicates can still occur after a crash, state restore, overlapping execution, or overload. Near the threshold of roughly 4,000 alerts per minute, New alerts can be duplicated around the five-minute overlap. Use the top-level `eventId` as the stable deduplication key in every mode. Its slash-separated components are individually encoded with `encodeURIComponent`: host, `alert`, alert ID, then `new`, or `updated` followed by the exact returned `updatedAt`; activity IDs use host, `alert`, alert ID, `activity`, and activity ID. Prefer downstream deduplication or an idempotent destination. In n8n, the Remove Duplicates node can use Node scope to retain several days of events; once its history is full, it errors until history is cleared or enlarged.
 
-Fetch Test Event searches newest windows first, down to the existing January 2020 lower boundary. It returns at most the 10 newest matches from the first nonempty matching window and stops even if only one matches. It never searches older windows just to fill ten. Finite request and query budgets still apply; exhausting them reports an incomplete search rather than claiming no matches.
+Fetch Test Event searches newest windows first, down to the existing January 2020 lower boundary. It returns at most the 10 newest matches from the first nonempty matching window and stops even if only one matches. It never searches older windows just to fill ten. If a dense window exceeds the configured page cap, the preview reports the limit instead of splitting the window to try to fill the result. Finite request and query budgets still apply; exhausting them reports an incomplete search rather than claiming no matches.
 
 Scope resolution, SDL launch/poll, and alert lookup errors identify the failed stage without including source records or credentials. Incomplete results, malformed current-scope metadata, conflicting duplicates and saturated windows that cannot be split further fail without advancing scheduled state. A deadline or page-cap stop can save only the already completed prefix. An activity whose parent alert cannot be found also fails while its source timestamp remains inside the overlap retry window. Once older than that window, the trigger skips it and logs a warning with the dropped count, allowing other activities and the checkpoint to proceed. It never emits an activity with unverified scope. This expiry also applies during manual preview; request failures are not treated as deleted alerts.
 
