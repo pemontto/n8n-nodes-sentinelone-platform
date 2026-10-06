@@ -38,10 +38,14 @@ export const GRAPHQL_DOCUMENTS = {
 	getManyAlerts: getManyAlertsDocument(),
 	availableActions: /* GraphQL */ `
 		query SentinelOneAvailableAlertActions(
+			$id: ID!
 			$scope: ScopeSelectorInput
 			$filter: OrFilterSelectionInput!
 			$viewType: ViewType!
 		) {
+			alert(id: $id) {
+				id
+			}
 			alertAvailableActions(scope: $scope, filter: $filter, viewType: $viewType) {
 				data {
 					id

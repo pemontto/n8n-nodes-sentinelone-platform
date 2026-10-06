@@ -20,7 +20,7 @@ export async function graphQlRequest(
 	variables: IDataObject,
 	rootName: string,
 	mutation = false,
-	options: { attempts?: number; timeoutMs?: number } = {},
+	options: { attempts?: number; timeoutMs?: number; alertId?: string } = {},
 ): Promise<unknown> {
 	const credentials = await context.getCredentials('sentinelOnePlatformApi');
 	const baseUrl = normalizeBaseUrl(credentials.baseUrl);
@@ -154,6 +154,34 @@ export async function graphQlRequest(
 	}
 
 	const errors = response.errors ?? [];
+
+	const alertId = options.alertId ?? (rootName === 'alert' ? variables.id : undefined);
+
+	if (
+		!mutation &&
+		typeof alertId === 'string' &&
+		(errors.some(
+			(entry) =>
+				isRecord(entry) &&
+				Array.isArray(entry.path) &&
+				entry.path.length === 1 &&
+				entry.path[0] === 'alert' &&
+				typeof entry.message === 'string' &&
+				entry.message.includes('Required value was null'),
+		) ||
+			(errors.length === 0 && isRecord(response.data) && response.data.alert === null))
+	) {
+		const failure = apiError(
+			context,
+			itemIndex,
+			`Alert ${alertId} not found.`,
+			'Check the alert ID and that the credential can see it.',
+			'404',
+		);
+
+		Object.assign(failure, { alertId });
+		throw failure;
+	}
 
 	if (errors.length > 0) {
 		const codes = errors

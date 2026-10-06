@@ -2,7 +2,7 @@
 
 ## Alert
 
-Get requires an Alert ID. Common alert fields are always returned; Options > Additional Alert Fields adds supported fields, while Raw Data and large enrichments are opt-in. Additional GraphQL Fields accepts a field selection, including nested selections, without a query wrapper; arguments, aliases, and directives are not accepted.
+Get requires an Alert ID. Get and Update report a missing or inaccessible alert as HTTP 404, including during Update discovery and verification. Common alert fields are always returned; Options > Additional Alert Fields adds supported fields, while Raw Data and large enrichments are opt-in. Additional GraphQL Fields accepts a field selection, including nested selections, without a query wrapper; arguments, aliases, and directives are not accepted.
 
 Get Many supports optional Account, Site, and Group selections under Options > Scope, filters for analyst verdict, creation time, external ID, severity, status, and ticket ID, and pagination. Empty scope selections include accessible records. Groups require a selected Site. Return All stops with an error above 10,000 alerts; add filters or use a bounded Limit instead.
 

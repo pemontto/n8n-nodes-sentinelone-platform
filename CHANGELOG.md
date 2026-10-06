@@ -5,6 +5,7 @@
 This first release adds n8n nodes for working with SentinelOne alerts, alert notes, and SDL PowerQueries, plus triggers for new and updated alerts and alert activity.
 
 - Alert Get, Get Many, and Update support common alert fields, filtering, optional scope selection, status and analyst verdict changes, and ticket IDs. Additional alert fields and raw data are optional.
+- Alert Get and Update report missing or inaccessible alerts as HTTP 404, including during discovery and verification.
 - Alert Update checks acknowledged changes by default. If SentinelOne returns an uncertain or partial result, inspect the alert before trying the update again.
 - Alert Note Get Many and Create work with an alert ID. Note Create reports the observed notes and whether it could identify the newly added note.
 - SDL Query Execute returns query rows or a table with result metadata. Output size, row count, polling interval, and timeout are configurable.

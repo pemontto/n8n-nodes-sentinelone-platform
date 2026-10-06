@@ -1,4 +1,4 @@
-import { sleep } from 'n8n-workflow';
+import { NodeApiError, sleep } from 'n8n-workflow';
 import type { IDataObject } from 'n8n-workflow';
 import { isRecord } from '../../common';
 
@@ -180,6 +180,12 @@ export async function verifyUpdate(
 			if (verified || unavailable) return result;
 			retryAfter = 0;
 		} catch (error) {
+			if (error instanceof NodeApiError && error.httpCode === '404') {
+				// Preserve the API error identity instead of hiding a missing alert.
+				// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+				throw error;
+			}
+
 			result = {
 				verification: unavailableVerification(requested),
 				verificationStatus: 'unavailable',

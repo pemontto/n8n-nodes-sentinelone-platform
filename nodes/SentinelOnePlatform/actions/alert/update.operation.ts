@@ -141,8 +141,10 @@ export async function updateUnifiedAlert(
 		context,
 		itemIndex,
 		GRAPHQL_DOCUMENTS.availableActions,
-		{ filter, viewType: 'ALL' },
+		{ id: alertId, filter, viewType: 'ALL' },
 		'alertAvailableActions',
+		false,
+		{ alertId },
 	);
 
 	const selected = orderActions(
