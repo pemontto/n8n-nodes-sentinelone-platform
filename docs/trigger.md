@@ -18,17 +18,23 @@ Account, Site, Group, and activity actor name exclusions use case-insensitive re
 
 ## Activity selection
 
-Choose activity types with the Operation multi-select. It offers the same values as the former Trigger On multi-select and defaults to Any (`["any"]`). Any includes unknown alert-linked activity types, whose numeric IDs are preserved without assigning a guessed name. The former single-select Operation offered only Occurred; saved workflows may contain that value, which runtime ignores in favour of the activity-type selection.
+Choose activity types with the Operation multi-select. It retains the values from the former Trigger On multi-select and defaults to Any (`["any"]`). Any includes unknown alert-linked activity types, whose numeric IDs are preserved without assigning a guessed name. The former single-select Operation offered only Occurred; saved workflows may contain that value, which runtime ignores in favour of the activity-type selection.
 
-| Type ID | Activity                |
-| ------- | ----------------------- |
-| `16000` | Alert created           |
-| `16001` | Status changed          |
-| `16002` | Analyst verdict changed |
-| `16003` | Severity changed        |
-| `16004` | Assignee changed        |
-| `16005` | Mitigation activity     |
-| `16007` | Note created            |
+| Type ID   | Activity                        |
+| --------- | ------------------------------- |
+| `16000`   | Alert created                   |
+| `16001`   | Status changed                  |
+| `16002`   | Analyst verdict changed         |
+| `16003`   | Severity changed                |
+| `16004`   | Assignee changed                |
+| `16005`   | Mitigation activity             |
+| `16007`   | Note created                    |
+| `16008`   | Agentic investigation triggered |
+| `unknown` | Other (Unrecognised Types)      |
+
+Agentic Investigation Triggered means a management user or auto-investigation criteria triggered an agentic investigation for an alert. No change data is expected, so simplified output omits `change` and `changes`, as for Alert Created.
+
+Other (Unrecognised Types) matches alert-linked activities outside the named IDs above, including `16006`, which has no catalogue description. These events have `activityKind: "unknown"` and retain `activityTypeId` in simplified output. Selected IDs and Other combine with OR; Any applies no type filter. The SDL LOG filter uses `!(...)` to negate the OR of named IDs, while retaining the existing equality and OR style. The parenthesised negation follows [SentinelOne's syntax reference](https://github.com/Sentinel-One/ai-siem/blob/main/plugins/s1-secops-skills/skills/powerquery/references/syntax-and-operators.md#1-boolean-and-arithmetic-operators). This exact LOG query has mock coverage but has not been verified against a live console.
 
 Mitigation activity describes a recorded action and its supplied status. It does not mean remediation succeeded. In particular, `WORKFLOW` with `RUNNING` is not completion evidence. The trigger delivers once per activity ID within its retained checkpoint state; it does not monitor later revisions or wait for completion.
 

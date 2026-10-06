@@ -164,6 +164,9 @@ test('selection supports any, named types and custom-only numeric IDs', () => {
 	assert.equal(parseActivitySelection(['any'], '16006'), undefined);
 	assert.deepEqual(parseActivitySelection(['16007'], '16006, 16006'), ['16006', '16007']);
 	assert.deepEqual(parseActivitySelection([], '16006'), ['16006']);
+	assert.deepEqual(parseActivitySelection(['16008', 'unknown'], ''), ['16008', 'unknown']);
+	assert.deepEqual(parseActivitySelection(['16001', 'unknown'], ''), ['16001', 'unknown']);
+	assert.equal(parseActivitySelection(['any', 'unknown', '16008'], ''), undefined);
 	for (const args of [
 		[[], ''],
 		[['16006'], ''],

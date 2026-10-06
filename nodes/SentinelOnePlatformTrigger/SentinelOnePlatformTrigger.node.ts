@@ -73,6 +73,7 @@ const activityFields: INodeProperties[] = [
 		default: ['any'],
 		displayOptions: { show: { resource: ['alertActivity'] } },
 		options: [
+			{ name: 'Agentic Investigation Triggered', value: '16008' },
 			{ name: 'Alert Created', value: '16000' },
 			{ name: 'Analyst Verdict Changed', value: '16002' },
 			{
@@ -83,6 +84,7 @@ const activityFields: INodeProperties[] = [
 			{ name: 'Assignee Changed', value: '16004' },
 			{ name: 'Mitigation Activity', value: '16005' },
 			{ name: 'Note Created', value: '16007' },
+			{ name: 'Other (Unrecognised Types)', value: 'unknown' },
 			{ name: 'Severity Changed', value: '16003' },
 			{ name: 'Status Changed', value: '16001' },
 		],
@@ -432,7 +434,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 		group: ['trigger'],
 		version: 1,
 		subtitle:
-			'={{$parameter["resource"] === "alertActivity" ? "Alert activity: " + (($parameter["activityTypes"] || ["any"]).map(type => ({any: "Any", "16000": "Alert Created", "16001": "Status Changed", "16002": "Analyst Verdict Changed", "16003": "Severity Changed", "16004": "Assignee Changed", "16005": "Mitigation Activity", "16007": "Note Created"}[type] || type)).join(", ")) : "Alert: " + ({new: "New", newOrUpdated: "New or updated", updated: "Updated"}[$parameter["operation"]] || "New")}}',
+			'={{$parameter["resource"] === "alertActivity" ? "Alert activity: " + (($parameter["activityTypes"] || ["any"]).map(type => ({any: "Any", "16000": "Alert Created", "16001": "Status Changed", "16002": "Analyst Verdict Changed", "16003": "Severity Changed", "16004": "Assignee Changed", "16005": "Mitigation Activity", "16007": "Note Created", "16008": "Agentic Investigation Triggered", unknown: "Other (Unrecognised Types)"}[type] || type)).join(", ")) : "Alert: " + ({new: "New", newOrUpdated: "New or updated", updated: "Updated"}[$parameter["operation"]] || "New")}}',
 		description: 'Starts the workflow when selected SentinelOne Unified Alerts events are found',
 		defaults: {
 			name: 'SentinelOne Platform Trigger',

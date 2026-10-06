@@ -1080,8 +1080,13 @@ test('old activity state schema establishes a baseline rather than replaying sav
 });
 
 test('simplified activities return flat current context, optional changes and note text', async () => {
-	for (const activityType of ['16007', '16001', '16000']) {
-		const c = cfg({ simplifyOutput: true, includeRawActivity: true, includeCurrentAlert: true });
+	for (const activityType of ['16007', '16001', '16000', '16008', '16006', '19999']) {
+		const c = cfg({
+			simplifyOutput: true,
+			includeRawActivity: true,
+			includeCurrentAlert: true,
+			activityTypeIds: ['16007', '16001', '16000', '16008', 'unknown'],
+		});
 		const source = logFeed(feed());
 		Object.assign(source.data.matches[0].values, {
 			activity_type: activityType,
@@ -1105,13 +1110,19 @@ test('simplified activities return flat current context, optional changes and no
 			eventId: 'tenant.example/alert/old-alert/activity/activity',
 			eventType: 'alert.activity',
 			eventTime: new Date(NOW - 500).toISOString(),
-			activityKind: { 16007: 'noteCreated', 16001: 'statusChanged', 16000: 'alertCreated' }[
-				activityType
-			],
+			activityKind: {
+				16007: 'noteCreated',
+				16001: 'statusChanged',
+				16000: 'alertCreated',
+				16008: 'agenticInvestigationTriggered',
+				16006: 'unknown',
+				19999: 'unknown',
+			}[activityType],
 			...(activityType === '16001'
 				? { change: { field: 'status', from: 'NEW', to: 'RESOLVED' } }
 				: {}),
 			...(activityType === '16007' ? { note: 'Exact SDL note text' } : {}),
+			...(['16006', '19999'].includes(activityType) ? { activityTypeId: activityType } : {}),
 			actor: { id: null, name: 'Example Actor' },
 			alertId: 'old-alert',
 			alertName: 'Old alert',
@@ -1334,3 +1345,32 @@ test('activity lookup uses the supplied poll deadline without adding a second fa
 	);
 	assert.equal(result.items.length, 1);
 });
+
+for (const [selection, expectedTypes] of [
+	[['unknown'], ['16006', '19999']],
+	[
+		['16001', 'unknown'],
+		['16001', '16006', '19999'],
+	],
+	[['16008'], ['16008']],
+]) {
+	test(`activity selection ${JSON.stringify(selection)} retains only matching kinds`, async () => {
+		const c = cfg({ simplifyOutput: true, activityTypeIds: selection });
+		const source = logFeed(
+			feed(['16000', '16001', '16006', '16008', '19999'].map((type) => [type, NOW - 500, null])),
+		);
+		for (const match of source.data.matches) match.values.activity_type = match.values.activity_id;
+		const result = await pollAlertActivities(
+			async (r) =>
+				r.method === 'DELETE' ? {} : r.url.includes('/sdl/') ? source : page([alert()]),
+			c,
+			state(c),
+			'scheduled',
+			NOW,
+		);
+		assert.deepEqual(
+			result.items.map((item) => item.eventId.split('/').at(-1)),
+			expectedTypes,
+		);
+	});
+}

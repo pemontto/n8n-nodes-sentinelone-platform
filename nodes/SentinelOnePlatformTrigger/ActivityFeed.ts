@@ -46,6 +46,7 @@ const ACTIVITY_KINDS: Record<string, string> = {
 	'16004': 'assigneeChanged',
 	'16005': 'mitigationActivity',
 	'16007': 'noteCreated',
+	'16008': 'agenticInvestigationTriggered',
 };
 
 export interface ActivityFeedTiming {
@@ -405,7 +406,8 @@ async function readActivityFeedRun(
 		!Number.isFinite(new Date(endMs).getTime()) ||
 		accountIds.some((id) => typeof id !== 'string' || !id.trim() || id !== id.trim()) ||
 		(activityTypeIds !== undefined &&
-			(!activityTypeIds.length || activityTypeIds.some((id) => !/^\d+$/.test(id))))
+			(!activityTypeIds.length ||
+				activityTypeIds.some((id) => id !== 'unknown' && !/^\d+$/.test(id))))
 	)
 		throw failure('requires a valid half-open time window, account IDs and activity selection');
 
@@ -519,7 +521,15 @@ async function readActivityFeedRun(
 					filter:
 						ACTIVITY_FEED_LOG_FILTER +
 						(activityTypeIds
-							? ` (${activityTypeIds.map((id) => `activity_type='${id}'`).join(' OR ')})`
+							? ` (${activityTypeIds
+									.map((id) =>
+										id === 'unknown'
+											? `!(${Object.keys(ACTIVITY_KINDS)
+													.map((known) => `activity_type='${known}'`)
+													.join(' OR ')})`
+											: `activity_type='${id}'`,
+									)
+									.join(' OR ')})`
 							: ''),
 					limit: ACTIVITY_FEED_LIMIT,
 				},

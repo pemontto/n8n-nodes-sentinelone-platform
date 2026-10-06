@@ -80,7 +80,7 @@ export function parseExactValues(value: unknown): string[] {
 
 export function parseActivitySelection(value: unknown, custom: unknown): string[] | undefined {
 	if (!Array.isArray(value) || value.some((id) => typeof id !== 'string')) return invalid();
-	const known = ['16000', '16001', '16002', '16003', '16004', '16005', '16007'];
+	const known = ['16000', '16001', '16002', '16003', '16004', '16005', '16007', '16008', 'unknown'];
 
 	if (value.some((id) => id !== 'any' && !known.includes(id))) return invalid();
 	const extra = parseExactValues(custom);

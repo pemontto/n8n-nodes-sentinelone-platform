@@ -612,10 +612,23 @@ test('ActivityFeed decodes every known category and unknown alert-linked types w
 		'severityChanged',
 		'assigneeChanged',
 		'mitigationActivity',
+		'unknown',
 		'noteCreated',
+		'agenticInvestigationTriggered',
 		'unknown',
 	];
-	const ids = ['16000', '16001', '16002', '16003', '16004', '16005', '16007', '19999'];
+	const ids = [
+		'16000',
+		'16001',
+		'16002',
+		'16003',
+		'16004',
+		'16005',
+		'16006',
+		'16007',
+		'16008',
+		'19999',
+	];
 	const matches = ids.map((id) => {
 		const match = logMatch(id);
 		match.values.activity_type = id;
@@ -1601,3 +1614,36 @@ test('SDL raw activity is returned only with its explicit opt-in while normalize
 		assert.deepEqual(prefix.events[0].mitigation, { actionType: 'WORKFLOW' });
 	}
 });
+
+for (const [selection, typeFilter] of [
+	[['16008'], "(activity_type='16008')"],
+	[
+		['unknown'],
+		"(!(activity_type='16000' OR activity_type='16001' OR activity_type='16002' OR activity_type='16003' OR activity_type='16004' OR activity_type='16005' OR activity_type='16007' OR activity_type='16008'))",
+	],
+	[
+		['16001', 'unknown'],
+		"(activity_type='16001' OR !(activity_type='16000' OR activity_type='16001' OR activity_type='16002' OR activity_type='16003' OR activity_type='16004' OR activity_type='16005' OR activity_type='16007' OR activity_type='16008'))",
+	],
+	[undefined, ''],
+]) {
+	test(`ActivityFeed builds the exact LOG filter for ${JSON.stringify(selection)}`, async () => {
+		let filter;
+		await readActivityFeed(
+			async (request) => {
+				if (request.method === 'DELETE') return {};
+				filter = JSON.parse(request.body).log.filter;
+				return logResponse([]);
+			},
+			BASE,
+			START,
+			START + 1,
+			[],
+			{},
+			undefined,
+			false,
+			selection,
+		);
+		assert.equal(filter, ACTIVITY_FEED_LOG_FILTER + (typeFilter ? ' ' + typeFilter : ''));
+	});
+}

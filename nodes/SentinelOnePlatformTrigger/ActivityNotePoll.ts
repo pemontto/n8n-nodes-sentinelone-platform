@@ -528,7 +528,9 @@ export async function pollAlertActivities(
 	const exclusions = compileExclusions(config);
 
 	const selected = (event: ActivityFeedEvent) =>
-		(!config.activityTypeIds || config.activityTypeIds.includes(event.activityTypeId)) &&
+		(!config.activityTypeIds ||
+			config.activityTypeIds.includes(event.activityTypeId) ||
+			(config.activityTypeIds.includes('unknown') && event.activityKind === 'unknown')) &&
 		!matchesExclusion(exclusions.author, event.authorName) &&
 		!(config.excludeActorIds ?? []).includes(event.authorId ?? '') &&
 		matchesActivityConditions(event, config.activityConditions, config.conditionMatch);

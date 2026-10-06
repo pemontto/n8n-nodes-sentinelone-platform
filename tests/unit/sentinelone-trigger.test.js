@@ -1654,7 +1654,18 @@ test('activity builder exposes every shared enum and only recorded value control
 	assert.equal(types.description, undefined);
 	assert.deepEqual(
 		types.options.map((o) => o.value).sort(),
-		['any', '16000', '16001', '16002', '16003', '16004', '16005', '16007'].sort(),
+		[
+			'any',
+			'16000',
+			'16001',
+			'16002',
+			'16003',
+			'16004',
+			'16005',
+			'16007',
+			'16008',
+			'unknown',
+		].sort(),
 	);
 	const builder = properties.find((p) => p.name === 'activityConditions');
 	assert.equal(builder.type, 'fixedCollection');
@@ -1980,6 +1991,10 @@ test('subtitle describes selected activity operations and alert operations', () 
 	assert.equal(
 		evaluate({ resource: 'alertActivity', activityTypes: ['16001', '16007'] }),
 		'Alert activity: Status Changed, Note Created',
+	);
+	assert.equal(
+		evaluate({ resource: 'alertActivity', activityTypes: ['16008', 'unknown'] }),
+		'Alert activity: Agentic Investigation Triggered, Other (Unrecognised Types)',
 	);
 	assert.equal(evaluate({ resource: 'alert', operation: 'updated' }), 'Alert: Updated');
 });
