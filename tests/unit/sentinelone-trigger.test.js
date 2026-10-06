@@ -155,7 +155,11 @@ test('trigger polling preserves sanitised HTTP status and distinguishes authenti
 				resource: 'alertActivity',
 				operation: 'occurred',
 				activityTypes: ['16007'],
-				accountIds: ['account-1'],
+				scope: {
+					selection: {
+						accountIds: ['account-1'],
+					},
+				},
 			},
 			async (request) => {
 				if (request.url.includes('/sdl/v2/api/queries'))
@@ -293,9 +297,13 @@ test('empty scope selection discovers all accounts and the deepest selected scop
 	const baseParams = {
 		resource: 'alert',
 		operation: 'new',
-		accountIds: [],
-		siteIds: [],
-		groupIds: [],
+		scope: {
+			selection: {
+				accountIds: [],
+				siteIds: [],
+				groupIds: [],
+			},
+		},
 		options: {
 			simplifyOutput: false,
 		},
@@ -339,9 +347,13 @@ test('empty scope selection discovers all accounts and the deepest selected scop
 	const hierarchyContext = createNodeContext(
 		{
 			...baseParams,
-			accountIds: ['account-1'],
-			siteIds: ['site-1'],
-			groupIds: ['group-1'],
+			scope: {
+				selection: {
+					accountIds: ['account-1'],
+					siteIds: ['site-1'],
+					groupIds: ['group-1'],
+				},
+			},
 		},
 		async (options) => {
 			if (options.method === 'GET') {
@@ -380,9 +392,13 @@ test('poll rejects stale descendant scopes that do not belong to the selected pa
 		{
 			resource: 'alert',
 			operation: 'new',
-			accountIds: ['account-b'],
-			siteIds: ['site-from-account-a'],
-			groupIds: ['group-from-account-a'],
+			scope: {
+				selection: {
+					accountIds: ['account-b'],
+					siteIds: ['site-from-account-a'],
+					groupIds: ['group-from-account-a'],
+				},
+			},
 		},
 		async (options) => {
 			if (options.method !== 'GET') {
@@ -421,9 +437,13 @@ test('overlapping polls are coalesced before they can read or overwrite the same
 		{
 			resource: 'alert',
 			operation: 'new',
-			accountIds: [],
-			siteIds: [],
-			groupIds: [],
+			scope: {
+				selection: {
+					accountIds: [],
+					siteIds: [],
+					groupIds: [],
+				},
+			},
 		},
 		async (options) => {
 			if (options.method === 'GET') {
@@ -1091,38 +1111,59 @@ test('ActivityFeed access requirements belong in credential docs, not a trigger 
 	assert.match(documentation, /Alert Activity > Occurred trigger requires SDL query access/);
 });
 
-test('trigger scope controls come first and site and group loaders depend on their parents', () => {
+test('trigger Scope comes first and child loaders depend on their parents', () => {
 	const properties = new SentinelOnePlatformTrigger().description.properties;
-	const scopeFields = Object.fromEntries(
-		['accountIds', 'siteIds', 'groupIds'].map((name) => [
-			name,
-			properties.find((property) => property.name === name),
-		]),
-	);
-	assert.ok(scopeFields.accountIds);
-	assert.ok(scopeFields.siteIds);
-	assert.ok(scopeFields.groupIds);
-	assert.deepEqual(
-		properties.slice(0, 3).map((property) => property.name),
-		['accountIds', 'siteIds', 'groupIds'],
-	);
-	assert.deepEqual(scopeFields.siteIds.typeOptions.loadOptionsDependsOn, ['accountIds']);
-	assert.deepEqual(scopeFields.groupIds.typeOptions.loadOptionsDependsOn, [
-		'accountIds',
-		'siteIds',
+	assert.equal(properties[0].name, 'scope');
+	const scope = properties[0];
+	assert.equal(scope.type, 'fixedCollection');
+	assert.deepEqual(scope.default, {});
+	assert.equal(scope.placeholder, 'Add Scope');
+	assert.equal(scope.options.length, 1);
+	assert.equal(scope.options[0].name, 'selection');
+	const fields = Object.fromEntries(scope.options[0].values.map((field) => [field.name, field]));
+	assert.deepEqual(Object.keys(fields), ['accountIds', 'siteIds', 'groupIds']);
+	assert.equal(fields.accountIds.displayOptions, undefined);
+	assert.deepEqual(fields.siteIds.displayOptions.show, {
+		accountIds: [{ _cnd: { exists: true } }],
+	});
+	assert.deepEqual(fields.groupIds.displayOptions.show, { siteIds: [{ _cnd: { exists: true } }] });
+	assert.deepEqual(fields.siteIds.typeOptions.loadOptionsDependsOn, ['scope.selection.accountIds']);
+	assert.deepEqual(fields.groupIds.typeOptions.loadOptionsDependsOn, [
+		'scope.selection.accountIds',
+		'scope.selection.siteIds',
 	]);
-	for (const resource of ['alert', 'alertActivity']) {
-		assert.deepEqual(scopeFields.accountIds.displayOptions.show, {
-			resource: ['alert', 'alertActivity'],
-		});
-		assert.deepEqual(scopeFields.siteIds.displayOptions.show, {
-			resource: ['alert', 'alertActivity'],
-			accountIds: [{ _cnd: { exists: true } }],
-		});
-		assert.deepEqual(scopeFields.groupIds.displayOptions.show, {
-			resource: ['alert', 'alertActivity'],
-			siteIds: [{ _cnd: { exists: true } }],
-		});
+});
+
+test('n8n parameter filtering accepts empty and legacy trigger parameters', () => {
+	const { NodeHelpers } = require('n8n-workflow');
+	const node = new SentinelOnePlatformTrigger();
+	for (const parameters of [
+		{},
+		{ accountIds: ['account-1'], siteIds: ['site-1'], groupIds: ['group-1'] },
+	]) {
+		assert.doesNotThrow(() =>
+			NodeHelpers.getNodeParameters(
+				node.description.properties,
+				parameters,
+				true,
+				false,
+				{ typeVersion: 1 },
+				node.description,
+			),
+		);
+	}
+});
+
+test('nested saved blank scope IDs fail validation before requests', async () => {
+	for (const name of ['accountIds', 'siteIds', 'groupIds']) {
+		const context = createNodeContext(
+			{ resource: 'alert', operation: 'new', scope: { selection: { [name]: [''] } } },
+			async () => assert.fail('Must fail before requests'),
+		);
+		await assert.rejects(
+			new SentinelOnePlatformTrigger().poll.call(context),
+			/non-empty string or safe integer ID/,
+		);
 	}
 });
 
@@ -1452,8 +1493,12 @@ test('site-scoped node polls accessible sites without account-list permission', 
 		{
 			resource: 'alert',
 			operation: 'new',
-			accountIds: [],
-			siteIds: [],
+			scope: {
+				selection: {
+					accountIds: [],
+					siteIds: [],
+				},
+			},
 		},
 		request,
 	);
@@ -1465,8 +1510,12 @@ test('site-scoped node polls accessible sites without account-list permission', 
 		{
 			resource: 'alert',
 			operation: 'new',
-			accountIds: [],
-			siteIds: ['site-1'],
+			scope: {
+				selection: {
+					accountIds: [],
+					siteIds: ['site-1'],
+				},
+			},
 		},
 		request,
 	);
@@ -1638,7 +1687,11 @@ test('activity dispatch defaults to simplified output and ignores removed saved 
 			resource: 'alertActivity',
 			operation,
 			activityTypes: ['16007'],
-			accountIds: ['account-1'],
+			scope: {
+				selection: {
+					accountIds: ['account-1'],
+				},
+			},
 			options: {
 				...(simplifyOutput ? {} : { simplifyOutput: false }),
 				customActivityTypeIds: ['16006'],
@@ -1833,7 +1886,11 @@ test('an alert resource treats a retained activity operation as the alert defaul
 			{
 				resource: 'alert',
 				operation: savedOperation,
-				accountIds: ['account-1'],
+				scope: {
+					selection: {
+						accountIds: ['account-1'],
+					},
+				},
 			},
 			true,
 			false,
@@ -1861,27 +1918,15 @@ test('an alert resource treats a retained activity operation as the alert defaul
 });
 
 test('saved groups without sites fail before requests for both trigger resources', async () => {
-	const { NodeHelpers } = require('n8n-workflow');
-	const node = new SentinelOnePlatformTrigger();
 	for (const [resource, operation] of [
 		['alert', 'new'],
 		['alertActivity', 'occurred'],
 	]) {
-		const params = NodeHelpers.getNodeParameters(
-			node.description.properties,
-			{
-				resource,
-				operation,
-				accountIds: ['account-1'],
-				siteIds: [],
-				groupIds: ['group-1'],
-			},
-			true,
-			false,
-			{ typeVersion: 1 },
-			node.description,
-		);
-		assert.deepEqual(params.groupIds, ['group-1']);
+		const params = {
+			resource,
+			operation,
+			scope: { selection: { accountIds: ['account-1'], siteIds: [], groupIds: ['group-1'] } },
+		};
 		let requests = 0;
 		const context = createNodeContext(
 			params,
@@ -1911,79 +1956,19 @@ test('saved groups without sites fail before requests for both trigger resources
 	}
 });
 
-test('runtime parameter filtering preserves selected sites after accounts are cleared', async () => {
-	const { NodeHelpers } = require('n8n-workflow');
-	const node = new SentinelOnePlatformTrigger();
-	const params = NodeHelpers.getNodeParameters(
-		node.description.properties,
-		{
-			resource: 'alert',
-			operation: 'new',
-			accountIds: [],
-			siteIds: ['site-1'],
-			groupIds: [],
-		},
-		true,
-		false,
-		{ typeVersion: 1 },
-		node.description,
-	);
-	assert.deepEqual(params.siteIds, ['site-1']);
-	let scopedQuery = false;
-	const context = createNodeContext(
-		params,
-		async (request) => {
-			if (request.method === 'GET') {
-				assert.ok(request.url.endsWith('/sites'));
-				return { data: { sites: [{ id: 'site-1', name: 'Site One' }] } };
-			}
-			assert.deepEqual(request.body.variables.scope, { scopeType: 'SITE', scopeIds: ['site-1'] });
-			scopedQuery = true;
-			return alertResponse([]);
-		},
-		'trigger',
-	);
-	await node.poll.call(context);
-	assert.equal(scopedQuery, true);
-});
-
-test('runtime parameter filtering preserves blank scope IDs for validation', async () => {
-	const { NodeHelpers } = require('n8n-workflow');
-	const node = new SentinelOnePlatformTrigger();
-	const params = NodeHelpers.getNodeParameters(
-		node.description.properties,
-		{
-			resource: 'alert',
-			operation: 'new',
-			accountIds: [],
-			siteIds: [''],
-			groupIds: [],
-		},
-		true,
-		false,
-		{ typeVersion: 1 },
-		node.description,
-	);
-	assert.deepEqual(params.siteIds, ['']);
-	const context = createNodeContext(
-		params,
-		async () => {
-			assert.fail('Blank scope IDs must fail before requests');
-		},
-		'trigger',
-	);
-	await assert.rejects(node.poll.call(context), /non-empty string or safe integer ID/);
-});
-
 test('activity trigger retains valid group selections and resolves their account', async () => {
 	let queries = 0;
 	const context = createNodeContext(
 		{
 			resource: 'alertActivity',
 			operation: 'occurred',
-			accountIds: ['account-1'],
-			siteIds: ['site-1'],
-			groupIds: ['group-1'],
+			scope: {
+				selection: {
+					accountIds: ['account-1'],
+					siteIds: ['site-1'],
+					groupIds: ['group-1'],
+				},
+			},
 		},
 		async (request) => {
 			if (request.method === 'DELETE') return {};
@@ -2035,7 +2020,7 @@ test('Match Conditions is always visible for activity immediately after recorded
 	}
 	assert.equal(NodeHelpers.displayParameter({ resource: 'alert' }, control, null, null), false);
 });
-test('top-level trigger scopes keep the group guard', async () => {
+test('nested trigger scopes keep the group guard', async () => {
 	for (const [resource, operation] of [
 		['alert', 'new'],
 		['alertActivity', 'occurred'],
@@ -2044,7 +2029,11 @@ test('top-level trigger scopes keep the group guard', async () => {
 			{
 				resource,
 				operation,
-				groupIds: ['new-group'],
+				scope: {
+					selection: {
+						groupIds: ['new-group'],
+					},
+				},
 			},
 			async () => assert.fail('Must fail before requests'),
 		);
@@ -2189,7 +2178,11 @@ test('SDL error routing survives the node authenticated request wrapper on 404 a
 		{
 			resource: 'alertActivity',
 			activityTypes: ['16007'],
-			accountIds: ['account-1'],
+			scope: {
+				selection: {
+					accountIds: ['account-1'],
+				},
+			},
 		},
 		request,
 	);

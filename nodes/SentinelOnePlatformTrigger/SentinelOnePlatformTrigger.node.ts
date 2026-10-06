@@ -450,41 +450,52 @@ export class SentinelOnePlatformTrigger implements INodeType {
 		],
 		properties: [
 			// Scope comes first so it sits straight after Credential and Poll Times.
-			...managementScopeFields().map(
-				(field): INodeProperties => ({
-					...field,
-					displayName:
-						field.name === 'accountIds'
-							? 'Accounts'
-							: field.name === 'siteIds'
-								? 'Sites'
-								: 'Groups',
-					displayOptions: {
-						show: {
-							resource: ['alert', 'alertActivity'],
-							...(field.name === 'siteIds' ? { accountIds: [{ _cnd: { exists: true } }] } : {}),
-							...(field.name === 'groupIds' ? { siteIds: [{ _cnd: { exists: true } }] } : {}),
-						},
+			{
+				displayName: 'Scope',
+				name: 'scope',
+				type: 'fixedCollection',
+				placeholder: 'Add Scope',
+				// Must stay empty: a pre-filled default makes the n8n editor fail to open the node.
+				default: {},
+				description: 'Limit to accounts, sites or groups. Leave empty for everything the credential can see.',
+				options: [
+					{
+						displayName: 'Selection',
+						name: 'selection',
+						values: managementScopeFields().map(
+							(field): INodeProperties => ({
+								...field,
+								displayName:
+									field.name === 'accountIds'
+										? 'Accounts'
+										: field.name === 'siteIds'
+											? 'Sites'
+											: 'Groups',
+								typeOptions: {
+									...field.typeOptions,
+									...(field.name === 'siteIds'
+										? { loadOptionsDependsOn: ['scope.selection.accountIds'] }
+										: {}),
+									...(field.name === 'groupIds'
+										? {
+												loadOptionsDependsOn: [
+													'scope.selection.accountIds',
+													'scope.selection.siteIds',
+												],
+											}
+										: {}),
+								},
+								...(field.name === 'siteIds'
+									? { displayOptions: { show: { accountIds: [{ _cnd: { exists: true } }] } } }
+									: {}),
+								...(field.name === 'groupIds'
+									? { displayOptions: { show: { siteIds: [{ _cnd: { exists: true } }] } } }
+									: {}),
+							}),
+						),
 					},
-				}),
-			),
-			// n8n removes hidden controls before polling. Retain saved child selections for validation.
-			...(['siteIds', 'groupIds'] as const).map(
-				(name): INodeProperties => ({
-					displayName: name === 'siteIds' ? 'Sites' : 'Groups',
-					name,
-					type: 'hidden',
-					default: [],
-					displayOptions: {
-						show: {
-							resource: ['alert', 'alertActivity'],
-						},
-						hide: {
-							[name === 'siteIds' ? 'accountIds' : 'siteIds']: [{ _cnd: { exists: true } }],
-						},
-					},
-				}),
-			),
+				],
+			},
 			{
 				...debugSetting,
 				description:

@@ -384,13 +384,18 @@ export function readManagementScopeIds(
 			? (context as ILoadOptionsFunctions).getNodeParameter(key, fallback)
 			: (context as IExecuteFunctions).getNodeParameter(key, itemIndex, fallback);
 
-	if (topLevel) return scopeIds(withoutPlaceholders(get(name, [])));
+	// The trigger keeps Scope as its own section; the action node keeps it under Options.
+	let scope: unknown;
 
-	const configuration = get('options', {});
+	if (topLevel) {
+		scope = get('scope', {});
+	} else {
+		const configuration = get('options', {});
 
-	if (!configuration || typeof configuration !== 'object' || Array.isArray(configuration))
-		throw new Error('Options must be an object.');
-	const scope = (configuration as IDataObject).scope;
+		if (!configuration || typeof configuration !== 'object' || Array.isArray(configuration))
+			throw new Error('Options must be an object.');
+		scope = (configuration as IDataObject).scope;
+	}
 
 	if (scope === undefined) return [];
 
