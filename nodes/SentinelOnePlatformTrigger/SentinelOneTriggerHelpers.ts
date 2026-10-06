@@ -3,6 +3,7 @@ import type { ScopeType } from '../shared/Scopes';
 import { alertFieldSelection, additionalAlertOutput } from '../shared/AlertFields';
 import type { ActivityCondition } from './ActivityConditions';
 import { PollBudgetError } from '../shared/transport/request';
+import { isRetryableReadError, responseStatus, retryAfterMs } from '../shared/transport/retry';
 
 export type TriggerEvent = 'alert.new' | 'alert.updated' | 'alert.activity';
 
@@ -59,13 +60,15 @@ export interface AlertCursor extends IDataObject {
 	ids: string[];
 	resumeMs?: number;
 	resumeIds?: string[];
+	/** Lower edge to replay once an interrupted New range completes. */
+	resumeLowerEdge?: number;
 }
 
 export interface TriggerState extends IDataObject {
 	version?: number;
 	configFingerprint?: string;
 	initialized?: boolean;
-	/** The earliest cursor, kept for diagnostics. */
+	/** Completed activity window; alert streams use their own cursors. */
 	checkpointMs?: number;
 	/** Poll start of the first scheduled poll; alerts created or updated before it are recorded, never emitted. */
 	activationMs?: number;
@@ -535,7 +538,7 @@ async function requestAlertPage(
 	return { nodes, kept, pageInfo: connection.pageInfo };
 }
 
-/** Newest-first read for manual previews: stops at the result limit and splits dense ranges at the page cap. */
+/** Newest-first read for manual previews, bounded by the result and page limits. */
 async function fetchAlertsNewestFirst(
 	request: AuthenticatedRequest,
 	config: TriggerConfig,
@@ -543,7 +546,6 @@ async function fetchAlertsNewestFirst(
 	start: number,
 	end: number,
 	maxItems: number,
-	splitDepth = 0,
 	excludeUpdatedIds?: ReadonlySet<string>,
 ): Promise<Alert[]> {
 	const alerts: Alert[] = [];
@@ -590,48 +592,8 @@ async function fetchAlertsNewestFirst(
 		after = nextCursor;
 	}
 
-	const rangeWidth = end - start;
-
-	if (splitDepth < 48 && rangeWidth >= 1) {
-		const midpoint = Math.floor(start + rangeWidth / 2);
-
-		if (midpoint >= start && midpoint < end) {
-			debugLog(config, 'Splitting dense alert time range', {
-				fieldId,
-				splitDepth,
-				rangeWidthMs: rangeWidth,
-			});
-
-			const newer = await fetchAlertsNewestFirst(
-				request,
-				config,
-				fieldId,
-				midpoint + 1,
-				end,
-				maxItems,
-				splitDepth + 1,
-				excludeUpdatedIds,
-			);
-
-			if (newer.length >= maxItems) return newer.slice(0, maxItems);
-
-			const older = await fetchAlertsNewestFirst(
-				request,
-				config,
-				fieldId,
-				start,
-				midpoint,
-				maxItems - newer.length,
-				splitDepth + 1,
-				excludeUpdatedIds,
-			);
-
-			return [...newer, ...older];
-		}
-	}
-
 	throw new Error(
-		`The ${fieldId} alert query exceeded the configured page limit inside an indivisible time range. Narrow the scope or filters; state was not advanced.`,
+		`The ${fieldId} alert query exceeded the configured page limit. Narrow the scope or filters; state was not advanced.`,
 	);
 }
 
@@ -688,7 +650,6 @@ async function fetchManualAlertStreams(
 						0,
 						end,
 						maxItems,
-						0,
 						newIds,
 					),
 			)
@@ -803,6 +764,20 @@ async function readAlertsOldestFirst(
 			);
 		} catch (error) {
 			if (error instanceof PollBudgetError) return finish(false, error);
+
+			if (
+				responseStatus(error) !== null &&
+				isRetryableReadError(error) &&
+				Date.now() + Math.max(1000, retryAfterMs(error)) >= (config.pollDeadlineMs ?? Infinity)
+			)
+				return finish(
+					false,
+					error instanceof Error
+						? error
+						: Object.assign(new Error('The retry no longer fits the poll time budget.'), {
+								cause: error,
+							}),
+				);
 			// The trigger boundary wraps these failures with its node context.
 			// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 			throw error;
@@ -915,8 +890,14 @@ function alertOutput(
 			eventId,
 			eventType,
 			eventTime: eventTimestamp,
-			scope,
-			...additionalAlertOutput(config.additionalAlertFields, alert),
+			accountName: asRecord(scope.account)?.name ?? null,
+			siteName: asRecord(scope.site)?.name ?? null,
+			groupName: asRecord(scope.group)?.name ?? null,
+			...Object.fromEntries(
+				Object.entries(additionalAlertOutput(config.additionalAlertFields, alert)).map(
+					([key, value]) => [`alert${key[0].toUpperCase()}${key.slice(1)}`, value],
+				),
+			),
 			alertId: alert.id,
 			alertExternalId: alert.externalId ?? null,
 			alertName: alert.name ?? null,
@@ -1069,7 +1050,10 @@ function readCursor(value: unknown, key: string): AlertCursor | undefined {
 		!Number.isFinite(cursor.throughMs) ||
 		!Array.isArray(cursor.ids) ||
 		cursor.ids.some((id) => typeof id !== 'string') ||
-		(cursor.resumeMs !== undefined && typeof cursor.resumeMs !== 'number') ||
+		(cursor.resumeMs !== undefined &&
+			(typeof cursor.resumeMs !== 'number' || !Number.isFinite(cursor.resumeMs))) ||
+		(cursor.resumeLowerEdge !== undefined &&
+			(typeof cursor.resumeLowerEdge !== 'number' || !Number.isFinite(cursor.resumeLowerEdge))) ||
 		(cursor.resumeIds !== undefined &&
 			(!Array.isArray(cursor.resumeIds) || cursor.resumeIds.some((id) => typeof id !== 'string')))
 	)
@@ -1080,6 +1064,9 @@ function readCursor(value: unknown, key: string): AlertCursor | undefined {
 		ids: cursor.ids as string[],
 		...(typeof cursor.resumeMs === 'number' ? { resumeMs: cursor.resumeMs } : {}),
 		...(Array.isArray(cursor.resumeIds) ? { resumeIds: cursor.resumeIds as string[] } : {}),
+		...(typeof cursor.resumeLowerEdge === 'number'
+			? { resumeLowerEdge: cursor.resumeLowerEdge }
+			: {}),
 	};
 }
 
@@ -1136,6 +1123,7 @@ function cursorPositionChanged(
 		next.ids.length !== previous.ids.length ||
 		next.ids.some((id, index) => id !== previous.ids[index]) ||
 		next.resumeMs !== previous.resumeMs ||
+		next.resumeLowerEdge !== previous.resumeLowerEdge ||
 		next.resumeIds?.length !== previous.resumeIds?.length ||
 		!!next.resumeIds?.some((id, index) => id !== previous.resumeIds?.[index])
 	);
@@ -1152,10 +1140,6 @@ async function readUnit(
 	const position = cursor?.resumeMs ?? cursor?.throughMs;
 	const ids = cursor?.resumeMs !== undefined ? (cursor.resumeIds ?? []) : (cursor?.ids ?? []);
 
-	if (ids.length > MAX_RESUME_EXCLUSION_IDS)
-		throw new Error(
-			`The ${unit.fieldId} stream in scope batch ${unit.batchNumber} has more than ${MAX_RESUME_EXCLUSION_IDS} cursor IDs at ${new Date(position!).toISOString()}. Narrow the scope or filters; state was not advanced.`,
-		);
 	const scopedConfig = { ...config, scopeIds: unit.scopeIds };
 
 	if (
@@ -1241,7 +1225,6 @@ export async function pollSentinelOne(
 
 	if (config.events.some((event) => event !== 'alert.new' && event !== 'alert.updated'))
 		throw new Error('Activity events must use ActivityFeed polling.');
-	config = { ...config, pollDeadlineMs: config.pollDeadlineMs ?? Date.now() + 300_000 };
 	compileExclusions(config);
 	alertFieldSelection(config.additionalAlertFields);
 	const fingerprint = fingerprintConfig(config);
@@ -1344,7 +1327,11 @@ export async function pollSentinelOne(
 				(saved.length ? { throughMs: Math.min(...saved), ids: [] } : undefined);
 
 			const start = previous
-				? (previous.resumeMs ?? Math.max(0, previous.throughMs - overlapMs))
+				? (previous.resumeMs ??
+					Math.max(
+						0,
+						Math.min(previous.resumeLowerEdge ?? Infinity, previous.throughMs - overlapMs),
+					))
 				: Math.max(0, activationMs - overlapMs);
 
 			units.push({ key, fieldId, scopeIds, batchNumber: batchIndex + 1, previous, start });
@@ -1398,7 +1385,7 @@ export async function pollSentinelOne(
 							throughMs: Math.max(previous?.throughMs ?? read.throughMs, read.throughMs),
 							ids: previous?.ids ?? [],
 							resumeMs: read.throughMs + 1,
-							resumeIds: [],
+							resumeIds: mergedIdsAt(read.throughMs + 1),
 						}
 					: previous;
 		else if (read) {
@@ -1409,6 +1396,41 @@ export async function pollSentinelOne(
 				resumeMs: read.throughMs,
 				resumeIds: mergedIdsAt(read.throughMs),
 			};
+		}
+
+		if (unit.fieldId === 'createdAt' && unit.next && read) {
+			// Replay the original lower edge once; a capped replay resumes without starting another replay.
+			const replayStarting =
+				previous?.resumeMs === undefined && previous?.resumeLowerEdge !== undefined;
+
+			const lowerEdge =
+				previous?.resumeLowerEdge ?? (previous?.resumeMs === undefined ? unit.start : undefined);
+
+			if (!read.complete && !replayStarting && lowerEdge !== undefined)
+				unit.next.resumeLowerEdge = lowerEdge;
+			else if (
+				read.complete &&
+				previous?.resumeMs !== undefined &&
+				previous.resumeLowerEdge !== undefined
+			)
+				unit.next.resumeLowerEdge = previous.resumeLowerEdge;
+		}
+
+		if (read?.stopped) {
+			const position =
+				unit.next?.resumeMs ?? previous?.resumeMs ?? previous?.throughMs ?? unit.start;
+
+			warnLog(
+				config,
+				`The ${unit.fieldId} stream in scope batch ${unit.batchNumber} stopped at ${new Date(position).toISOString()}: ${read.stopped.message}`,
+				{
+					stream: unit.fieldId,
+					scopeBatch: unit.batchNumber,
+					position: new Date(position).toISOString(),
+					rowCount: read.fetched.length,
+					httpStatus: responseStatus(read.stopped),
+				},
+			);
 		}
 
 		if (
@@ -1455,6 +1477,11 @@ export async function pollSentinelOne(
 		outputItems.length === 0 &&
 		!units.some((unit) => cursorPositionChanged(unit.previous, unit.next))
 	) {
+		const failure = units.find((candidate) => responseStatus(candidate.read?.stopped) !== null)
+			?.read?.stopped;
+		// A transient stop without poll-wide progress remains the original HTTP failure.
+
+		if (failure) throw failure;
 		const unit = units.find((candidate) => candidate.read?.stopped) ?? units[0];
 		const position = unit.previous?.resumeMs ?? unit.previous?.throughMs ?? unit.start;
 		throw new Error(
@@ -1476,7 +1503,6 @@ export async function pollSentinelOne(
 			),
 		);
 
-	const checkpointMs = Math.min(slowest('createdAt'), slowest('updatedAt'));
 	// Recent identities retire when the slowest cursor leaves their overlap; the cache cap can evict older keys first.
 	const currentIds = new Set(currentAlertIds.map(seenId));
 
@@ -1484,7 +1510,14 @@ export async function pollSentinelOne(
 		previousSeenIds.filter((entry) => !currentIds.has(seenId(entry))),
 		currentAlertIds,
 		seenTime,
-		slowest('createdAt') - overlapMs,
+		Math.min(
+			slowest('createdAt') - overlapMs,
+			...units.flatMap((unit) =>
+				unit.fieldId === 'createdAt' && unit.next
+					? [unit.next.resumeLowerEdge ?? Infinity, unit.next.resumeMs ?? Infinity]
+					: [],
+			),
+		),
 		MAX_SEEN_ALERT_IDS,
 		'alert IDs',
 		config,
@@ -1503,7 +1536,6 @@ export async function pollSentinelOne(
 	debugLog(config, 'Completed scheduled SentinelOne poll', {
 		outputCount: outputItems.length,
 		checkpointAdvanced: true,
-		checkpointMs,
 		budgetStopped: units.some((unit) => unit.read?.stopped),
 		seenAlertIdCount: seenAlertIds.length,
 		seenAlertVersionCount: seenAlertVersions.length,
@@ -1515,7 +1547,6 @@ export async function pollSentinelOne(
 			version: TRIGGER_STATE_VERSION,
 			configFingerprint: fingerprint,
 			initialized: true,
-			checkpointMs,
 			activationMs,
 			alertCursors,
 			seenAlertIds,

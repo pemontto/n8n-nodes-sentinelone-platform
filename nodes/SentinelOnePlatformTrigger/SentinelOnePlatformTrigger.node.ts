@@ -40,6 +40,7 @@ import {
 import { DEFAULT_ADDITIONAL_ALERT_FIELDS } from '../shared/AlertFields';
 import { activityAccountIds } from '../shared/Scopes';
 import { pollAlertActivities } from './ActivityNotePoll';
+import { ACTIVITY_FEED_ROUTING_HEADER } from './ActivityFeed';
 import {
 	parseActivitySelection,
 	parseExactValues,
@@ -49,7 +50,12 @@ import {
 } from './ActivityConditions';
 import { debugSetting, logGraphqlRequest, logGraphqlResult } from '../shared/Debug';
 import { PollBudgetError, requestWithRetry } from '../shared/transport/request';
-import { responseStatus, isRetryableReadError, retryAfterMs } from '../shared/transport/retry';
+import {
+	responseHeader,
+	responseStatus,
+	isRetryableReadError,
+	retryAfterMs,
+} from '../shared/transport/retry';
 
 const simplifyOption: INodeProperties = {
 	displayName: 'Simplify',
@@ -208,7 +214,15 @@ const activityFields: INodeProperties[] = [
 
 const activePollKeys = new Set<string>();
 
-const pendingBaselines = new Map<string, TriggerState>();
+interface PendingBaseline {
+	fingerprint: string;
+	state: TriggerState;
+	updatedAtMs: number;
+}
+
+const pendingBaselines = new Map<string, PendingBaseline>();
+
+const pendingBaselineTtlMs = 60 * 60 * 1000;
 
 /** Declared by n8n 2.38.0 and later. */
 type PollBudgetFunctions = { getPollBudgetMs?: () => number };
@@ -336,10 +350,15 @@ function authenticatedRequest(
 				},
 			);
 
+			const routingTag = responseHeader(error, ACTIVITY_FEED_ROUTING_HEADER);
+
 			throw Object.assign(apiError, {
+				...(routingTag !== undefined
+					? { headers: { [ACTIVITY_FEED_ROUTING_HEADER]: routingTag } }
+					: {}),
 				statusCode: status,
 				retryable: isRetryableReadError(error),
-				retryAfterMs: retryAfterMs(error),
+				retryAfterMs: Math.max(retryAfterMs(error), result.retryDelayMs ?? 0),
 			});
 		});
 }
@@ -860,19 +879,28 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				};
 
 				const fingerprint = `${fingerprintConfig(config)}${resource === 'alertActivity' ? ':sdl-activities-v1' : ''}`;
-				const baselineKey = `${pollKey}:${fingerprint}`;
 				const scheduled = this.getMode() !== 'manual';
+				const pendingBaseline = pendingBaselines.get(pollKey);
+				const now = Date.now();
+
+				if (
+					pendingBaseline &&
+					(pendingBaseline.fingerprint !== fingerprint ||
+						now - pendingBaseline.updatedAtMs > pendingBaselineTtlMs)
+				) {
+					pendingBaselines.delete(pollKey);
+				}
 
 				const committed =
 					previousState.version === TRIGGER_STATE_VERSION &&
 					previousState.initialized === true &&
 					previousState.configFingerprint === fingerprint;
 
-				if (scheduled && committed) pendingBaselines.delete(baselineKey);
+				if (scheduled && committed) pendingBaselines.delete(pollKey);
 
 				const state =
 					scheduled && !committed
-						? (pendingBaselines.get(baselineKey) ?? previousState)
+						? (pendingBaselines.get(pollKey)?.state ?? previousState)
 						: previousState;
 
 				const result = await (resource === 'alertActivity' ? pollAlertActivities : pollSentinelOne)(
@@ -886,8 +914,15 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				if (result.nextState) {
 					staticData.sentinelOneTrigger = result.nextState;
 
-					// Activation and empty polls return null, so n8n may discard their static data.
-					if (scheduled && !committed) pendingBaselines.set(baselineKey, result.nextState);
+					// n8n may discard static data when a scheduled poll returns no items.
+					// Keep only that non-emitting state until it is committed or expires.
+					if (scheduled && !committed && result.items.length === 0) {
+						pendingBaselines.set(pollKey, {
+							fingerprint,
+							state: result.nextState,
+							updatedAtMs: now,
+						});
+					}
 				}
 
 				if (result.items.length === 0) return null;

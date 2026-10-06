@@ -332,12 +332,32 @@ function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEv
 	};
 
 	if (config.simplifyOutput) {
-		return {
+		const fields: Record<string, string> = {
+			'16001': 'status',
+			'16002': 'analystVerdict',
+			'16003': 'severity',
+			'16004': 'assigneeEmail',
+		};
+
+		const field = fields[event.activityTypeId];
+		const change = event.changes.find((entry) => entry.field === field);
+
+		const simplified: IDataObject = {
 			eventId: item.eventId,
 			eventType: item.eventType,
 			eventTime: item.eventTime,
 			activityKind: event.activityKind,
-			...(event.changes.length ? { changes: event.changes } : {}),
+			...(field && event.changes.length
+				? {
+						change: {
+							field: field === 'assigneeEmail' ? 'assignee' : field,
+							...(change && 'oldValue' in change ? { from: change.oldValue } : {}),
+							...(change && 'newValue' in change ? { to: change.newValue } : {}),
+						},
+					}
+				: event.changes.length
+					? { changes: event.changes }
+					: {}),
 			...(event.activityKind === 'noteCreated' && typeof event.noteText === 'string'
 				? { note: event.noteText }
 				: {}),
@@ -351,6 +371,17 @@ function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEv
 			siteName: record(scope.site)?.name ?? null,
 			groupName: record(scope.group)?.name ?? null,
 		};
+
+		if (event.mitigation !== undefined) simplified.mitigation = event.mitigation;
+
+		if (config.includeRawActivity) {
+			if (!event.rawActivity) throw fail('omitted the full activity record');
+			simplified.rawActivity = event.rawActivity;
+		}
+
+		if (config.includeCurrentAlert) simplified.currentAlert = alert;
+
+		return simplified;
 	}
 
 	if (event.noteText !== undefined) item.note = { text: event.noteText };
@@ -406,6 +437,23 @@ function warnDropped(config: TriggerConfig, count: number): void {
 	}
 }
 
+function warnNoProgress(config: TriggerConfig, position: number): void {
+	try {
+		config.warnLog?.(
+			`The activity stream in scope batch 1 stopped at ${new Date(position).toISOString()} without completing a forward window.`,
+			{
+				scopeBatch: 1,
+				stream: 'activity',
+				scopeType: config.scopeType,
+				scopeIds: config.scopeIds,
+				position: new Date(position).toISOString(),
+			},
+		);
+	} catch {
+		// Logging must not change delivery or checkpoint state.
+	}
+}
+
 export async function pollAlertActivities(
 	request: AuthenticatedRequest,
 	config: TriggerConfig & { activityAccountIds?: string[] },
@@ -415,7 +463,7 @@ export async function pollAlertActivities(
 	timing?: ActivityFeedTiming,
 ): Promise<PollResult> {
 	const now = timing?.now ?? Date.now;
-	const deadline = config.pollDeadlineMs ?? now() + 300_000;
+	const deadline = config.pollDeadlineMs ?? Infinity;
 	const originalRequest = request;
 	request = async (options, readerDeadline) => {
 		const remaining = deadline - now();
@@ -475,7 +523,7 @@ export async function pollAlertActivities(
 			PREVIEW_START_MS,
 			pollStartMs,
 			accountIds,
-			timing,
+			{ ...timing, warnLog: config.warnLog },
 			async (events) => {
 				const candidates = events.filter(selected);
 
@@ -528,13 +576,18 @@ export async function pollAlertActivities(
 	// The feed stops early enough to leave the lookup its reserve; the transport enforces the budget itself.
 	const feedTiming: ActivityFeedTiming = {
 		...timing,
-		deadlineMs: Math.max(
-			1,
-			Math.min(
-				timing?.deadlineMs ?? 300_000,
-				Math.floor(deadline - ALERT_LOOKUP_RESERVE_MS - now()),
-			),
-		),
+		warnLog: config.warnLog,
+		...(config.pollDeadlineMs !== undefined
+			? {
+					deadlineMs: Math.max(
+						1,
+						Math.min(
+							timing?.deadlineMs ?? Infinity,
+							Math.floor(deadline - ALERT_LOOKUP_RESERVE_MS - now()),
+						),
+					),
+				}
+			: {}),
 	};
 
 	// A baseline reads through the same resumable prefix, so a budget stop saves its progress and the activation time instead of restarting activation.
@@ -550,11 +603,13 @@ export async function pollAlertActivities(
 			timing: feedTiming,
 			checkpointMs: baseline ? startMs : Number(checkpoint),
 			activityTypeIds: config.activityTypeIds,
+			includeRawActivity: config.includeRawActivity,
 		});
 	} catch (error) {
 		if (error instanceof ActivityFeedBudgetError) {
 			const position = baseline ? startMs : Number(checkpoint);
 			const budget = error.kind === 'event-count' ? 'activity event budget' : 'query budget';
+			warnNoProgress(config, position);
 			throw fail(
 				`activity stream is stuck at checkpoint ${new Date(position).toISOString()} because its ${budget} ended before a forward window completed`,
 			);
@@ -570,6 +625,7 @@ export async function pollAlertActivities(
 
 	if (end <= (baseline ? startMs : Number(checkpoint))) {
 		const position = baseline ? startMs : Number(checkpoint);
+		warnNoProgress(config, position);
 		throw fail(
 			`activity stream is stuck at checkpoint ${new Date(position).toISOString()} and did not complete a forward window within the query budget`,
 		);
@@ -602,10 +658,15 @@ export async function pollAlertActivities(
 			activities = activities.filter(before);
 			candidates = candidates.filter(before);
 
-			if (end <= Number(checkpoint) && candidates.every((event) => previous.has(event.activityId)))
+			if (
+				end <= Number(checkpoint) &&
+				candidates.every((event) => previous.has(event.activityId))
+			) {
+				warnNoProgress(config, Number(checkpoint));
 				throw fail(
 					`activity stream is stuck at checkpoint ${new Date(Number(checkpoint)).toISOString()} because the n8n poll time budget ended before the current alert lookup completed a forward window`,
 				);
+			}
 		}
 
 		dropped = expiredMissingActivities(config, candidates, lookup, pollStartMs);

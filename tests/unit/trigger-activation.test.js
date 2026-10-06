@@ -6,7 +6,7 @@ const {
 
 const START = Date.parse('2026-10-01T12:00:00Z');
 
-function context(id, rows, { budget, operation = 'new' } = {}) {
+function context(id, rows, { budget, operation = 'new', nodeId = 'node-1' } = {}) {
 	const staticData = {};
 	const requests = [];
 	const warnings = [];
@@ -25,7 +25,7 @@ function context(id, rows, { budget, operation = 'new' } = {}) {
 		getCredentials: async () => ({ baseUrl: 'https://console.example' }),
 		getMode: () => 'scheduled',
 		getNode: () => ({
-			id: 'node-1',
+			id: nodeId,
 			name: 'Trigger',
 			credentials: { sentinelOnePlatformApi: { id: 'credential-1' } },
 		}),
@@ -112,15 +112,64 @@ test('activation baseline survives discarded static data and ends when committed
 	assert.equal(fresh.staticData.sentinelOneTrigger.activationMs, START + 180_000);
 });
 
-test('activation cache is isolated by workflow and configuration', async () => {
+test('activation cache is keyed by workflow and node and replaces changed configurations', async () => {
 	const trigger = new SentinelOnePlatformTrigger();
 	await at(START, () => trigger.poll.call(context('activation-config', [])));
 	const changed = context('activation-config', [], { operation: 'updated' });
 	await at(START + 60_000, () => trigger.poll.call(changed));
 	assert.equal(changed.staticData.sentinelOneTrigger.activationMs, START + 60_000);
-	const other = context('activation-other', []);
-	await at(START + 120_000, () => trigger.poll.call(other));
-	assert.equal(other.staticData.sentinelOneTrigger.activationMs, START + 120_000);
+
+	// Returning to the original fingerprint must not recover its older activation state.
+	const returned = context('activation-config', []);
+	await at(START + 120_000, () => trigger.poll.call(returned));
+	assert.equal(returned.staticData.sentinelOneTrigger.activationMs, START + 120_000);
+
+	const otherWorkflow = context('activation-other-workflow', []);
+	await at(START + 180_000, () => trigger.poll.call(otherWorkflow));
+	assert.equal(otherWorkflow.staticData.sentinelOneTrigger.activationMs, START + 180_000);
+	const otherNode = context('activation-config', [], { nodeId: 'node-2' });
+	await at(START + 240_000, () => trigger.poll.call(otherNode));
+	assert.equal(otherNode.staticData.sentinelOneTrigger.activationMs, START + 240_000);
+});
+
+test('activation baseline expires after one hour', async () => {
+	const trigger = new SentinelOnePlatformTrigger();
+	await at(START, () => trigger.poll.call(context('activation-expiry', [])));
+	const expired = context('activation-expiry', []);
+	await at(START + 3_600_001, () => trigger.poll.call(expired));
+	assert.equal(expired.staticData.sentinelOneTrigger.activationMs, START + 3_600_001);
+});
+
+test('empty scheduled polls refresh the pending activation baseline', async () => {
+	const trigger = new SentinelOnePlatformTrigger();
+	await at(START, () => trigger.poll.call(context('activation-refresh', [])));
+	await at(START + 59 * 60_000, () => trigger.poll.call(context('activation-refresh', [])));
+	const withinRefreshedTtl = context('activation-refresh', []);
+	await at(START + 3_600_001, () => trigger.poll.call(withinRefreshedTtl));
+	assert.equal(withinRefreshedTtl.staticData.sentinelOneTrigger.activationMs, START);
+});
+
+test('emitting polls do not refresh the pending activation baseline', async () => {
+	const trigger = new SentinelOnePlatformTrigger();
+	await at(START, () => trigger.poll.call(context('activation-emission', [])));
+	const rows = [row('emitted-alert', START + 20_000)];
+	const emitted = context('activation-emission', rows);
+	const output = await at(START + 59 * 60_000, () => trigger.poll.call(emitted));
+	assert.equal(output[0][0].json.eventId, 'console.example/alert/emitted-alert/new');
+	assert.equal(emitted.staticData.sentinelOneTrigger.activationMs, START);
+	const discarded = context('activation-emission', rows);
+	const repeated = await at(START + 59 * 60_000 + 1000, () => trigger.poll.call(discarded));
+	assert.equal(
+		repeated[0][0].json.eventId,
+		output[0][0].json.eventId,
+		'an emitting poll must not advance the pending state',
+	);
+
+	// Model n8n discarding data from the null activation poll; the emitting poll does not
+	// extend the in-memory entry, so it has expired one hour after activation.
+	const afterExpiry = context('activation-emission', []);
+	await at(START + 3_600_001, () => trigger.poll.call(afterExpiry));
+	assert.equal(afterExpiry.staticData.sentinelOneTrigger.activationMs, START + 3_600_001);
 });
 
 test('overlapping poll warns and leaves state untouched', async () => {

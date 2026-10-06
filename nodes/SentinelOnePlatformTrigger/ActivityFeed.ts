@@ -1,13 +1,18 @@
 import { sleep as workflowSleep, type IDataObject } from 'n8n-workflow';
 import type { AuthenticatedRequest } from './SentinelOneTriggerHelpers';
-import { responseStatus, retryAfterMs } from '../shared/transport/retry';
+import {
+	isRetryableReadError,
+	responseHeader,
+	responseStatus,
+	retryAfterMs,
+} from '../shared/transport/retry';
 import { PollBudgetError } from '../shared/transport/request';
 
 export const ACTIVITY_FEED_LIMIT = 1000;
 
 export const ACTIVITY_FEED_INLINE_BYTES = 5 * 1024 * 1024;
 
-const ROUTING_HEADER = 'x-dataset-query-forward-tag';
+export const ACTIVITY_FEED_ROUTING_HEADER = 'x-dataset-query-forward-tag';
 
 export const ACTIVITY_FEED_LOG_FILTER =
 	"dataSource.name='ActivityFeed' dataset='activityLog' data.alert.id=*";
@@ -50,6 +55,7 @@ export interface ActivityFeedTiming {
 	lifecycleMs?: number;
 	maxQueries?: number;
 	inlineBytes?: number;
+	warnLog?: (message: string, detail: IDataObject) => void;
 }
 
 function record(value: unknown): IDataObject | undefined {
@@ -282,7 +288,7 @@ function decodeLog(payload: IDataObject): ActivityFeedEvent[] {
 			activityTypeId,
 			activityKind: ACTIVITY_KINDS[activityTypeId] ?? 'unknown',
 			changes,
-			...(Object.keys(mitigation).length ? { mitigation } : {}),
+			...(activityTypeId === '16005' || Object.keys(mitigation).length ? { mitigation } : {}),
 			alertId,
 			timestampNs,
 			createdAt,
@@ -316,6 +322,7 @@ export interface ActivityFeedPrefixOptions {
 	timing?: ActivityFeedTiming;
 	activityTypeIds?: string[];
 	maxEvents?: number;
+	includeRawActivity?: boolean;
 }
 
 export interface ActivityFeedPrefix {
@@ -327,6 +334,7 @@ export class ActivityFeedBudgetError extends Error {
 	constructor(
 		readonly kind: 'deadline' | 'event-count',
 		message: string,
+		readonly requestError?: Error,
 	) {
 		super(`SentinelOne ActivityFeed ${message}; state was not advanced.`);
 	}
@@ -344,7 +352,7 @@ export async function readActivityFeedPrefix(
 		options.accountIds,
 		options.timing,
 		undefined,
-		false,
+		options.includeRawActivity ?? false,
 		options.activityTypeIds,
 		{ checkpointMs: options.checkpointMs, maxEvents: options.maxEvents ?? 40000 },
 	);
@@ -437,7 +445,6 @@ async function readActivityFeedRun(
 		// Leave time to delete a query whose data polling reaches the read deadline.
 		const expires = Math.min(deadline - 1000, now() + Math.min(lifecycleMs, 100_000));
 		let id: string | undefined;
-		let failed = false;
 		let routingTag: string | undefined;
 		let nextDelayMs = 1500;
 
@@ -446,7 +453,7 @@ async function readActivityFeedRun(
 			const headers = record(wrapper?.headers);
 
 			const routingEntry = Object.entries(headers ?? {}).find(
-				([key]) => key.toLowerCase() === ROUTING_HEADER,
+				([key]) => key.toLowerCase() === ACTIVITY_FEED_ROUTING_HEADER,
 			);
 
 			if (routingEntry) {
@@ -471,7 +478,13 @@ async function readActivityFeedRun(
 			return record(payload);
 		};
 
-		const routedHeaders = () => (routingTag ? { [ROUTING_HEADER]: routingTag } : {});
+		const routedHeaders = () => (routingTag ? { [ACTIVITY_FEED_ROUTING_HEADER]: routingTag } : {});
+
+		const captureErrorRouting = (error: unknown): void => {
+			const tag = responseHeader(error, ACTIVITY_FEED_ROUTING_HEADER);
+
+			if (tag !== undefined) captureRouting({ headers: { [ACTIVITY_FEED_ROUTING_HEADER]: tag } });
+		};
 
 		const remaining = () => {
 			const milliseconds = expires - now();
@@ -482,10 +495,20 @@ async function readActivityFeedRun(
 			return Math.max(1, Math.min(milliseconds, 30_000));
 		};
 
-		const stopped = (stage: 'launch' | 'polling', error: unknown): Error =>
-			error instanceof PollBudgetError
-				? new ActivityFeedBudgetError('deadline', 'exceeded the query deadline')
-				: requestFailure(stage, error, now());
+		const stopped = (stage: 'launch' | 'polling', error: unknown): Error => {
+			if (error instanceof PollBudgetError)
+				return new ActivityFeedBudgetError('deadline', 'exceeded the query deadline');
+			const sanitized = requestFailure(stage, error, now());
+			const delay = Math.max(1500, retryAfterMs(error, now()));
+
+			return isRetryableReadError(error) && now() + delay >= expires
+				? new ActivityFeedBudgetError(
+						'deadline',
+						'cannot retry within the query deadline',
+						sanitized,
+					)
+				: sanitized;
+		};
 
 		try {
 			const queryBody = {
@@ -516,16 +539,18 @@ async function readActivityFeedRun(
 								timeout,
 								json: false,
 								encoding: 'text',
-								headers: { 'Content-Type': 'application/json' },
+								headers: { 'Content-Type': 'application/json', ...routedHeaders() },
 								body: JSON.stringify(queryBody),
 							},
 							expires,
 						);
 					} catch (error) {
+						captureErrorRouting(error);
+
 						if (responseStatus(error) !== 429 || attempt >= 2) throw stopped('launch', error);
 						const delay = Math.max(1500, retryAfterMs(error, now()));
 
-						if (now() + delay >= expires) throw requestFailure('launch', error, now());
+						if (now() + delay >= expires) throw stopped('launch', error);
 						await sleep(delay);
 					}
 				}
@@ -607,16 +632,13 @@ async function readActivityFeedRun(
 				);
 
 				if (result.error !== undefined) {
-					if (result.error instanceof PollBudgetError) throw stopped('polling', result.error);
-					const errorResponse = record(record(result.error)?.response);
-
-					if (errorResponse?.headers) captureRouting(errorResponse);
+					captureErrorRouting(result.error);
 					const status = responseStatus(result.error);
 
-					if (status === 429) {
-						const delay = Math.max(1500, retryAfterMs(result.error, now()));
+					if (status === 404 || status === 429) {
+						const delay = status === 404 ? 1500 : Math.max(1500, retryAfterMs(result.error, now()));
 
-						if (now() + delay >= expires) throw requestFailure('polling', result.error, now());
+						if (now() + delay >= expires) throw stopped('polling', result.error);
 						nextDelayMs = delay;
 						continue;
 					}
@@ -627,10 +649,10 @@ async function readActivityFeedRun(
 				payload = unwrap(result.value);
 			}
 		} catch (error) {
-			failed = !(error instanceof ActivityFeedBudgetError);
 			// The trigger boundary adds its node context to this sanitized error.
-			// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
-			throw error;
+			throw !prefix && error instanceof ActivityFeedBudgetError
+				? (error.requestError ?? error)
+				: error;
 		} finally {
 			if (id && now() < deadline) {
 				await request(
@@ -644,11 +666,27 @@ async function readActivityFeedRun(
 					},
 					deadline,
 				).catch((error: unknown) => {
-					if (!failed && !(error instanceof PollBudgetError))
-						throw requestFailure('cleanup', error, now());
+					try {
+						timing.warnLog?.(requestFailure('cleanup', error, now()).message, {
+							statusCode: responseStatus(error),
+						});
+					} catch {
+						// Logging must not change activity delivery or the original query failure.
+					}
 				});
 			}
 		}
+	}
+
+	function outputEvents(events: ActivityFeedEvent[]): ActivityFeedEvent[] {
+		if (fullOutput) return events;
+
+		return events.map((event) => {
+			const output = { ...event };
+			delete output.rawActivity;
+
+			return output;
+		});
 	}
 
 	let previewComplete = false;
@@ -717,7 +755,7 @@ async function readActivityFeedRun(
 		completedThroughMs = end;
 
 		if (previewWindow) {
-			previewComplete = await previewWindow(acceptedRows);
+			previewComplete = await previewWindow(outputEvents(acceptedRows));
 			collected.clear();
 		}
 	}
@@ -740,8 +778,24 @@ async function readActivityFeedRun(
 				completedThroughMs <= prefix.checkpointMs
 			) {
 				// The trigger boundary wraps these sanitized reader failures with its node context.
-				// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
-				throw error;
+				throw error instanceof ActivityFeedBudgetError ? (error.requestError ?? error) : error;
+			}
+
+			try {
+				timing.warnLog?.(
+					`The activity stream in scope batch 1 stopped at ${new Date(completedThroughMs).toISOString()}.`,
+					{
+						stream: 'activity',
+						scopeBatch: 1,
+						position: new Date(completedThroughMs).toISOString(),
+						rowCount: collected.size,
+						reason: error.message,
+						statusCode: responseStatus(error.requestError),
+						completedThroughMs,
+					},
+				);
+			} catch {
+				// Logging must not change delivery or checkpoint state.
 			}
 		}
 	} else if (previewWindow) {
@@ -765,5 +819,5 @@ async function readActivityFeedRun(
 		return a < b ? -1 : a > b ? 1 : left.activityId.localeCompare(right.activityId);
 	});
 
-	return { events, completedThroughMs };
+	return { events: outputEvents(events), completedThroughMs };
 }

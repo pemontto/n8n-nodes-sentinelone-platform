@@ -1111,8 +1111,8 @@ test('ActivityFeed honours Retry-After and cleans completed queries inside the r
 	assert.deepEqual(deletes, [1000]);
 });
 
-test('ActivityFeed preserves real HTTP failures after progress even when the deadline has passed', async () => {
-	for (const statusCode of [401, 403, 404, 429, 503]) {
+test('ActivityFeed preserves permanent HTTP failures after progress even when the deadline has passed', async () => {
+	for (const statusCode of [401, 403, 404]) {
 		let time = 0;
 		let launches = 0;
 		await assert.rejects(
@@ -1135,41 +1135,38 @@ test('ActivityFeed preserves real HTTP failures after progress even when the dea
 	}
 });
 
-test('ActivityFeed rate limit whose delay cannot fit fails with retry metadata after completed progress', async () => {
+test('ActivityFeed rate limit whose delay cannot fit stops after completed progress with status logging', async () => {
 	let time = 0;
 	let launches = 0;
 	let deletes = 0;
-	await assert.rejects(
-		() =>
-			readActivityFeedPrefix(
-				async (request) => {
-					if (request.method === 'DELETE') {
-						deletes++;
-						return {};
-					}
-					if (request.method === 'POST')
-						return ++launches === 1 ? logResponse([logMatch()]) : { id: 'pending' };
-					throw { statusCode: 429, response: { headers: { 'Retry-After': '20' } } };
-				},
-				prefixOptions({
-					timing: {
-						now: () => time,
-						sleep: async (ms) => {
-							time += ms;
-						},
-						deadlineMs: 5000,
-					},
-				}),
-			),
-		(error) => {
-			assert.equal(error.statusCode, 429);
-			assert.equal(error.retryAfterMs, 20000);
-			assert.match(error.message, /rate limit/);
-			return true;
+	const warnings = [];
+	const result = await readActivityFeedPrefix(
+		async (request) => {
+			if (request.method === 'DELETE') {
+				deletes++;
+				return {};
+			}
+			if (request.method === 'POST')
+				return ++launches === 1 ? logResponse([logMatch()]) : { id: 'pending' };
+			throw { statusCode: 429, response: { headers: { 'Retry-After': '20' } } };
 		},
+		prefixOptions({
+			timing: {
+				now: () => time,
+				sleep: async (ms) => {
+					time += ms;
+				},
+				deadlineMs: 5000,
+				warnLog: (...warning) => warnings.push(warning),
+			},
+		}),
 	);
 	assert.equal(time, 1500);
 	assert.equal(deletes, 2);
+	assert.equal(result.events.length, 1);
+	assert.equal(result.completedThroughMs, START + 300000);
+	assert.equal(warnings.length, 1);
+	assert.equal(warnings[0][1].statusCode, 429);
 });
 
 test('ActivityFeed retries an explicitly rate-limited launch within its finite deadline', async () => {
@@ -1207,21 +1204,26 @@ test('ActivityFeed retries an explicitly rate-limited launch within its finite d
 	assert.equal(deletes, 1);
 });
 
-test('ActivityFeed cleanup failures preserve HTTP identity and cannot return successful partial output', async () => {
+test('ActivityFeed cleanup failures warn and preserve completed activity delivery', async () => {
 	for (const statusCode of [401, 403, 404, 429, 503]) {
-		await assert.rejects(
-			() =>
-				readActivityFeedPrefix(async (request) => {
-					if (request.method === 'DELETE') throw { statusCode, headers: { 'retry-after': 4 } };
-					return logResponse([logMatch()]);
-				}, prefixOptions()),
-			(error) => {
-				assert.equal(error.statusCode, statusCode);
-				assert.equal(error.retryAfterMs, 4000);
-				assert.match(error.message, /cleanup/);
-				return true;
+		const warnings = [];
+		const result = await readActivityFeedPrefix(
+			async (request) => {
+				if (request.method === 'DELETE')
+					throw { statusCode, message: 'SECRET tenant details', headers: { 'retry-after': 4 } };
+				return logResponse([logMatch()]);
 			},
+			prefixOptions({
+				endMs: START + 1,
+				timing: { warnLog: (...warning) => warnings.push(warning) },
+			}),
 		);
+		assert.equal(result.events.length, 1);
+		assert.equal(result.completedThroughMs, START + 1);
+		assert.equal(warnings.length, 1);
+		assert.match(warnings[0][0], /cleanup/);
+		assert.doesNotMatch(warnings[0][0], /SECRET|tenant details/);
+		assert.equal(warnings[0][1].statusCode, statusCode);
 	}
 });
 
@@ -1280,37 +1282,251 @@ test('ActivityFeed reserves cleanup time when data polling exhausts a finite dea
 	assert.equal(time, 4100);
 });
 
-test('an abandoned query cleanup HTTP failure outranks the reader deadline after a completed prefix', async () => {
+test('abandoned query cleanup failure warns and preserves the completed prefix', async () => {
 	for (const statusCode of [401, 403, 404, 429, 503]) {
 		let time = 0;
 		let launches = 0;
-		await assert.rejects(
-			readActivityFeedPrefix(
+		const warnings = [];
+		const result = await readActivityFeedPrefix(
+			async (request) => {
+				if (request.method === 'DELETE') {
+					if (request.url.endsWith('/abandoned')) throw { statusCode };
+					return {};
+				}
+				if (request.method === 'POST' && ++launches === 1) return logResponse([logMatch()]);
+				return { id: 'abandoned', stepsCompleted: 0, stepsTotal: 1 };
+			},
+			prefixOptions({
+				timing: {
+					now: () => time,
+					sleep: async (ms) => {
+						time += ms;
+					},
+					deadlineMs: 5000,
+					warnLog: (...warning) => warnings.push(warning),
+				},
+			}),
+		);
+		assert.equal(result.completedThroughMs, START + 300000);
+		assert.equal(result.events.length, 1);
+		assert.equal(warnings.filter(([message]) => /cleanup/.test(message)).length, 1);
+		assert.equal(warnings.find(([message]) => /cleanup/.test(message))[1].statusCode, statusCode);
+	}
+});
+
+test('SDL polling retries 404 with fresh routing and ignores its Retry-After', async () => {
+	const { NodeApiError } = require('n8n-workflow');
+	const node = {
+		name: 'Demo',
+		type: 'sentinelOnePlatformTrigger',
+		typeVersion: 1,
+		position: [0, 0],
+	};
+	let time = 0;
+	const polls = [];
+	let cancelled = false;
+	const events = await readActivityFeed(
+		async (request) => {
+			if (request.method === 'POST')
+				return { body: { id: 'raw-query' }, headers: { 'x-dataset-query-forward-tag': 'first' } };
+			if (request.method === 'DELETE') {
+				cancelled = true;
+				assert.equal(request.headers['x-dataset-query-forward-tag'], 'second');
+				return {};
+			}
+			polls.push(time);
+			assert.equal(
+				request.headers['x-dataset-query-forward-tag'],
+				polls.length === 1 ? 'first' : 'second',
+			);
+			if (polls.length === 1)
+				throw new NodeApiError(node, {
+					response: {
+						status: 404,
+						headers: { 'X-Dataset-Query-Forward-Tag': 'second', 'retry-after': '99' },
+					},
+				});
+			return logResponse([logMatch()]);
+		},
+		BASE,
+		START,
+		START + 1,
+		[],
+		{
+			now: () => time,
+			sleep: async (ms) => {
+				time += ms;
+			},
+			deadlineMs: 5000,
+		},
+	);
+	assert.equal(events.length, 1);
+	assert.deepEqual(polls, [1500, 3000]);
+	assert.equal(cancelled, true);
+});
+
+test('SDL polling 404 stops with its HTTP status when another retry cannot fit', async () => {
+	let time = 0;
+	let polls = 0;
+	let deletes = 0;
+	await assert.rejects(
+		() =>
+			readActivityFeed(
 				async (request) => {
+					if (request.method === 'POST') return { id: 'raw-query' };
 					if (request.method === 'DELETE') {
-						if (request.url.endsWith('/abandoned'))
-							throw { statusCode, headers: { 'retry-after': '4' } };
+						deletes++;
 						return {};
 					}
-					if (request.method === 'POST' && ++launches === 1) return logResponse([logMatch()]);
-					return { id: 'abandoned', stepsCompleted: 0, stepsTotal: 1 };
+					polls++;
+					throw { statusCode: 404 };
 				},
-				prefixOptions({
-					timing: {
-						now: () => time,
-						sleep: async (ms) => {
-							time += ms;
-						},
-						deadlineMs: 5000,
+				BASE,
+				START,
+				START + 1,
+				[],
+				{
+					now: () => time,
+					sleep: async (ms) => {
+						time += ms;
 					},
-				}),
+					deadlineMs: 5000,
+				},
 			),
+		(error) => error.statusCode === 404,
+	);
+	assert.equal(polls, 2);
+	assert.equal(time, 3000);
+	assert.equal(deletes, 1);
+});
+
+test('SDL launch retries capture routing from wrapped error responses', async () => {
+	const { NodeApiError } = require('n8n-workflow');
+	const node = {
+		name: 'Demo',
+		type: 'sentinelOnePlatformTrigger',
+		typeVersion: 1,
+		position: [0, 0],
+	};
+	let launches = 0;
+	const events = await readActivityFeed(
+		async (request) => {
+			if (request.method === 'DELETE') return {};
+			if (++launches === 1)
+				throw new NodeApiError(node, {
+					response: { status: 429, headers: { 'x-dataset-query-forward-tag': 'launch-route' } },
+				});
+			assert.equal(request.headers['x-dataset-query-forward-tag'], 'launch-route');
+			return logResponse([logMatch()]);
+		},
+		BASE,
+		START,
+		START + 1,
+		[],
+		clock(),
+	);
+	assert.equal(events.length, 1);
+	assert.equal(launches, 2);
+});
+
+test('deadline-reached transient SDL failures return only completed windows', async () => {
+	for (const failure of [{ statusCode: 429 }, { statusCode: 503 }, { code: 'ECONNRESET' }]) {
+		let time = 0;
+		let launches = 0;
+		const result = await readActivityFeedPrefix(
+			async (request) => {
+				if (request.method === 'DELETE') return {};
+				if (++launches === 1) return logResponse([logMatch()]);
+				time = 4000;
+				throw failure;
+			},
+			prefixOptions({ timing: { now: () => time, deadlineMs: 5000 } }),
+		);
+		assert.equal(result.events.length, 1);
+		assert.equal(result.completedThroughMs, START + 300000);
+	}
+});
+
+test('cleanup warning failures cannot change delivered events', async () => {
+	const events = await readActivityFeed(
+		async (request) => {
+			if (request.method === 'DELETE') throw { statusCode: 503 };
+			return logResponse([logMatch()]);
+		},
+		BASE,
+		START,
+		START + 1,
+		[],
+		{
+			warnLog: () => {
+				throw new Error('logging failed');
+			},
+		},
+	);
+	assert.equal(events.length, 1);
+});
+
+test('mitigation activities retain a mitigation object when both source fields are absent', async () => {
+	const match = logMatch();
+	match.values.activity_type = '16005';
+	const [event] = await readActivityFeed(
+		async (request) => (request.method === 'DELETE' ? {} : logResponse([match])),
+		BASE,
+		START,
+		START + 1,
+	);
+	assert.equal(event.activityKind, 'mitigationActivity');
+	assert.deepEqual(event.mitigation, {});
+});
+
+test('transient SDL retry stops without a completed prefix preserve HTTP status', async () => {
+	for (const statusCode of [429, 503]) {
+		await assert.rejects(
+			() =>
+				readActivityFeedPrefix(
+					async (request) => {
+						if (request.method === 'DELETE') return {};
+						throw { statusCode, headers: { 'retry-after': '9' } };
+					},
+					prefixOptions({ timing: clock() }),
+				),
 			(error) => {
 				assert.equal(error.statusCode, statusCode);
-				assert.equal(error.retryAfterMs, 4000);
-				assert.match(error.message, /cleanup/);
+				assert.equal(error.retryAfterMs, 9000);
 				return true;
 			},
 		);
+	}
+});
+
+test('SDL raw activity is returned only with its explicit opt-in while normalized mitigation remains', async () => {
+	for (const includeRawActivity of [false, true]) {
+		const match = logMatch();
+		match.values.activity_type = '16005';
+		match.values['data.payload.mitigation_action_type'] = 'WORKFLOW';
+		const request = async (request) => {
+			if (request.method === 'DELETE') return {};
+			const body = JSON.parse(request.body);
+			assert.equal(body.log.columns, undefined, 'LOG has no documented column projection');
+			return logResponse([match]);
+		};
+		const [event] = await readActivityFeed(
+			request,
+			BASE,
+			START,
+			START + 1,
+			[],
+			{},
+			undefined,
+			includeRawActivity,
+		);
+		assert.equal(Object.hasOwn(event, 'rawActivity'), includeRawActivity);
+		assert.deepEqual(event.mitigation, { actionType: 'WORKFLOW' });
+		const prefix = await readActivityFeedPrefix(
+			request,
+			prefixOptions({ endMs: START + 1, includeRawActivity }),
+		);
+		assert.equal(Object.hasOwn(prefix.events[0], 'rawActivity'), includeRawActivity);
+		assert.deepEqual(prefix.events[0].mitigation, { actionType: 'WORKFLOW' });
 	}
 });

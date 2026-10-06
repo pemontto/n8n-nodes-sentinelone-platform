@@ -698,12 +698,10 @@ test('simplified alert output resolves the actual scope hierarchy without config
 	);
 	const item = result.items[0];
 
-	assert.equal(item.scope.type, 'GROUP');
-	assert.equal(item.scope.id, 'group-1');
-	assert.equal(item.scope.name, 'Group One');
-	assert.equal(item.scope.account.name, 'Account One');
-	assert.equal(item.scope.site.name, 'Site One');
-	assert.equal(item.scope.group.name, 'Group One');
+	assert.equal('scope' in item, false);
+	assert.equal(item.accountName, 'Account One');
+	assert.equal(item.siteName, 'Site One');
+	assert.equal(item.groupName, 'Group One');
 	assert.equal(item.alertId, 'simplified-alert');
 	assert.equal('scopeIds' in item, false);
 	assert.equal('accountId' in item, false);
@@ -1002,7 +1000,10 @@ test('diagnostic callback failure cannot change alert output or state advancemen
 		'scheduled',
 		NOW,
 	);
-	assert.equal(result.nextState.checkpointMs, NOW);
+	assert.ok(
+		Object.values(result.nextState.alertCursors).every((cursor) => cursor.throughMs === NOW),
+	);
+	assert.equal('checkpointMs' in result.nextState, false);
 });
 
 test('alert polling rejects obsolete timeline note routing before making requests', async () => {
@@ -1471,7 +1472,26 @@ test('selected additional alert fields are queried and returned in simplified an
 			'manual',
 			NOW,
 		);
-		const output = simplifyOutput ? result.items[0] : result.items[0].alert;
+		if (simplifyOutput) {
+			for (const key of [
+				'ticketId',
+				'assignee',
+				'description',
+				'assets',
+				'process',
+				'aiInvestigation',
+			]) {
+				assert.equal(key in result.items[0], false);
+				assert.ok(`alert${key[0].toUpperCase()}${key.slice(1)}` in result.items[0]);
+			}
+		}
+		const output = simplifyOutput
+			? Object.fromEntries(
+					Object.entries(result.items[0])
+						.filter(([key]) => key.startsWith('alert'))
+						.map(([key, value]) => [key[5].toLowerCase() + key.slice(6), value]),
+				)
+			: result.items[0].alert;
 		assert.equal(output.ticketId, 'CASE-42');
 		assert.equal(output.assignee.fullName, 'Analyst');
 		assert.equal(output.description, null);
@@ -2016,4 +2036,102 @@ test('alert output renames only simplified fields and preserves full output', as
 			});
 		}
 	}
+});
+
+test('SDL error routing survives the node authenticated request wrapper on 404 and 429 retries and cleanup', async () => {
+	const routingHeader = 'x-dataset-query-forward-tag';
+	const node = new SentinelOnePlatformTrigger();
+	const now = Date.now();
+	const sdlRequests = [];
+	let polls = 0;
+	const request = async (options) => {
+		if (!options.url.includes('/sdl/')) {
+			if (options.method === 'GET') return { data: [{ id: 'account-1' }] };
+			return alertResponse([alert('routing-alert')]);
+		}
+		sdlRequests.push(options);
+		if (options.method === 'DELETE') return {};
+		if (options.method === 'POST')
+			return {
+				headers: { [routingHeader]: 'initial' },
+				body: { id: 'routing-query', stepsCompleted: 0, stepsTotal: 1 },
+			};
+		polls++;
+		if (polls <= 2) {
+			assert.equal(options.headers[routingHeader], polls === 1 ? 'initial' : 'route-404');
+			const status = polls === 1 ? 404 : 429;
+			throw new NodeApiError(
+				node.description,
+				Object.assign(new Error(`HTTP ${status}`), {
+					isAxiosError: true,
+					response: {
+						status,
+						headers: { [routingHeader]: `route-${status}`, 'x-private': 'do not forward' },
+						data: {},
+					},
+				}),
+			);
+		}
+		assert.equal(options.headers[routingHeader], 'route-429');
+		assert.equal('x-private' in options.headers, false);
+		return {
+			id: 'routing-query',
+			stepsCompleted: 1,
+			stepsTotal: 1,
+			data: {
+				matches: [
+					{
+						timestamp: String(BigInt(now - 1000) * 1000000n),
+						values: {
+							activity_id: 'routing-event',
+							activity_type: '16007',
+							created_at: new Date(now - 1000).toISOString(),
+							'data.alert.id': 'routing-alert',
+							'data.payload.note_text': 'Example note',
+						},
+					},
+				],
+			},
+		};
+	};
+	const context = createNodeContext(
+		{
+			resource: 'alertActivity',
+			activityTypes: ['16007'],
+			options: { scope: { selection: { accountIds: ['account-1'] } } },
+		},
+		request,
+	);
+	const result = await node.poll.call(context);
+	assert.equal(
+		result[0][0].json.eventId,
+		'tenant.example/alert/routing-alert/activity/routing-event',
+	);
+	assert.equal(
+		sdlRequests.find((request) => request.method === 'DELETE').headers[routingHeader],
+		'route-429',
+	);
+});
+
+test('A dense manual alert preview stops at its page cap without splitting its time range', async () => {
+	let calls = 0;
+	const triggerConfig = config({
+		maxAlertPages: 1,
+		alertPageSize: 1,
+		excludeAccountName: 'Account One',
+	});
+	await assert.rejects(
+		pollSentinelOne(
+			async () => {
+				calls++;
+				return alertResponse([alert('excluded')], { hasNextPage: true, endCursor: 'next' });
+			},
+			triggerConfig,
+			{},
+			'manual',
+			NOW,
+		),
+		/configured page limit/,
+	);
+	assert.equal(calls, 1);
 });

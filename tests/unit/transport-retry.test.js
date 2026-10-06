@@ -138,3 +138,56 @@ test('only a request timeout caused by the caller deadline becomes a poll stop',
 		assert.equal(result.error, failure);
 	});
 });
+
+test('a deadline-capped status-free failure stops even when NodeApiError rewrites its message', async () => {
+	for (const wrapped of [
+		new NodeApiError(node, axiosError('timeout of 100ms exceeded', { code: 'ECONNABORTED' })),
+		new NodeApiError(node, { message: 'socket hang up', code: 'ECONNRESET' }),
+		new Error('request ended without a response'),
+	]) {
+		await clocked(async (advance) => {
+			const result = await requestWithRetry(
+				async (timeoutMs) => {
+					advance(timeoutMs);
+					throw wrapped;
+				},
+				{ deadline: Date.now() + 100 },
+			);
+			assert.ok(result.error instanceof PollBudgetError);
+		});
+	}
+});
+
+test('HTTP errors retain their status when a deadline-capped attempt ends at the deadline', async () => {
+	await clocked(async (advance) => {
+		const error = new NodeApiError(node, { response: { status: 503 } });
+		const result = await requestWithRetry(
+			async (timeoutMs) => {
+				advance(timeoutMs);
+				throw error;
+			},
+			{ deadline: Date.now() + 100 },
+		);
+		assert.equal(result.error, error);
+		assert.equal(responseStatus(result.error), 503);
+	});
+});
+
+test('A retry that cannot fit exposes its actual backoff without changing the HTTP failure', async () => {
+	await clocked(async (advance) => {
+		const failure = { statusCode: 503 };
+		let attempts = 0;
+		const deadline = Date.now() + 5000;
+		const result = await requestWithRetry(
+			async () => {
+				advance(++attempts === 1 ? 1000 : 2500);
+				throw failure;
+			},
+			{ deadline },
+		);
+		assert.equal(result.error, failure);
+		assert.equal(attempts, 2);
+		assert.ok(result.retryDelayMs >= 2000);
+		assert.ok(Date.now() + result.retryDelayMs >= deadline);
+	});
+});

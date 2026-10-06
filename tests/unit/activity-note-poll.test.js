@@ -761,7 +761,8 @@ test('an incomplete first slice fails without advancing the saved checkpoint', a
 });
 
 test('no-progress errors identify the activity stream and saved checkpoint position', async () => {
-	const c = cfg();
+	const warnings = [];
+	const c = cfg({ warnLog: (message, details) => warnings.push({ message, details }) });
 	const checkpoint = NOW - 3600000;
 	await assert.rejects(
 		() =>
@@ -785,6 +786,15 @@ test('no-progress errors identify the activity stream and saved checkpoint posit
 			assert.match(error.message, new RegExp(new Date(checkpoint).toISOString()));
 			return true;
 		},
+	);
+	assert.ok(
+		warnings.some(
+			({ details }) =>
+				details.stream === 'activity' &&
+				details.scopeType === 'ACCOUNT' &&
+				details.scopeIds[0] === 'a' &&
+				details.position === new Date(checkpoint).toISOString(),
+		),
 	);
 });
 
@@ -843,7 +853,10 @@ test('backlog prefix drops expired missing activity using wall clock age and ret
 	);
 	assert.equal(result.nextState.checkpointMs, checkpoint + 300000);
 	assert.equal(result.nextState.seenActivityTimestamps.missing, ns(eventTime));
-	assert.equal(warnings.length, 1);
+	assert.equal(warnings.filter(({ details }) => details.droppedActivityCount === 1).length, 1);
+	assert.ok(
+		warnings.some(({ details }) => details.stream === 'activity' && details.scopeBatch === 1),
+	);
 });
 test('failed backlog slice keeps checkpoint and activation or changed config still baselines at now', async () => {
 	const c = cfg();
@@ -1096,7 +1109,7 @@ test('simplified activities return flat current context, optional changes and no
 				activityType
 			],
 			...(activityType === '16001'
-				? { changes: [{ field: 'status', oldValue: 'NEW', newValue: 'RESOLVED' }] }
+				? { change: { field: 'status', from: 'NEW', to: 'RESOLVED' } }
 				: {}),
 			...(activityType === '16007' ? { note: 'Exact SDL note text' } : {}),
 			actorName: 'Example Actor',
@@ -1108,6 +1121,8 @@ test('simplified activities return flat current context, optional changes and no
 			accountName: 'Account',
 			siteName: 'Site',
 			groupName: null,
+			rawActivity: source.data.matches[0],
+			currentAlert: alert(),
 		});
 	}
 });
@@ -1170,4 +1185,143 @@ test('simplified notes include only recorded text strings, including an empty st
 		assert.equal('note' in result.items[0], typeof text === 'string');
 		if (typeof text === 'string') assert.equal(result.items[0].note, text);
 	}
+});
+
+test('simplified known activity types expose one recorded change with optional endpoints', async () => {
+	for (const [type, sourceField, field, from, to] of [
+		['16001', 'status', 'status', 'NEW', 'RESOLVED'],
+		['16002', 'analyst_verdict', 'analystVerdict', 'UNDEFINED', 'TRUE_POSITIVE'],
+		['16003', 'severity', 'severity', 'HIGH', 'LOW'],
+		['16004', 'assignee_email', 'assignee', 'previous@example.com', 'current@example.com'],
+	]) {
+		for (const includeFrom of [false, true]) {
+			const c = cfg({ simplifyOutput: true });
+			const source = logFeed(feed());
+			Object.assign(source.data.matches[0].values, {
+				activity_type: type,
+				[`data.payload.changes.new_${sourceField}`]: to,
+				...(includeFrom ? { [`data.payload.changes.old_${sourceField}`]: from } : {}),
+				...(type === '16004' ? { 'data.payload.changes.new_assignee_id': 'actor-id' } : {}),
+			});
+			const result = await pollAlertActivities(
+				async (r) =>
+					r.method === 'DELETE' ? {} : r.url.includes('/sdl/') ? source : page([alert()]),
+				c,
+				state(c),
+				'scheduled',
+				NOW,
+			);
+			assert.deepEqual(result.items[0].change, { field, ...(includeFrom ? { from } : {}), to });
+			assert.equal('changes' in result.items[0], false);
+			assert.equal('rawActivity' in result.items[0], false);
+			assert.equal('currentAlert' in result.items[0], false);
+		}
+	}
+});
+
+test('simplified assignee changes do not use IDs as email endpoints', async () => {
+	const c = cfg({ simplifyOutput: true });
+	const source = logFeed(feed());
+	Object.assign(source.data.matches[0].values, {
+		activity_type: '16004',
+		'data.payload.changes.new_assignee_id': 'actor-id',
+	});
+	const result = await pollAlertActivities(
+		async (r) => (r.method === 'DELETE' ? {} : r.url.includes('/sdl/') ? source : page([alert()])),
+		c,
+		state(c),
+		'scheduled',
+		NOW,
+	);
+	assert.deepEqual(result.items[0].change, { field: 'assignee' });
+	assert.equal('changes' in result.items[0], false);
+});
+
+test('simplified other types retain change arrays and mitigation event objects', async () => {
+	for (const type of ['19999', '16005']) {
+		for (const withData of [false, true]) {
+			const c = cfg({ simplifyOutput: true });
+			const source = logFeed(feed());
+			Object.assign(source.data.matches[0].values, {
+				activity_type: type,
+				...(withData
+					? {
+							'data.payload.changes.new_status': 'RESOLVED',
+							'data.payload.mitigation_action_type': 'quarantine',
+							'data.payload.mitigation_action_status': 'completed',
+						}
+					: {}),
+			});
+			const result = await pollAlertActivities(
+				async (r) =>
+					r.method === 'DELETE' ? {} : r.url.includes('/sdl/') ? source : page([alert()]),
+				c,
+				state(c),
+				'scheduled',
+				NOW,
+			);
+			const item = result.items[0];
+			assert.equal('change' in item, false);
+			assert.equal('changes' in item, withData);
+			assert.equal('mitigation' in item, withData || type === '16005');
+			if (!withData && type === '16005') assert.deepEqual(item.mitigation, {});
+			if (withData) {
+				assert.deepEqual(item.changes, [{ field: 'status', newValue: 'RESOLVED' }]);
+				assert.deepEqual(item.mitigation, {
+					actionType: 'quarantine',
+					activityStatus: 'completed',
+				});
+			}
+		}
+	}
+});
+
+test('simplified enrichment options apply independently in scheduled and manual output', async () => {
+	for (const mode of ['scheduled', 'manual']) {
+		for (const includeRawActivity of [false, true]) {
+			for (const includeCurrentAlert of [false, true]) {
+				const c = cfg({ simplifyOutput: true, includeRawActivity, includeCurrentAlert });
+				const source = logFeed(feed());
+				let lookups = 0;
+				const result = await pollAlertActivities(
+					async (r) => {
+						if (r.method === 'DELETE') return {};
+						if (r.url.includes('/sdl/')) return source;
+						lookups++;
+						return page([alert()]);
+					},
+					c,
+					state(c),
+					mode,
+					NOW,
+				);
+				assert.equal('rawActivity' in result.items[0], includeRawActivity);
+				assert.equal('currentAlert' in result.items[0], includeCurrentAlert);
+				if (includeRawActivity)
+					assert.deepEqual(result.items[0].rawActivity, source.data.matches[0]);
+				if (includeCurrentAlert) assert.deepEqual(result.items[0].currentAlert, alert());
+				assert.equal(lookups, 1);
+			}
+		}
+	}
+});
+
+test('activity lookup uses the supplied poll deadline without adding a second fallback', async () => {
+	let time = 0;
+	const c = cfg();
+	const result = await pollAlertActivities(
+		async (r) => {
+			if (r.method === 'DELETE') {
+				time = 300001;
+				return {};
+			}
+			return r.url.includes('/sdl/') ? logFeed(feed()) : page([alert()]);
+		},
+		c,
+		state(c),
+		'scheduled',
+		NOW,
+		{ now: () => time },
+	);
+	assert.equal(result.items.length, 1);
 });

@@ -9,7 +9,9 @@ export interface RequestPolicy {
 	onFailure?: (error: unknown, attempt: number, durationMs: number) => void;
 }
 
-export type RequestResult = { ok: true; value: unknown } | { ok: false; error: unknown };
+export type RequestResult =
+	| { ok: true; value: unknown }
+	| { ok: false; error: unknown; retryDelayMs?: number };
 
 /** Only the caller's deadline, rather than a service failure, stopped the request. */
 export class PollBudgetError extends Error {
@@ -53,17 +55,13 @@ export async function requestWithRetry(
 				/* Diagnostics never change transport outcomes. */
 			}
 
-			// A timeout is our stop only when this attempt was shortened to the caller deadline.
-			const timeout =
-				error instanceof Error && /timeout|ETIMEDOUT|ECONNABORTED/i.test(error.message);
-
+			// A status-free failure at an attempt capped to the caller deadline is our stop, even when n8n has rewritten the transport message.
 			if (
 				policy.deadline !== undefined &&
 				deadline === policy.deadline &&
 				startedAt + attemptTimeoutMs >= policy.deadline &&
 				Date.now() >= policy.deadline &&
-				responseStatus(error) === null &&
-				timeout
+				responseStatus(error) === null
 			)
 				return { ok: false, error: new PollBudgetError() };
 
@@ -74,7 +72,7 @@ export async function requestWithRetry(
 			}
 
 			if (Date.now() + delay >= deadline) {
-				return { ok: false, error };
+				return { ok: false, error, retryDelayMs: delay };
 			}
 
 			await sleep(delay);

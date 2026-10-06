@@ -49,6 +49,25 @@ export function responseStatus(error: unknown): number | null {
 	return null;
 }
 
+/** Reads one header through n8n's wrapped transport errors without exposing the response. */
+export function responseHeader(error: unknown, name: string): unknown {
+	for (const frame of causeChain(error)) {
+		const response = isRecord(frame.response) ? frame.response : {};
+
+		const headers = isRecord(frame.headers)
+			? frame.headers
+			: isRecord(response.headers)
+				? response.headers
+				: {};
+
+		const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+
+		if (entry) return entry[1];
+	}
+
+	return undefined;
+}
+
 export function isRetryableReadError(error: unknown): boolean {
 	const frames = causeChain(error);
 

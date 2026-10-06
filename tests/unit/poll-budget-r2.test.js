@@ -195,7 +195,7 @@ test('A resumed poll without a host budget keeps the ordinary cursor and ascendi
 	const replay = fakeServer(rows);
 	const second = await pollSentinelOne(
 		replay.request,
-		{ ...triggerConfig, pollDeadlineMs: undefined },
+		{ ...triggerConfig, pollDeadlineMs: Date.now() + 300_000 },
 		first.nextState,
 		'scheduled',
 		NOW,
