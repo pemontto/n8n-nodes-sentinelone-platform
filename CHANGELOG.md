@@ -2,7 +2,7 @@
 
 ## 0.1.0 (unreleased)
 
-This first release provides n8n nodes for reading and updating SentinelOne alerts, managing alert notes, running SDL PowerQueries, and starting workflows from alert snapshots or alert activities. Use the `sentinelOnePlatformApi` credential with the SentinelOne Platform and SentinelOne Platform Trigger nodes.
+This first release provides n8n nodes for reading and updating SentinelOne alerts, managing alert notes, and running SDL PowerQueries, with triggers for new or updated alerts and for alert activity. Use the `sentinelOnePlatformApi` credential with the SentinelOne Platform and SentinelOne Platform Trigger nodes.
 
 - Alert Get returns common alert fields by default; Additional Alert Fields and Raw Data are opt-in. Alert Get Many supports filters, scope selection, and bounded pagination. Return All is capped at 10,000 alerts.
 - Alert Update supports status, analyst verdict, and ticket ID. It submits once, reports rejected updates as errors with their HTTP status when available, and verifies acknowledged changes with bounded readback by default. Unknown or partial results require inspection before retrying.

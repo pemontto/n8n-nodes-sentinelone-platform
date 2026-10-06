@@ -4,7 +4,7 @@
 
 # SentinelOne Platform for n8n
 
-SentinelOne Platform provides n8n nodes to read and update SentinelOne alerts, manage alert notes, run SDL PowerQueries, and start workflows from alert snapshots or alert activities. The credential determines which records and actions are accessible.
+SentinelOne Platform provides n8n nodes to read and update SentinelOne alerts, manage alert notes, and run SDL PowerQueries. Triggers fire on new or updated alerts and on alert activity.
 
 ![The inactive note test workflow with the Alert Activity trigger filtered to Note Created; only the trigger preview has run](https://raw.githubusercontent.com/pemontto/n8n-nodes-sentinelone-platform/main/docs/images/note-trigger-workflow.png)
 
