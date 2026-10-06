@@ -205,6 +205,22 @@ test('scope, severity and account-name exclusions apply before SDL output', asyn
 	}
 });
 
+test('site and account name exclusions drop matching activity in scheduled and manual runs', async () => {
+	for (const mode of ['scheduled', 'manual']) {
+		for (const [option, pattern, excluded] of [
+			['excludeSiteName', 'Site', true],
+			['excludeSiteName', 'site', true],
+			['excludeSiteName', 'Sight', false],
+			['excludeAccountName', 'Account', true],
+			['excludeAccountName', 'Other', false],
+		]) {
+			const c = cfg({ [option]: pattern });
+			const result = await pollAlertActivities(request(), c, state(c), mode, NOW);
+			assert.equal(result.items.length === 0, excluded, `${mode} ${option}=${pattern}`);
+		}
+	}
+});
+
 test('unindexed alert scope fails without advancing or mutating state', async () => {
 	const c = cfg(),
 		previous = state(c),
