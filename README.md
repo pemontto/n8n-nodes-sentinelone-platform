@@ -18,8 +18,6 @@ For example, escalate High and Critical alerts to ServiceNow and write the incid
 | Alert Note | Get Many, Create                                           |
 | SDL Query  | Execute                                                    |
 
-Common alert fields are always returned. Options > Additional Alert Fields adds extras; Raw Data is opt-in. ID-based operations need no scope selection. Searches and triggers have optional Account, Site, and Group selections.
-
 ## Trigger
 
 | Resource       | Events                       |
@@ -27,19 +25,7 @@ Common alert fields are always returned. Options > Additional Alert Fields adds 
 | Alert          | New, Updated, New or Updated |
 | Alert Activity | Occurred                     |
 
-The trigger polls on the schedule you configure and keeps checkpoint and deduplication state. Optional Account, Site, and Group selections under Options > Scope narrow the records it checks; empty selections include accessible records. Site-scoped credentials can list accessible sites without account-list permission. Groups require at least one selected Site. A poll with no qualifying events produces no items.
-
-See [trigger configuration](docs/trigger.md) for activity conditions, current-parent filters, and delivery limits.
-
-Alert Activity supports alert creation, status/verdict/severity/assignee changes, mitigation activity, and note creation. It also accepts unknown alert-linked activity types. The condition builder matches recorded values within one activity. Optional raw activity and current alert fields add to a stable event envelope.
-
-Activity output starts with the alert ID, name and source-provided external ID. Current status, severity and analyst verdict are included by default and clearly separated from recorded changes.
-
-### Known limits
-
-- Alert snapshot overlap exclusions are capped at 1,000 IDs per request.
-- On single-batch tenants under sustained load close to per-poll capacity, New alerts that become visible more than roughly 240 seconds after their `createdAt` (close to the 300-second overlap) can be missed.
-- These limits depend on SentinelOne behaviour to confirm on a live tenant: the request size limit for excluded IDs, real alert ID length, page latency at 200 rows for large scope batches, alert visibility lag, `updatedAt` ties from bulk actions, and cursor stability. See [delivery limits](docs/trigger.md).
+Alert Activity covers alert creation, status, verdict, severity and assignee changes, mitigation activity and notes. See [triggers](docs/trigger.md) for filters, conditions, output and limits.
 
 ## Documentation
 

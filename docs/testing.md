@@ -18,7 +18,7 @@ The note example requires an explicit alert ID and uses the same fixed account-n
 
 For a read-only check, use Fetch Test Event without running a write branch. A manual preview searches historical windows and does not establish scheduled polling state.
 
-## Alert snapshot trigger
+## Alert trigger
 
 The alert-changes example listens for New or Updated alerts. Its first scheduled poll records the activation baseline and does not replay earlier alerts. Wait for that poll before making a controlled change to a designated test alert. Later matching alerts are emitted according to the configured scope, filters, overlap, and retained checkpoint state.
 
