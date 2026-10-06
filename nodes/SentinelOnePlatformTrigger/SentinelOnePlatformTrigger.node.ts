@@ -933,7 +933,12 @@ export class SentinelOnePlatformTrigger implements INodeType {
 
 				if (result.items.length === 0) return null;
 
-				return [this.helpers.returnJsonArray(result.items)];
+				// eventId goes last so the readable fields lead in the editor's output view.
+				return [
+					this.helpers.returnJsonArray(
+						result.items.map(({ eventId, ...rest }) => ({ ...rest, eventId })),
+					),
+				];
 			} catch (error) {
 				// Preserve typed n8n errors and their status, description and cause.
 				// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
