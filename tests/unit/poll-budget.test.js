@@ -983,6 +983,78 @@ test('A lookup the budget cuts short delivers every activity before the first on
 	assert.equal(third.nextState.checkpointMs, NOW);
 });
 
+test('A deadline-blocked transient lookup hands over completed batches with status and fails without a completed batch', async () => {
+	for (const statusCode of [429, 500, 502, 503, 504, 401, 403, 404]) {
+		await withClock(async (clock) => {
+			const checkpoint = NOW - 3600_000;
+			const warnings = [];
+			const c = activityConfig({
+				pollDeadlineMs: clock.start + 36_000,
+				warnLog: (message, details) => warnings.push({ message, details }),
+			});
+			const activities = Array.from({ length: 201 }, (_, index) =>
+				activity(
+					`activity-${index}`,
+					BigInt(checkpoint + 1000 + index) * 1000000n,
+					`alert-${index}`,
+				),
+			);
+			const saved = activityState(c, checkpoint);
+			const original = structuredClone(saved);
+			let failAll = false;
+			let failFirst = false;
+			let calls = 0;
+			const request = async (options) => {
+				if (options.url.includes('/sdl/')) return feedFor(activities)(options);
+				const result = await requestWithRetry(
+					async () => {
+						calls++;
+						const ids = options.body.variables.filters[0].stringIn.values;
+						if (failAll || ids.includes(failFirst ? 'alert-0' : 'alert-200'))
+							throw { statusCode, headers: { 'retry-after': '60' } };
+						return alertPage(ids.map((id) => parentAlert(id)));
+					},
+					{ timeoutMs: options.timeout, deadline: c.pollDeadlineMs },
+				);
+				if (!result.ok) throw result.error;
+				return result.value;
+			};
+			const run = (state = saved) => pollAlertActivities(request, c, state, 'scheduled', NOW);
+			if ([401, 403, 404].includes(statusCode)) {
+				await assert.rejects(run(), (error) => error.statusCode === statusCode);
+			} else {
+				const first = await run();
+				assert.equal(first.items.length, 200);
+				assert.equal(first.nextState.checkpointMs, checkpoint + 1200);
+				assert.ok(warnings.some(({ details }) => details.httpStatus === statusCode));
+				assert.equal(calls, 2);
+				const replay = await pollAlertActivities(
+					async (options) => {
+						if (options.url.includes('/sdl/')) return feedFor(activities)(options);
+						return alertPage(options.body.variables.filters[0].stringIn.values.map(parentAlert));
+					},
+					c,
+					first.nextState,
+					'scheduled',
+					NOW,
+				);
+				assert.deepEqual(
+					replay.items.map((item) => item.activityId),
+					['activity-200'],
+				);
+				failFirst = true;
+				await assert.rejects(
+					run(activityState(c, checkpoint + 1000)),
+					(error) => error.statusCode === statusCode,
+				);
+			}
+			failAll = true;
+			await assert.rejects(run(), (error) => error.statusCode === statusCode);
+			assert.deepEqual(saved, original);
+		});
+	}
+});
+
 test('An activity baseline the budget cuts short saves its completed slices and activation, resumes silently, and never replays pre-activation activity', async () => {
 	const c = activityConfig({ pollDeadlineMs: Date.now() + 60_000 });
 	const activation = NOW;

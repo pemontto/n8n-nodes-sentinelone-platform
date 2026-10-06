@@ -492,7 +492,7 @@ async function readActivityFeedRun(
 			if (milliseconds <= 0)
 				throw new ActivityFeedBudgetError('deadline', 'exceeded the query deadline');
 
-			return Math.max(1, Math.min(milliseconds, 30_000));
+			return milliseconds;
 		};
 
 		const stopped = (stage: 'launch' | 'polling', error: unknown): Error => {
@@ -528,7 +528,7 @@ async function readActivityFeedRun(
 
 			const launch = async () => {
 				for (let attempt = 0; ; attempt++) {
-					const timeout = remaining();
+					const timeout = Math.min(remaining(), 30_000);
 
 					try {
 						return await request(
@@ -621,7 +621,7 @@ async function readActivityFeedRun(
 						returnFullResponse: true,
 						headers: routedHeaders(),
 						url: `${endpoint}/${encodeURIComponent(id)}`,
-						timeout: remaining(),
+						timeout: Math.min(remaining(), 30_000),
 						json: false,
 						encoding: 'text',
 					},

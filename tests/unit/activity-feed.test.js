@@ -1111,6 +1111,77 @@ test('ActivityFeed honours Retry-After and cleans completed queries inside the r
 	assert.deepEqual(deletes, [1000]);
 });
 
+test('ActivityFeed waits a full long Retry-After while keeping request timeouts capped', async () => {
+	let time = 0;
+	const polls = [];
+	const waits = [];
+	const events = await readActivityFeed(
+		async (request) => {
+			assert.ok(request.timeout <= 30_000);
+			if (request.method === 'DELETE') return {};
+			if (request.method === 'POST') return { id: 'query-1' };
+			polls.push(time);
+			if (polls.length === 1) throw { statusCode: 429, headers: { 'retry-after': '60' } };
+			return response([row()]);
+		},
+		BASE,
+		START,
+		START + 1,
+		[],
+		{
+			now: () => time,
+			sleep: async (ms) => {
+				waits.push(ms);
+				time += ms;
+			},
+			deadlineMs: 90_000,
+			lifecycleMs: 90_000,
+		},
+	);
+	assert.equal(events.length, 1);
+	assert.deepEqual(waits, [1500, 60_000]);
+	assert.deepEqual(polls, [1500, 61_500]);
+
+	for (const limits of [
+		{ deadlineMs: 60_000, lifecycleMs: 90_000 },
+		{ deadlineMs: 90_000, lifecycleMs: 60_000 },
+	]) {
+		for (const progress of [false, true]) {
+			time = 0;
+			let launches = 0;
+			const warnings = [];
+			const run = () =>
+				readActivityFeedPrefix(
+					async (request) => {
+						if (request.method === 'DELETE') return {};
+						if (request.method === 'POST')
+							return ++launches === 1 && progress ? logResponse([logMatch()]) : { id: 'query-1' };
+						throw { statusCode: 429, headers: { 'retry-after': '60' } };
+					},
+					prefixOptions({
+						timing: {
+							now: () => time,
+							sleep: async (ms) => {
+								time += ms;
+							},
+							warnLog: (...warning) => warnings.push(warning),
+							...limits,
+						},
+					}),
+				);
+			if (progress) {
+				const result = await run();
+				assert.equal(result.events.length, 1);
+				assert.equal(result.completedThroughMs, START + 300_000);
+				assert.equal(warnings[0][1].statusCode, 429);
+			} else {
+				await assert.rejects(run(), (error) => error.statusCode === 429);
+			}
+			assert.equal(time, 1500);
+		}
+	}
+});
+
 test('ActivityFeed preserves permanent HTTP failures after progress even when the deadline has passed', async () => {
 	for (const statusCode of [401, 403, 404]) {
 		let time = 0;

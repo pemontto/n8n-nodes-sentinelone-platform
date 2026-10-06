@@ -16,7 +16,7 @@ import {
 } from './ActivityFeed';
 import { compileExclusions, matchesExclusion } from './Exclusions';
 import { matchesActivityConditions } from './ActivityConditions';
-import { responseStatus } from '../shared/transport/retry';
+import { isRetryableReadError, responseStatus, retryAfterMs } from '../shared/transport/retry';
 import { PollBudgetError } from '../shared/transport/request';
 import { ActivityFeedBudgetError } from './ActivityFeed';
 
@@ -175,6 +175,8 @@ interface AlertLookup {
 	unresolvedIds: Set<string>;
 	/** Alert IDs whose lookup the poll budget cut short; nothing is known about them yet. */
 	pendingIds: Set<string>;
+	/** Preserve the HTTP failure if no resolved prefix can advance the poll. */
+	stopped?: unknown;
 }
 
 async function currentAlerts(
@@ -189,6 +191,7 @@ async function currentAlerts(
 
 	if (!accounts.length) throw fail('requires resolved account IDs');
 	const pendingIds = new Set<string>();
+	let stopped: unknown;
 
 	async function lookup(
 		wanted: string[],
@@ -205,53 +208,83 @@ async function currentAlerts(
 					scopes: scopeIds.slice(index, index + 500),
 				});
 
-		return (
-			await parallel(batches, async ({ chunk, scopes }) => {
-				const filters: IDataObject[] = [{ fieldId: 'id', stringIn: { values: chunk } }];
+		const transientStops: unknown[] = [];
+		let completedBatches = 0;
 
-				if (filtered) {
-					if (config.severities.length)
-						filters.push({ fieldId: 'severity', stringIn: { values: config.severities } });
+		const results = await parallel(batches, async ({ chunk, scopes }) => {
+			const filters: IDataObject[] = [{ fieldId: 'id', stringIn: { values: chunk } }];
 
-					if (config.statuses.length)
-						filters.push({ fieldId: 'status', stringIn: { values: config.statuses } });
-					filters.push({ fieldId: 'alertName', match: { values: [config.alertName.trim()] } });
-				}
+			if (filtered) {
+				if (config.severities.length)
+					filters.push({ fieldId: 'severity', stringIn: { values: config.severities } });
 
-				let found: IDataObject[];
+				if (config.statuses.length)
+					filters.push({ fieldId: 'status', stringIn: { values: config.statuses } });
+				filters.push({ fieldId: 'alertName', match: { values: [config.alertName.trim()] } });
+			}
 
-				try {
-					found = await pages(
-						request,
-						config,
-						ALERT_QUERY,
-						{ first: 200, filters, scope: { scopeType, scopeIds: scopes } },
-						'alerts',
-						config.maxAlertPages,
-					);
-				} catch (error) {
+			let found: IDataObject[];
+
+			try {
+				found = await pages(
+					request,
+					config,
+					ALERT_QUERY,
+					{ first: 200, filters, scope: { scopeType, scopeIds: scopes } },
+					'alerts',
+					config.maxAlertPages,
+				);
+			} catch (error) {
+				if (!(error instanceof PollBudgetError)) {
 					// The trigger boundary wraps lookup failures with its node context.
-					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
-					if (!(error instanceof PollBudgetError)) throw error;
-
-					for (const id of chunk) pendingIds.add(id);
-
-					return [];
+					if (
+						responseStatus(error) === null ||
+						!isRetryableReadError(error) ||
+						Date.now() + Math.max(1000, retryAfterMs(error)) < (config.pollDeadlineMs ?? Infinity)
+					)
+						// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+						throw error;
+					transientStops.push(error);
+					stopped ??= error;
 				}
 
-				for (const alert of found) {
-					if (!stringId(alert.id) || !chunk.includes(alert.id))
-						throw fail('received an unrequested alert');
-					const scope = scopeOf(config, alert);
-					const accountId = record(scope.account)?.id;
+				for (const id of chunk) pendingIds.add(id);
 
-					if (!stringId(accountId) || !(filtered ? accounts : scopes).includes(accountId))
-						throw fail('received an alert outside the requested account scope');
-				}
+				return [];
+			}
 
-				return found;
-			})
-		).flat();
+			for (const alert of found) {
+				if (!stringId(alert.id) || !chunk.includes(alert.id))
+					throw fail('received an unrequested alert');
+				const scope = scopeOf(config, alert);
+				const accountId = record(scope.account)?.id;
+
+				if (!stringId(accountId) || !(filtered ? accounts : scopes).includes(accountId))
+					throw fail('received an alert outside the requested account scope');
+			}
+
+			completedBatches++;
+
+			return found;
+		});
+
+		// Wait for concurrent batches before deciding whether a transient stop has progress to hand over.
+		if (transientStops.length && completedBatches === 0) throw transientStops[0];
+
+		for (const error of transientStops) {
+			try {
+				config.warnLog?.(
+					'Current alert lookup stopped before its retry fit the poll time budget.',
+					{
+						httpStatus: responseStatus(error),
+					},
+				);
+			} catch {
+				// Logging must not change delivery or checkpoint state.
+			}
+		}
+
+		return results.flat();
 	}
 
 	const found = await lookup(ids, 'ACCOUNT', accounts, false);
@@ -309,7 +342,7 @@ async function currentAlerts(
 		}
 	}
 
-	return { alerts, unresolvedIds, pendingIds };
+	return { alerts, unresolvedIds, pendingIds, stopped };
 }
 
 function output(config: TriggerConfig, alert: IDataObject, event: ActivityFeedEvent): IDataObject {
@@ -663,6 +696,10 @@ export async function pollAlertActivities(
 				candidates.every((event) => previous.has(event.activityId))
 			) {
 				warnNoProgress(config, Number(checkpoint));
+
+				// The trigger boundary reports the original transient HTTP status when there is no prefix to hand over.
+				if (lookup.stopped !== undefined) throw lookup.stopped;
+
 				throw fail(
 					`activity stream is stuck at checkpoint ${new Date(Number(checkpoint)).toISOString()} because the n8n poll time budget ended before the current alert lookup completed a forward window`,
 				);
