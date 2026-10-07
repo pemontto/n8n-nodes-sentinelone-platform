@@ -18,12 +18,12 @@ const comparatorDefinitions = [
 	{ name: 'Ends With', value: 'endsWith', types: ['STRING_ENDS_WITH'], api: 'match' },
 	{ name: 'Exact Match', value: 'exactMatch', types: ['FULLTEXT'], api: 'match' },
 	{ name: 'Is Any Of', value: 'stringIn', types: ['STRING_IN'], api: 'stringIn' },
-	{ name: 'Is Any Of', value: 'longIn', types: ['LONG_IN', 'LONG_EQUAL'], api: 'longIn' },
-	{ name: 'Is True', value: 'isTrue', types: ['BOOLEAN_EQUAL', 'BOOLEAN_IN'], api: 'booleanEqual' },
+	{ name: 'Is Any Of', value: 'longIn', types: ['LONG_IN'], api: 'longIn' },
+	{ name: 'Is True', value: 'isTrue', types: ['BOOLEAN_EQUAL'], api: 'booleanEqual' },
 	{
 		name: 'Is False',
 		value: 'isFalse',
-		types: ['BOOLEAN_EQUAL', 'BOOLEAN_IN'],
+		types: ['BOOLEAN_EQUAL'],
 		api: 'booleanEqual',
 	},
 	{ name: 'After', value: 'after', types: ['DATE_RANGE'], api: 'dateTimeRange' },
@@ -156,7 +156,7 @@ export async function loadAlertFilterMetadata(
 	const response = (await request({
 		method: 'POST',
 		url: `${baseUrl}/web/api/v2.1/unifiedalerts/graphql`,
-		timeout: 30_000,
+		timeout: 10_000,
 		json: true,
 		body: { query: 'query { alertColumnMetadata { fieldId filterTypes enableNegation } }' },
 	})) as { data?: { alertColumnMetadata?: AlertFilterMetadata[] }; errors?: unknown[] };
@@ -334,7 +334,7 @@ export function validateAlertFilters(
 			);
 		const comparator = Object.keys(filter).find((key) => key !== 'fieldId' && key !== 'isNegated')!;
 
-		// Match operators need their own metadata capability; boolean membership is an equivalent fallback.
+		// Match operators need their own metadata capability.
 		const definition = comparatorDefinitions.find(
 			(entry) =>
 				entry.api === comparator &&
@@ -350,12 +350,6 @@ export function validateAlertFilters(
 					.map(({ value }) => value)
 					.join(', ')}.`,
 			);
-
-		if (comparator === 'booleanEqual' && !field.filterTypes.includes('BOOLEAN_EQUAL')) {
-			const value = (filter.booleanEqual as IDataObject).value;
-			delete filter.booleanEqual;
-			filter.booleanIn = { values: [value] };
-		}
 
 		if (filter.isNegated && !field.enableNegation)
 			throw new TriggerFilterError(

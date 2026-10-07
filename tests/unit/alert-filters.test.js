@@ -745,9 +745,8 @@ for (const [type, row, expected] of [
 	],
 	['STRING_IN', { comparator: 'stringIn', value: 'Alpha' }, { stringIn: { values: ['Alpha'] } }],
 	['BOOLEAN_EQUAL', { comparator: 'isTrue' }, { booleanEqual: { value: true } }],
-	['BOOLEAN_IN', { comparator: 'isFalse' }, { booleanIn: { values: [false] } }],
+	['BOOLEAN_EQUAL', { comparator: 'isFalse' }, { booleanEqual: { value: false } }],
 	['LONG_IN', { comparator: 'longIn', value: '12\n34' }, { longIn: { values: [12, 34] } }],
-	['LONG_EQUAL', { comparator: 'longIn', value: [12, '34'] }, { longIn: { values: [12, 34] } }],
 	['DATE_RANGE', { comparator: 'after', date: NOW }, { dateTimeRange: { start: NOW } }],
 ]) {
 	test(`dropdown, validation and encoding agree for ${type} ${row.comparator}`, async () => {
@@ -782,11 +781,19 @@ for (const [comparator, type] of [
 	['endsWith', 'FULLTEXT'],
 	['contains', 'STRING_STARTS_WITH'],
 	['exactMatch', 'STRING_ENDS_WITH'],
+	['isTrue', 'BOOLEAN_IN'],
+	['longIn', 'LONG_EQUAL'],
 ]) {
 	test(`${comparator} rejects metadata containing only ${type}`, async () => {
 		await assert.rejects(
 			poll(
-				{ alertFilters: { filter: [{ fieldId: 'exampleField', comparator, value: 'x' }] } },
+				{
+					alertFilters: {
+						filter: [
+							{ fieldId: 'exampleField', comparator, value: comparator === 'longIn' ? '12' : 'x' },
+						],
+					},
+				},
 				{
 					metadataResponse: [
 						{ fieldId: 'exampleField', filterTypes: [type], enableNegation: true },
@@ -794,7 +801,9 @@ for (const [comparator, type] of [
 				},
 			),
 			(error) => {
-				assert.match(error.description, /exampleField does not support match/);
+				if (type === 'BOOLEAN_IN' || type === 'LONG_EQUAL')
+					assert.equal(error.description, 'exampleField is not a filterable field');
+				else assert.match(error.description, /exampleField does not support match/);
 				return true;
 			},
 		);
@@ -951,7 +960,8 @@ for (const status of [401, 403]) {
 
 test('metadata dropdown cache is shared per credential and expires after a few minutes', async () => {
 	let calls = 0;
-	const request = async () => {
+	const request = async (options) => {
+		assert.equal(options.timeout, 10_000);
 		calls++;
 		return { data: { alertColumnMetadata: metadata } };
 	};
@@ -967,45 +977,6 @@ test('metadata dropdown cache is shared per credential and expires after a few m
 		now += 4 * 60_000;
 		await loadAlertFilterMetadata(request, 'https://tenant.example', 'cache-credential-a');
 		assert.equal(calls, 3);
-	} finally {
-		Date.now = originalNow;
-	}
-});
-
-test('BOOLEAN_IN-only fields keep boolean membership on following polls', async () => {
-	const ctx = context(
-		'boolean-membership-polls',
-		{
-			alertFilters: { filter: [{ fieldId: 'ticketIdExists', comparator: 'isTrue' }] },
-		},
-		{
-			mode: 'scheduled',
-			metadataResponse: [
-				{ fieldId: 'ticketIdExists', filterTypes: ['BOOLEAN_IN'], enableNegation: false },
-			],
-		},
-	);
-	const trigger = new SentinelOnePlatformTrigger();
-	const originalNow = Date.now;
-	let now = NOW;
-	Date.now = () => now;
-	try {
-		await trigger.poll.call(ctx);
-		now += 60_000;
-		await trigger.poll.call(ctx);
-		const queries = ctx.requests.filter(
-			(request) => request.body?.query && !request.body.query.includes('alertColumnMetadata'),
-		);
-		assert.ok(queries.length > 0);
-		for (const query of queries)
-			assert.deepEqual(query.body.variables.filters.at(-1), {
-				fieldId: 'ticketIdExists',
-				booleanIn: { values: [true] },
-			});
-		assert.equal(
-			ctx.requests.filter((request) => request.body?.query?.includes('alertColumnMetadata')).length,
-			1,
-		);
 	} finally {
 		Date.now = originalNow;
 	}
