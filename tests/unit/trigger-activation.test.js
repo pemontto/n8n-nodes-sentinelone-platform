@@ -6,7 +6,11 @@ const {
 
 const START = Date.parse('2026-10-01T12:00:00Z');
 
-function context(id, rows, { budget, operation = 'new', nodeId = 'node-1' } = {}) {
+function context(
+	id,
+	rows,
+	{ budget, operation = 'new', nodeId = 'node-1', rawParameters, credentialId = id } = {},
+) {
 	const staticData = {};
 	const requests = [];
 	const warnings = [];
@@ -27,7 +31,8 @@ function context(id, rows, { budget, operation = 'new', nodeId = 'node-1' } = {}
 		getNode: () => ({
 			id: nodeId,
 			name: 'Trigger',
-			credentials: { sentinelOnePlatformApi: { id: 'credential-1' } },
+			parameters: rawParameters ?? parameters,
+			credentials: { sentinelOnePlatformApi: { id: credentialId } },
 		}),
 		getWorkflow: () => ({ id }),
 		getNodeParameter: (name, fallback) => parameters[name] ?? fallback,
@@ -39,6 +44,14 @@ function context(id, rows, { budget, operation = 'new', nodeId = 'node-1' } = {}
 				requests.push(request);
 				if (request.url.endsWith('/accounts'))
 					return { data: [{ id: 'account-1', name: 'Example' }], pagination: { nextCursor: null } };
+				if (request.body.query.includes('alertColumnMetadata'))
+					return {
+						data: {
+							alertColumnMetadata: [
+								{ fieldId: 'identifiedAt', filterTypes: ['DATE_RANGE'], enableNegation: true },
+							],
+						},
+					};
 				const { sortBy, sortOrder, filters, after, first } = request.body.variables;
 				assert.equal(sortOrder, 'ASC');
 				const range = filters.find((filter) => filter.fieldId === sortBy).dateTimeRange;
@@ -130,6 +143,169 @@ test('activation cache is keyed by workflow and node and replaces changed config
 	const otherNode = context('activation-config', [], { nodeId: 'node-2' });
 	await at(START + 240_000, () => trigger.poll.call(otherNode));
 	assert.equal(otherNode.staticData.sentinelOneTrigger.activationMs, START + 240_000);
+});
+
+const expressionFilters = [
+	{
+		name: 'Alert Filters',
+		raw: {
+			alertFilters: {
+				filter: [
+					{
+						fieldId: 'identifiedAt',
+						comparator: 'after',
+						date: '={{ $now.minus({ hours: 1 }).toISO() }}',
+					},
+				],
+			},
+		},
+		evaluated(time) {
+			return {
+				alertFilters: {
+					filter: [
+						{
+							fieldId: 'identifiedAt',
+							comparator: 'after',
+							date: new Date(time - 3_600_000).toISOString(),
+						},
+					],
+				},
+			};
+		},
+		assertRequest(request, time) {
+			assert.equal(
+				request.body.variables.filters.find((filter) => filter.fieldId === 'identifiedAt')
+					.dateTimeRange.start,
+				time - 3_600_000,
+			);
+		},
+	},
+	{
+		name: 'Advanced Filters',
+		raw: {
+			options: {
+				advancedFilters:
+					'={{ [{ fieldId: "identifiedAt", dateTimeRange: { start: $now.minus({ hours: 1 }).toMillis() } }] }}',
+			},
+		},
+		evaluated(time) {
+			return {
+				options: {
+					advancedFilters: [
+						{ fieldId: 'identifiedAt', dateTimeRange: { start: time - 3_600_000 } },
+					],
+				},
+			};
+		},
+		assertRequest(request, time) {
+			assert.equal(
+				request.body.variables.filters.find((filter) => filter.fieldId === 'identifiedAt')
+					.dateTimeRange.start,
+				time - 3_600_000,
+			);
+		},
+	},
+	{
+		name: 'Alert Name',
+		raw: { options: { alertName: '={{ $now.toISO() }}' } },
+		evaluated(time) {
+			return { options: { alertName: new Date(time).toISOString() } };
+		},
+		assertRequest(request, time) {
+			assert.deepEqual(
+				request.body.variables.filters.find((filter) => filter.fieldId === 'alertName').match
+					.values,
+				[new Date(time).toISOString()],
+			);
+		},
+	},
+	{
+		name: 'Options collection',
+		raw: { options: '={{ { alertName: $now.toISO() } }}' },
+		evaluated(time) {
+			return { options: { alertName: new Date(time).toISOString() } };
+		},
+		assertRequest(request, time) {
+			assert.deepEqual(
+				request.body.variables.filters.find((filter) => filter.fieldId === 'alertName').match
+					.values,
+				[new Date(time).toISOString()],
+			);
+		},
+	},
+];
+
+for (const [index, filter] of expressionFilters.entries()) {
+	test(`${filter.name} evaluates each poll without replacing its saved-expression baseline`, async () => {
+		const trigger = new SentinelOnePlatformTrigger();
+		const rawParameters = { resource: 'alert', operation: 'new', ...filter.raw };
+		const make = (time, rows) => {
+			const instance = context(`activation-expression-${index}`, rows, { rawParameters });
+			Object.assign(instance.parameters, filter.evaluated(time));
+			return instance;
+		};
+		const activation = make(START, []);
+		assert.equal(await at(START, () => trigger.poll.call(activation)), null);
+		const scheduled = make(START + 60_000, [row('expression-alert', START + 20_000)]);
+		const output = await at(START + 60_000, () => trigger.poll.call(scheduled));
+		assert.equal(output[0][0].json.eventId, 'console.example/alert/expression-alert/new');
+		assert.equal(scheduled.staticData.sentinelOneTrigger.activationMs, START);
+		assert.equal(
+			scheduled.staticData.sentinelOneTrigger.configFingerprint,
+			activation.staticData.sentinelOneTrigger.configFingerprint,
+		);
+		filter.assertRequest(
+			scheduled.requests.find((request) => request.body?.variables?.sortBy),
+			START + 60_000,
+		);
+
+		const changedRaw = structuredClone(rawParameters);
+		if (changedRaw.alertFilters)
+			changedRaw.alertFilters.filter[0].date = '={{ $now.minus({ hours: 2 }).toISO() }}';
+		else if (typeof changedRaw.options === 'string')
+			changedRaw.options = '={{ { alertName: $now.plus({ minutes: 1 }).toISO() } }}';
+		else if (changedRaw.options.advancedFilters)
+			changedRaw.options.advancedFilters = changedRaw.options.advancedFilters.replace('1', '2');
+		else changedRaw.options.alertName = '={{ $now.plus({ minutes: 1 }).toISO() }}';
+		const changed = context(`activation-expression-${index}`, [], { rawParameters: changedRaw });
+		Object.assign(changed.parameters, filter.evaluated(START + 120_000));
+		assert.equal(await at(START + 120_000, () => trigger.poll.call(changed)), null);
+		assert.equal(changed.staticData.sentinelOneTrigger.activationMs, START + 120_000);
+		assert.notEqual(
+			changed.staticData.sentinelOneTrigger.configFingerprint,
+			activation.staticData.sentinelOneTrigger.configFingerprint,
+		);
+	});
+}
+
+test('static configurations without Alert Filter rows retain their 0.1.0 fingerprints', async () => {
+	const trigger = new SentinelOnePlatformTrigger();
+	for (const [index, alertFilters] of [undefined, {}, { filter: [] }].entries()) {
+		const plain = context(`activation-legacy-plain-${index}`, [], { credentialId: 'credential-1' });
+		if (alertFilters) plain.parameters.alertFilters = alertFilters;
+		await at(START, () => trigger.poll.call(plain));
+		assert.equal(plain.staticData.sentinelOneTrigger.configFingerprint, '194e7896');
+
+		const filtered = context(`activation-legacy-filtered-${index}`, [], {
+			credentialId: 'credential-1',
+		});
+		filtered.parameters.options = {
+			alertName: 'Example',
+			advancedFilters: '[{"fieldId":"severity","stringIn":{"values":["HIGH"]}}]',
+		};
+		if (alertFilters) filtered.parameters.alertFilters = alertFilters;
+		await at(START, () => trigger.poll.call(filtered));
+		assert.equal(filtered.staticData.sentinelOneTrigger.configFingerprint, '9e8e20c8');
+		const retained = context(`activation-legacy-filtered-${index}`, [], {
+			credentialId: 'credential-1',
+		});
+		Object.assign(retained.parameters, filtered.parameters);
+		retained.staticData.sentinelOneTrigger = structuredClone(
+			filtered.staticData.sentinelOneTrigger,
+		);
+		await at(START + 60_000, () => trigger.poll.call(retained));
+		assert.equal(retained.staticData.sentinelOneTrigger.activationMs, START);
+	}
 });
 
 test('activation baseline expires after one hour', async () => {

@@ -42,6 +42,12 @@ export interface TriggerConfig extends ExclusionPatterns {
 	advancedFilters?: unknown;
 	alertFilters?: IDataObject[];
 	alertFilterMatch?: 'all' | 'any';
+	/** Saved parameter values keep relative expressions from resetting the baseline on every poll. */
+	filterParameters?: {
+		alertName?: unknown;
+		advancedFilters?: unknown;
+		alertFilters?: unknown;
+	};
 	simplifyOutput: boolean;
 	additionalAlertFields?: string[];
 	debug: boolean;
@@ -219,8 +225,6 @@ function advancedSelection(baseFilters: IDataObject[], input: unknown): FilterSe
 	}
 
 	if (Array.isArray(value)) {
-		if (value.length > 100) throw new Error('Advanced Filters supports at most 100 filters.');
-
 		return { filters: [...baseFilters, ...value.map(validateRawFilter)], orFilter: null };
 	}
 
@@ -229,17 +233,14 @@ function advancedSelection(baseFilters: IDataObject[], input: unknown): FilterSe
 	if (!selection || Object.keys(selection).length !== 1 || !Array.isArray(selection.or))
 		throw new Error('Advanced Filters must be a FilterInput array or an object containing or.');
 
-	if (selection.or.length === 0 || selection.or.length > 20)
-		throw new Error('Advanced Filters or must contain from 1 to 20 groups.');
+	if (selection.or.length === 0)
+		throw new Error('Advanced Filters or must contain at least one group.');
 
 	const groups = selection.or.map((value) => {
 		const group = asRecord(value);
 
 		if (!group || Object.keys(group).length !== 1 || !Array.isArray(group.and))
 			throw new Error('Each Advanced Filters or group must contain an and array.');
-
-		if (group.and.length > 100)
-			throw new Error('Each Advanced Filters and group supports at most 100 filters.');
 
 		return { and: [...baseFilters, ...group.and.map(validateRawFilter)] };
 	});
@@ -253,28 +254,41 @@ export function advancedFilterSelection(
 	rows: IDataObject[] = [],
 	match: 'all' | 'any' = 'all',
 ): FilterSelection {
-	if (match === 'all' || rows.length === 0)
-		return advancedSelection([...baseFilters, ...rows], input);
-	const advanced = advancedSelection([], input);
-	// SAFETY: advancedSelection constructs only groups with an and array.
+	let selection: FilterSelection;
 
-	const groups = advanced.orFilter
-		? (advanced.orFilter.or as Array<{ and: IDataObject[] }>)
-		: [{ and: advanced.filters ?? [] }];
+	if (match === 'all' || rows.length === 0) {
+		selection = advancedSelection([...baseFilters, ...rows], input);
+	} else {
+		const advanced = advancedSelection([], input);
+		// SAFETY: advancedSelection constructs only groups with an and array.
 
-	if (rows.length * groups.length > 20)
+		const groups = advanced.orFilter
+			? (advanced.orFilter.or as Array<{ and: IDataObject[] }>)
+			: [{ and: advanced.filters ?? [] }];
+
+		selection = {
+			filters: null,
+			orFilter: {
+				or: rows.flatMap((row) =>
+					groups.map((group) => ({ and: [...baseFilters, row, ...group.and] })),
+				),
+			},
+		};
+	}
+	// SAFETY: both selection paths construct flat and groups.
+
+	const groups = selection.orFilter
+		? (selection.orFilter.or as Array<{ and: IDataObject[] }>)
+		: [{ and: selection.filters ?? [] }];
+
+	const filterCount = Math.max(...groups.map((group) => group.and.length));
+
+	if (groups.length > 20 || filterCount > 100)
 		throw new Error(
-			'Alert Filters with Advanced Filters supports at most 20 OR groups. Reduce the filter rows or Advanced Filters groups.',
+			`Combined alert filters contain ${groups.length} groups and up to ${filterCount} filters per group; limits are 20 groups and 100 filters per group.`,
 		);
 
-	return {
-		filters: null,
-		orFilter: {
-			or: rows.flatMap((row) =>
-				groups.map((group) => ({ and: [...baseFilters, row, ...group.and] })),
-			),
-		},
-	};
+	return selection;
 }
 
 function stableStringify(value: unknown): string {
@@ -360,7 +374,27 @@ async function mapWithConcurrency<T, R>(
 	return results;
 }
 
+function containsExpression(value: unknown): boolean {
+	if (typeof value === 'string') return value.startsWith('=');
+
+	if (Array.isArray(value)) return value.some(containsExpression);
+
+	const object = asRecord(value);
+
+	return object ? Object.values(object).some(containsExpression) : false;
+}
+
 export function fingerprintConfig(config: TriggerConfig): string {
+	const raw = config.filterParameters;
+	const rawAdvancedFilters = raw?.advancedFilters;
+	// Static configurations without builder rows retain the 0.1.0 fingerprint shape.
+
+	const rawFilters =
+		raw &&
+		(config.alertFilters?.length ||
+			containsExpression(rawAdvancedFilters) ||
+			containsExpression(raw.alertFilters));
+
 	return simpleHash(
 		stableStringify({
 			baseUrl: config.baseUrl,
@@ -374,13 +408,19 @@ export function fingerprintConfig(config: TriggerConfig): string {
 			events: [...config.events].sort(),
 			severities: [...config.severities].sort(),
 			statuses: [...config.statuses].sort(),
-			alertName: config.alertName.trim(),
-			advancedFilters: advancedFilterSelection(
-				[],
-				config.advancedFilters,
-				config.alertFilters,
-				config.alertFilterMatch,
-			),
+			alertName: (raw ? String(raw.alertName ?? '') : config.alertName).trim(),
+			advancedFilters: rawFilters
+				? {
+						advancedFilters: rawAdvancedFilters ?? [],
+						alertFilters: raw.alertFilters ?? {},
+						match: config.alertFilterMatch ?? 'all',
+					}
+				: advancedFilterSelection(
+						[],
+						raw ? rawAdvancedFilters : config.advancedFilters,
+						config.alertFilters,
+						config.alertFilterMatch,
+					),
 			excludeAccountName: config.excludeAccountName ?? '',
 			excludeSiteName: config.excludeSiteName ?? '',
 			excludeGroupName: config.excludeGroupName ?? '',

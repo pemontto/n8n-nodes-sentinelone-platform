@@ -1,7 +1,7 @@
 import {
 	alertFilterProperties,
 	alertFilterComparators,
-	alertComparatorFilterTypes,
+	comparatorsForField,
 	loadAlertFilterMetadata,
 	parseAlertFilters,
 	validateAlertFilters,
@@ -266,7 +266,7 @@ function readStringArray(
 	return readManagementScopeIds(context, name, undefined, true);
 }
 
-function credentialIdentity(context: IPollFunctions): IDataObject {
+function credentialIdentity(context: IPollFunctions | ILoadOptionsFunctions): IDataObject {
 	// SAFETY: n8n credentials are exposed as a JSON object keyed by credential type.
 	const credentials = context.getNode().credentials as IDataObject | undefined;
 	// SAFETY: the selected SentinelOne API credential is a JSON object when configured.
@@ -742,6 +742,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					const fields = await loadAlertFilterMetadata(
 						authenticatedRequest(this),
 						normalizeBaseUrl(credentials.baseUrl),
+						String(credentialIdentity(this).id ?? ''),
 					);
 
 					return fields.map(({ fieldId }) => ({ name: fieldId, value: fieldId }));
@@ -749,6 +750,14 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					// Preserve authentication, permission, rate limit and timeout errors.
 					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
 					if (error instanceof NodeApiError) throw error;
+					const status = responseStatus(error);
+
+					if (status !== null)
+						throw new NodeApiError(
+							this.getNode(),
+							{ message: errorMessage(error) },
+							{ httpCode: String(status) },
+						);
 
 					throw new NodeOperationError(
 						this.getNode(),
@@ -771,18 +780,24 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					const fields = await loadAlertFilterMetadata(
 						authenticatedRequest(this),
 						normalizeBaseUrl(credentials.baseUrl),
+						String(credentialIdentity(this).id ?? ''),
 					);
 
 					const field = fields.find((entry) => entry.fieldId === fieldId);
 
 					if (!field) return alertFilterComparators;
 
-					return alertFilterComparators.filter((option) =>
-						alertComparatorFilterTypes[String(option.value)].some((type) =>
-							field.filterTypes?.includes(type),
-						),
-					);
-				} catch {
+					return comparatorsForField(field);
+				} catch (error) {
+					const status = responseStatus(error);
+
+					if (status === 401 || status === 403)
+						throw new NodeApiError(
+							this.getNode(),
+							{ message: errorMessage(error) },
+							{ httpCode: String(status) },
+						);
+
 					return alertFilterComparators;
 				}
 			},
@@ -837,6 +852,8 @@ export class SentinelOnePlatformTrigger implements INodeType {
 			const deadline = pollDeadline(this);
 			const credentials = await this.getCredentials('sentinelOnePlatformApi');
 			const options = this.getNodeParameter('options', {}) as IDataObject;
+			// SAFETY: saved collections contain their parameter object or an unevaluated expression.
+			const rawOptions = node.parameters?.options as IDataObject | string | undefined;
 			const nodeDebug = this.getNodeParameter('nodeDebug', false) === true;
 			const request = authenticatedRequest(this, nodeDebug, deadline);
 			const staticData = this.getWorkflowStaticData('node');
@@ -950,8 +967,20 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					advancedFilters: resource === 'alert' ? options.advancedFilters : undefined,
 					alertFilters:
 						resource === 'alert'
-							? parseAlertFilters(this.getNodeParameter('alertFilters', {}))
+							? parseAlertFilters(this.getNodeParameter('alertFilters', {}), this.getTimezone?.())
 							: [],
+					filterParameters: node.parameters
+						? {
+								alertName: typeof rawOptions === 'string' ? rawOptions : rawOptions?.alertName,
+								advancedFilters:
+									resource === 'alert'
+										? typeof rawOptions === 'string'
+											? rawOptions
+											: rawOptions?.advancedFilters
+										: undefined,
+								alertFilters: resource === 'alert' ? node.parameters.alertFilters : undefined,
+							}
+						: undefined,
 					alertFilterMatch:
 						this.getNodeParameter('alertFilterMatch', 'all') === 'any' ? 'any' : 'all',
 					// SAFETY: this multi-select parameter contains only the declared string field values.
@@ -1029,16 +1058,30 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						? (pendingBaselines.get(pollKey)?.state ?? previousState)
 						: previousState;
 
-				if (
-					config.alertFilters?.length &&
-					(!scheduled || state.initialized !== true || state.configFingerprint !== fingerprint)
-				) {
-					const metadata = await loadAlertFilterMetadata(request, baseUrl);
+				if (config.alertFilters?.length) {
+					let metadata;
 
 					try {
-						validateAlertFilters(config.alertFilters, metadata);
+						metadata = await loadAlertFilterMetadata(
+							request,
+							baseUrl,
+							String(credentialIdentity(this).id ?? ''),
+						);
 					} catch (error) {
-						throw new NodeOperationError(node, errorMessage(error));
+						// The poll boundary preserves HTTP status while adding node context.
+						// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+						if (!scheduled || [401, 403].includes(responseStatus(error) ?? 0)) throw error;
+						this.logger.warn(
+							`[SentinelOne Platform Trigger] Unable to validate Alert Filters against field metadata. ${errorMessage(error)}`,
+						);
+					}
+
+					if (metadata) {
+						try {
+							validateAlertFilters(config.alertFilters, metadata);
+						} catch (error) {
+							throw new NodeOperationError(node, errorMessage(error));
+						}
 					}
 				}
 

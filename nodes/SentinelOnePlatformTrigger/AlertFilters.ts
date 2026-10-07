@@ -1,31 +1,39 @@
 import type { IDataObject, INodeProperties, INodePropertyOptions } from 'n8n-workflow';
 import type { AuthenticatedRequest } from './SentinelOneTriggerHelpers';
+import { tryToParseDateTime } from 'n8n-workflow';
 
-const textComparators = ['contains', 'startsWith', 'endsWith', 'exactMatch', 'stringIn'];
-
-export const alertFilterComparators: INodePropertyOptions[] = [
-	{ name: 'Contains', value: 'contains' },
-	{ name: 'Starts With', value: 'startsWith' },
-	{ name: 'Ends With', value: 'endsWith' },
-	{ name: 'Exact Match', value: 'exactMatch' },
-	{ name: 'Is Any Of', value: 'stringIn' },
-	{ name: 'Is True', value: 'isTrue' },
-	{ name: 'Is False', value: 'isFalse' },
-	{ name: 'After', value: 'after' },
-	{ name: 'Before', value: 'before' },
+// This table drives editor options, validation and API encoding.
+const comparatorDefinitions = [
+	{ name: 'Contains', value: 'contains', types: ['FULLTEXT'], api: 'match' },
+	{ name: 'Starts With', value: 'startsWith', types: ['STRING_STARTS_WITH'], api: 'match' },
+	{ name: 'Ends With', value: 'endsWith', types: ['STRING_ENDS_WITH'], api: 'match' },
+	{ name: 'Exact Match', value: 'exactMatch', types: ['FULLTEXT'], api: 'match' },
+	{ name: 'Is Any Of', value: 'stringIn', types: ['STRING_IN'], api: 'stringIn' },
+	{ name: 'Is Any Of', value: 'longIn', types: ['LONG_IN', 'LONG_EQUAL'], api: 'longIn' },
+	{ name: 'Is True', value: 'isTrue', types: ['BOOLEAN_EQUAL', 'BOOLEAN_IN'], api: 'booleanEqual' },
+	{
+		name: 'Is False',
+		value: 'isFalse',
+		types: ['BOOLEAN_EQUAL', 'BOOLEAN_IN'],
+		api: 'booleanEqual',
+	},
+	{ name: 'After', value: 'after', types: ['DATE_RANGE'], api: 'dateTimeRange' },
+	{ name: 'Before', value: 'before', types: ['DATE_RANGE'], api: 'dateTimeRange' },
 ];
 
-export const alertComparatorFilterTypes: Record<string, string[]> = {
-	contains: ['FULLTEXT'],
-	startsWith: ['STRING_STARTS_WITH'],
-	endsWith: ['STRING_ENDS_WITH'],
-	exactMatch: ['FULLTEXT'],
-	stringIn: ['STRING_IN'],
-	isTrue: ['BOOLEAN_EQUAL', 'BOOLEAN_IN'],
-	isFalse: ['BOOLEAN_EQUAL', 'BOOLEAN_IN'],
-	after: ['DATE_RANGE'],
-	before: ['DATE_RANGE'],
-};
+const textComparators = comparatorDefinitions.flatMap(({ api, value }) =>
+	['match', 'stringIn', 'longIn'].includes(api) ? [value] : [],
+);
+
+export const alertFilterComparators: INodePropertyOptions[] = comparatorDefinitions.map(
+	({ name, value }) => ({ name, value }),
+);
+
+export function comparatorsForField(field: AlertFilterMetadata): INodePropertyOptions[] {
+	return comparatorDefinitions.flatMap(({ name, value, types }) =>
+		types.some((type) => field.filterTypes?.includes(type)) ? [{ name, value }] : [],
+	);
+}
 
 export const alertFilterProperties: INodeProperties[] = [
 	{
@@ -105,7 +113,7 @@ export const alertFilterProperties: INodeProperties[] = [
 			{ name: 'Match Any', value: 'any' },
 		],
 		description:
-			'How to combine Alert Filters. Severity, Status, Alert Name and Advanced Filters must also match.',
+			'How to combine Alert Filters. With Match Any, Exclude is one alternative; use Match All for exclusions that must always hold. Severity, Status, Alert Name and Advanced Filters must also match.',
 	},
 ];
 
@@ -115,11 +123,27 @@ export interface AlertFilterMetadata {
 	enableNegation: boolean;
 }
 
+const metadataCache = new Map<string, { expires: number; fields: AlertFilterMetadata[] }>();
+
+const metadataCacheMs = 3 * 60_000;
+
 export async function loadAlertFilterMetadata(
 	request: AuthenticatedRequest,
 	baseUrl: string,
+	cacheKey?: string,
 ): Promise<AlertFilterMetadata[]> {
+	const key = cacheKey ? `${baseUrl}:${cacheKey}` : undefined;
+	const now = Date.now();
+
+	for (const [entryKey, entry] of metadataCache) {
+		if (entry.expires <= now) metadataCache.delete(entryKey);
+	}
+
+	const cached = key ? metadataCache.get(key) : undefined;
+
+	if (cached) return cached.fields;
 	// SAFETY: the selected query returns this metadata envelope; its shape is checked before use.
+
 	const response = (await request({
 		method: 'POST',
 		url: `${baseUrl}/web/api/v2.1/unifiedalerts/graphql`,
@@ -128,10 +152,19 @@ export async function loadAlertFilterMetadata(
 		body: { query: 'query { alertColumnMetadata { fieldId filterTypes enableNegation } }' },
 	})) as { data?: { alertColumnMetadata?: AlertFilterMetadata[] }; errors?: unknown[] };
 
+	if (response?.errors?.length) {
+		const messages = response.errors.map((error) => {
+			if (error && typeof error === 'object' && 'message' in error) return String(error.message);
+
+			return String(error);
+		});
+
+		throw new Error(`SentinelOne alert filter metadata: ${messages.join('; ')}`);
+	}
+
 	const fields = response?.data?.alertColumnMetadata;
 
 	if (
-		response?.errors?.length ||
 		!Array.isArray(fields) ||
 		fields.some(
 			(field) =>
@@ -145,12 +178,16 @@ export async function loadAlertFilterMetadata(
 		throw new Error('SentinelOne returned no usable alert filter metadata.');
 	}
 
-	return fields
-		.filter((field) => (field.filterTypes?.length ?? 0) > 0)
+	const supported = fields
+		.filter((field) => comparatorsForField(field).length > 0)
 		.sort((a, b) => a.fieldId.localeCompare(b.fieldId));
+
+	if (key) metadataCache.set(key, { expires: now + metadataCacheMs, fields: supported });
+
+	return supported;
 }
 
-export function parseAlertFilters(input: unknown): IDataObject[] {
+export function parseAlertFilters(input: unknown, timezone?: string): IDataObject[] {
 	if (input === undefined || input === null) return [];
 
 	if (typeof input !== 'object' || Array.isArray(input))
@@ -169,10 +206,19 @@ export function parseAlertFilters(input: unknown): IDataObject[] {
 		const comparator = String(row.comparator ?? 'contains');
 
 		if (!fieldId) throw new Error('Alert Filters: select a field for every row.');
+		const definition = comparatorDefinitions.find(({ value }) => value === comparator);
+
+		if (!definition) throw new Error(`Alert Filters: ${fieldId} does not support ${comparator}`);
 		let comparison: IDataObject;
 
 		if (textComparators.includes(comparator)) {
 			// One value per line, or an array from an expression such as {{ ["A", "B"] }}.
+			if (
+				Array.isArray(row.value) &&
+				row.value.some((entry: unknown) => typeof entry !== 'string' && typeof entry !== 'number')
+			)
+				throw new Error(`Alert Filters: ${fieldId} values must be strings or numbers.`);
+
 			const entries: string[] = Array.isArray(row.value)
 				? row.value.map(String)
 				: String(row.value ?? '').split(/\r?\n/);
@@ -180,29 +226,70 @@ export function parseAlertFilters(input: unknown): IDataObject[] {
 			const values = entries.flatMap((line) => (line.trim() ? [line.trim()] : []));
 
 			if (!values.length) throw new Error(`Alert Filters: ${fieldId} needs at least one value.`);
-			comparison =
-				comparator === 'stringIn'
-					? { stringIn: { values } }
-					: { match: { operator: comparator, values } };
+
+			if (definition.api === 'longIn') {
+				const numbers = values.map(Number);
+
+				if (numbers.some((value) => !Number.isSafeInteger(value)))
+					throw new Error(
+						`Alert Filters: ${fieldId} needs numeric values that are safe whole numbers.`,
+					);
+
+				comparison = { longIn: { values: numbers } };
+			} else {
+				comparison =
+					definition.api === 'match'
+						? { match: { operator: comparator, values } }
+						: { [definition.api]: { values } };
+			}
 		} else if (comparator === 'isTrue' || comparator === 'isFalse') {
-			comparison = { booleanEqual: { value: comparator === 'isTrue' } };
+			comparison = { [definition.api]: { value: comparator === 'isTrue' } };
 		} else if (comparator === 'after' || comparator === 'before') {
-			const date = Date.parse(String(row.date ?? ''));
+			const input: unknown = row.date;
+
+			const isLuxonDate =
+				input !== null &&
+				typeof input === 'object' &&
+				'isLuxonDateTime' in input &&
+				input.isLuxonDateTime === true;
+
+			if (!['string', 'number'].includes(typeof input) && !(input instanceof Date) && !isLuxonDate)
+				throw new Error(`Alert Filters: ${fieldId} needs a valid date.`);
+			let date: number;
+
+			try {
+				// n8n's public parser uses Luxon and retains a supplied object's timezone.
+				const value =
+					typeof input === 'number'
+						? new Date(input)
+						: typeof input === 'string'
+							? input.trim()
+							: input;
+
+				const isoDay =
+					typeof value === 'string' ? /^(\d{4}-\d{2}-\d{2})(?=[T\s]|$)/i.exec(value) : null;
+
+				// Reject calendar rollover in the parser's legacy fallback, while allowing ISO midnight (24:00).
+				date =
+					isoDay && tryToParseDateTime(isoDay[1], timezone).toISODate() !== isoDay[1]
+						? NaN
+						: tryToParseDateTime(value, timezone).toMillis();
+			} catch {
+				date = NaN;
+			}
 
 			if (!Number.isFinite(date)) throw new Error(`Alert Filters: ${fieldId} needs a valid date.`);
-			comparison = { dateTimeRange: { [comparator === 'after' ? 'start' : 'end']: date } };
+
+			comparison = { [definition.api]: { [comparator === 'after' ? 'start' : 'end']: date } };
 		} else throw new Error(`Alert Filters: ${fieldId} does not support ${comparator}`);
 
-		return { fieldId, ...comparison, ...(row.exclude === true ? { isNegated: true } : {}) };
+		return {
+			fieldId,
+			...comparison,
+			...(row.exclude === true || row.exclude === 'true' ? { isNegated: true } : {}),
+		};
 	});
 }
-
-const comparatorFilterTypes: Record<string, string> = {
-	match: 'FULLTEXT',
-	stringIn: 'STRING_IN',
-	booleanEqual: 'BOOLEAN_EQUAL',
-	dateTimeRange: 'DATE_RANGE',
-};
 
 export function validateAlertFilters(
 	filters: IDataObject[],
@@ -218,8 +305,21 @@ export function validateAlertFilters(
 			);
 		const comparator = Object.keys(filter).find((key) => key !== 'fieldId' && key !== 'isNegated')!;
 
-		if (!field.filterTypes.includes(comparatorFilterTypes[comparator]))
+		// Match operators need their own metadata capability; boolean membership is an equivalent fallback.
+		const definition = comparatorDefinitions.find(
+			(entry) =>
+				entry.api === comparator &&
+				(comparator !== 'match' || entry.value === (filter.match as IDataObject).operator),
+		);
+
+		if (!definition?.types.some((type) => field.filterTypes?.includes(type)))
 			throw new Error(`Alert Filters: ${fieldId} does not support ${comparator}`);
+
+		if (comparator === 'booleanEqual' && !field.filterTypes.includes('BOOLEAN_EQUAL')) {
+			const value = (filter.booleanEqual as IDataObject).value;
+			delete filter.booleanEqual;
+			filter.booleanIn = { values: [value] };
+		}
 
 		if (filter.isNegated && !field.enableNegation)
 			throw new Error(`Alert Filters: ${fieldId} does not support Exclude`);

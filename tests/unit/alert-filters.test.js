@@ -13,7 +13,7 @@ const metadata = [
 	},
 	{
 		fieldId: 'alertName',
-		filterTypes: ['FULLTEXT', 'STRING_IN'],
+		filterTypes: ['FULLTEXT', 'STRING_IN', 'STRING_STARTS_WITH', 'STRING_ENDS_WITH'],
 		enableNegation: true,
 	},
 	{
@@ -22,6 +22,7 @@ const metadata = [
 		enableNegation: true,
 	},
 	{ fieldId: 'unfilterableField', filterTypes: [], enableNegation: false },
+	{ fieldId: 'notImplemented', filterTypes: ['STRING_EQUAL'], enableNegation: false },
 	{ fieldId: 'legacyNullTypes', filterTypes: null, enableNegation: false },
 	{ fieldId: 'legacyMissingTypes', enableNegation: false },
 ];
@@ -60,7 +61,7 @@ function filterMatches(alert, filter) {
 function context(
 	id,
 	params = {},
-	{ mode = 'manual', metadataResponse = metadata, alerts = [] } = {},
+	{ mode = 'manual', metadataResponse = metadata, alerts = [], timezone = 'UTC' } = {},
 ) {
 	const requests = [];
 	const staticData = {};
@@ -83,9 +84,11 @@ function context(
 		getNode: () => ({
 			id: 'node-1',
 			name: 'Alert Trigger',
-			credentials: { sentinelOnePlatformApi: { id: 'credential-1' } },
+			parameters,
+			credentials: { sentinelOnePlatformApi: { id: `credential-${id}` } },
 		}),
 		getWorkflow: () => ({ id }),
+		getTimezone: () => timezone,
 		getNodeParameter: (name, fallback) => parameters[name] ?? fallback,
 		getWorkflowStaticData: () => staticData,
 		helpers: {
@@ -438,7 +441,10 @@ test('Match Any rejects a filter and Advanced Filters cross product over 20 grou
 		alertFilterMatch: 'any',
 		options: { advancedFilters: JSON.stringify(advanced) },
 	});
-	await assert.rejects(trigger.poll.call(ctx), /at most 20 OR groups/);
+	await assert.rejects(
+		trigger.poll.call(ctx),
+		/21 groups and up to 3 filters per group; limits are 20 groups/,
+	);
 	assert.equal(alertQuery(ctx), undefined);
 });
 
@@ -617,13 +623,14 @@ const allComparators = [
 	'endsWith',
 	'exactMatch',
 	'stringIn',
+	'longIn',
 	'isTrue',
 	'isFalse',
 	'after',
 	'before',
 ];
 for (const [fieldId, expected] of [
-	['alertName', ['contains', 'exactMatch', 'stringIn']],
+	['alertName', ['contains', 'startsWith', 'endsWith', 'exactMatch', 'stringIn']],
 	['severity', ['stringIn']],
 	['ticketIdExists', ['isTrue', 'isFalse']],
 	['createdAt', ['after', 'before']],
@@ -634,7 +641,7 @@ for (const [fieldId, expected] of [
 	test(`comparator loader offers supported comparisons for ${fieldId || 'no field'}`, async () => {
 		const trigger = new SentinelOnePlatformTrigger();
 		const ctx = context(
-			'comparator-options',
+			`comparator-options-${fieldId}`,
 			{},
 			{
 				metadataResponse: [...metadata, { fieldId: 'severity', filterTypes: ['STRING_IN'] }],
@@ -692,4 +699,345 @@ test('n8n accepts empty and saved Alert Filters with dynamic comparator options'
 		);
 		assert.deepEqual(parameters.alertFilters, alertFilters);
 	}
+});
+
+const { DateTime } = require('luxon');
+const {
+	parseAlertFilters,
+	loadAlertFilterMetadata,
+} = require('../../dist/nodes/SentinelOnePlatformTrigger/AlertFilters.js');
+const {
+	advancedFilterSelection,
+} = require('../../dist/nodes/SentinelOnePlatformTrigger/SentinelOneTriggerHelpers.js');
+
+for (const [type, row, expected] of [
+	[
+		'FULLTEXT',
+		{ comparator: 'contains', value: 'Alpha' },
+		{ match: { operator: 'contains', values: ['Alpha'] } },
+	],
+	[
+		'FULLTEXT',
+		{ comparator: 'exactMatch', value: 'Alpha' },
+		{ match: { operator: 'exactMatch', values: ['Alpha'] } },
+	],
+	[
+		'STRING_STARTS_WITH',
+		{ comparator: 'startsWith', value: 'Alpha' },
+		{ match: { operator: 'startsWith', values: ['Alpha'] } },
+	],
+	[
+		'STRING_ENDS_WITH',
+		{ comparator: 'endsWith', value: 'Alpha' },
+		{ match: { operator: 'endsWith', values: ['Alpha'] } },
+	],
+	['STRING_IN', { comparator: 'stringIn', value: 'Alpha' }, { stringIn: { values: ['Alpha'] } }],
+	['BOOLEAN_EQUAL', { comparator: 'isTrue' }, { booleanEqual: { value: true } }],
+	['BOOLEAN_IN', { comparator: 'isFalse' }, { booleanIn: { values: [false] } }],
+	['LONG_IN', { comparator: 'longIn', value: '12\n34' }, { longIn: { values: [12, 34] } }],
+	['LONG_EQUAL', { comparator: 'longIn', value: [12, '34'] }, { longIn: { values: [12, 34] } }],
+	['DATE_RANGE', { comparator: 'after', date: NOW }, { dateTimeRange: { start: NOW } }],
+]) {
+	test(`dropdown, validation and encoding agree for ${type} ${row.comparator}`, async () => {
+		const field = { fieldId: 'exampleField', filterTypes: [type], enableNegation: true };
+		const ctx = context(
+			`table-${type}-${row.comparator}`,
+			{
+				alertFilters: { filter: [{ fieldId: field.fieldId, ...row }] },
+			},
+			{ metadataResponse: [field] },
+		);
+		ctx.getCurrentNodeParameter = () => field.fieldId;
+		const trigger = new SentinelOnePlatformTrigger();
+		const fields = await trigger.methods.loadOptions.getAlertFilterFields.call(ctx);
+		assert.deepEqual(fields, [{ name: field.fieldId, value: field.fieldId }]);
+		const options = await trigger.methods.loadOptions.getAlertFilterComparators.call(ctx);
+		assert.ok(options.some((option) => option.value === row.comparator));
+		await trigger.poll.call(ctx);
+		assert.deepEqual(alertQuery(ctx).body.variables.filters.at(-1), {
+			fieldId: field.fieldId,
+			...expected,
+		});
+		assert.equal(
+			ctx.requests.filter((request) => request.body?.query?.includes('alertColumnMetadata')).length,
+			1,
+		);
+	});
+}
+
+for (const [comparator, type] of [
+	['startsWith', 'FULLTEXT'],
+	['endsWith', 'FULLTEXT'],
+	['contains', 'STRING_STARTS_WITH'],
+	['exactMatch', 'STRING_ENDS_WITH'],
+]) {
+	test(`${comparator} rejects metadata containing only ${type}`, async () => {
+		await assert.rejects(
+			poll(
+				{ alertFilters: { filter: [{ fieldId: 'exampleField', comparator, value: 'x' }] } },
+				{
+					metadataResponse: [
+						{ fieldId: 'exampleField', filterTypes: [type], enableNegation: true },
+					],
+				},
+			),
+			/exampleField does not support match/,
+		);
+	});
+}
+
+for (const value of [['x'], [NaN], [Infinity], '123\nno-number', '1.5', '9007199254740993']) {
+	test(`number filters reject non-numeric values ${JSON.stringify(value)}`, () => {
+		assert.throws(
+			() => parseAlertFilters({ filter: [{ fieldId: 'count', comparator: 'longIn', value }] }),
+			/count needs numeric values/,
+		);
+	});
+}
+for (const value of [[{}], [true], [null], [[]], [undefined]]) {
+	test(`expression arrays reject unsupported entries ${JSON.stringify(value)}`, () => {
+		assert.throws(
+			() =>
+				parseAlertFilters({ filter: [{ fieldId: 'alertName', comparator: 'stringIn', value }] }),
+			/alertName values must be strings or numbers/,
+		);
+	});
+}
+for (const [exclude, expected] of [
+	['true', true],
+	['false', false],
+	[true, true],
+	[false, false],
+]) {
+	test(`Exclude ${JSON.stringify(exclude)} is interpreted as a boolean`, () => {
+		const [filter] = parseAlertFilters({
+			filter: [{ fieldId: 'alertName', comparator: 'contains', value: 'A', exclude }],
+		});
+		assert.equal(filter.isNegated === true, expected);
+	});
+}
+
+for (const [name, date, expected] of [
+	['local ISO in workflow timezone', '2026-07-01T12:00:00', Date.parse('2026-07-01T11:00:00Z')],
+	['ISO with explicit offset', '2026-07-01T12:00:00+02:00', Date.parse('2026-07-01T10:00:00Z')],
+	[
+		'Luxon object',
+		DateTime.fromISO('2026-07-01T12:00:00', { zone: 'Europe/London' }),
+		Date.parse('2026-07-01T11:00:00Z'),
+	],
+	['Date object', new Date(NOW), NOW],
+	['epoch milliseconds', NOW, NOW],
+	['ISO midnight at end of day', '2026-07-01T24:00:00', Date.parse('2026-07-01T23:00:00Z')],
+]) {
+	test(`Date accepts ${name} through the trigger`, async () => {
+		const { ctx } = await poll(
+			{ alertFilters: { filter: [{ fieldId: 'createdAt', comparator: 'after', date }] } },
+			{ timezone: 'Europe/London' },
+		);
+		assert.equal(alertQuery(ctx).body.variables.filters.at(-1).dateTimeRange.start, expected);
+	});
+}
+for (const date of [
+	'2026-02-30T12:00:00',
+	' 2026-02-30T12:00:00 ',
+	'2026-02-30 12:00:00',
+	'2026-02-30t12:00:00z',
+	['2026-07-01T12:00:00'],
+	true,
+	null,
+	new Date(NaN),
+	DateTime.invalid('fixture invalid'),
+	{},
+	Infinity,
+]) {
+	test(`invalid Date row rejects ${String(date)}`, () => {
+		assert.throws(
+			() =>
+				parseAlertFilters(
+					{ filter: [{ fieldId: 'createdAt', comparator: 'after', date }] },
+					'Europe/London',
+				),
+			/createdAt needs a valid date/,
+		);
+	});
+}
+
+test('metadata GraphQL errors include SentinelOne messages', async () => {
+	await assert.rejects(
+		loadAlertFilterMetadata(
+			async () => ({ errors: [{ message: 'fixture metadata unavailable' }] }),
+			'https://tenant.example',
+		),
+		/fixture metadata unavailable/,
+	);
+});
+for (const failure of [
+	new Error('fixture metadata unavailable'),
+	{ statusCode: 500, message: 'fixture server failure' },
+]) {
+	test(`activation warns and continues when metadata cannot load: ${failure.message}`, async () => {
+		const ctx = context(
+			`metadata-failure-${failure.message}`,
+			{
+				alertFilters: { filter: [{ fieldId: 'alertName', comparator: 'contains', value: 'A' }] },
+			},
+			{ mode: 'scheduled' },
+		);
+		const warnings = [];
+		ctx.logger.warn = (message) => warnings.push(message);
+		const request = ctx.helpers.httpRequestWithAuthentication;
+		ctx.helpers.httpRequestWithAuthentication = async (credential, options) => {
+			if (options.body?.query?.includes('alertColumnMetadata')) throw failure;
+			return request(credential, options);
+		};
+		await new SentinelOnePlatformTrigger().poll.call(ctx);
+		assert.ok(warnings.some((message) => /metadata|validation/i.test(message)));
+		assert.equal(ctx.staticData.sentinelOneTrigger.initialized, true);
+	});
+}
+for (const status of [401, 403]) {
+	for (const mode of ['scheduled', 'manual']) {
+		test(`metadata ${status} fails ${mode} with its status`, async () => {
+			const ctx = context(
+				`metadata-auth-${status}-${mode}`,
+				{
+					alertFilters: { filter: [{ fieldId: 'alertName', comparator: 'contains', value: 'A' }] },
+				},
+				{ mode },
+			);
+			const request = ctx.helpers.httpRequestWithAuthentication;
+			ctx.helpers.httpRequestWithAuthentication = async (credential, options) => {
+				if (options.body?.query?.includes('alertColumnMetadata'))
+					throw { statusCode: status, message: 'fixture auth error' };
+				return request(credential, options);
+			};
+			await assert.rejects(
+				new SentinelOnePlatformTrigger().poll.call(ctx),
+				(error) => Number(error.statusCode ?? error.httpCode) === status,
+			);
+			assert.equal(alertQuery(ctx), undefined);
+		});
+	}
+	test(`comparator dropdown ${status} fails with its status`, async () => {
+		const ctx = context(`comparator-auth-${status}`);
+		ctx.getCurrentNodeParameter = () => 'alertName';
+		ctx.helpers.httpRequestWithAuthentication = async () => {
+			throw { statusCode: status };
+		};
+		await assert.rejects(
+			new SentinelOnePlatformTrigger().methods.loadOptions.getAlertFilterComparators.call(ctx),
+			(error) => Number(error.statusCode ?? error.httpCode) === status,
+		);
+	});
+}
+
+test('metadata dropdown cache is shared per credential and expires after a few minutes', async () => {
+	let calls = 0;
+	const request = async () => {
+		calls++;
+		return { data: { alertColumnMetadata: metadata } };
+	};
+	const originalNow = Date.now;
+	let now = NOW;
+	Date.now = () => now;
+	try {
+		await loadAlertFilterMetadata(request, 'https://tenant.example', 'cache-credential-a');
+		await loadAlertFilterMetadata(request, 'https://tenant.example', 'cache-credential-a');
+		assert.equal(calls, 1);
+		await loadAlertFilterMetadata(request, 'https://tenant.example', 'cache-credential-b');
+		assert.equal(calls, 2);
+		now += 4 * 60_000;
+		await loadAlertFilterMetadata(request, 'https://tenant.example', 'cache-credential-a');
+		assert.equal(calls, 3);
+	} finally {
+		Date.now = originalNow;
+	}
+});
+
+test('BOOLEAN_IN-only fields keep boolean membership on following polls', async () => {
+	const ctx = context(
+		'boolean-membership-polls',
+		{
+			alertFilters: { filter: [{ fieldId: 'ticketIdExists', comparator: 'isTrue' }] },
+		},
+		{
+			mode: 'scheduled',
+			metadataResponse: [
+				{ fieldId: 'ticketIdExists', filterTypes: ['BOOLEAN_IN'], enableNegation: false },
+			],
+		},
+	);
+	const trigger = new SentinelOnePlatformTrigger();
+	const originalNow = Date.now;
+	let now = NOW;
+	Date.now = () => now;
+	try {
+		await trigger.poll.call(ctx);
+		now += 60_000;
+		await trigger.poll.call(ctx);
+		const queries = ctx.requests.filter(
+			(request) => request.body?.query && !request.body.query.includes('alertColumnMetadata'),
+		);
+		assert.ok(queries.length > 0);
+		for (const query of queries)
+			assert.deepEqual(query.body.variables.filters.at(-1), {
+				fieldId: 'ticketIdExists',
+				booleanIn: { values: [true] },
+			});
+		assert.equal(
+			ctx.requests.filter((request) => request.body?.query?.includes('alertColumnMetadata')).length,
+			1,
+		);
+	} finally {
+		Date.now = originalNow;
+	}
+});
+
+const rawFilter = { fieldId: 'ticketId', stringEqual: { value: 'CASE' } };
+for (const [name, base, advanced, rows, match, groups, count] of [
+	['base plus advanced array', [rawFilter], Array(100).fill(rawFilter), [], 'all', 1, 101],
+	['base plus rows', [rawFilter], undefined, Array(100).fill(rawFilter), 'all', 1, 101],
+	[
+		'base plus advanced group',
+		[rawFilter],
+		{ or: [{ and: Array(100).fill(rawFilter) }] },
+		[],
+		'all',
+		1,
+		101,
+	],
+	[
+		'Match Any row plus advanced group',
+		[rawFilter],
+		{ or: [{ and: Array(99).fill(rawFilter) }] },
+		[rawFilter],
+		'any',
+		1,
+		101,
+	],
+	[
+		'advanced groups',
+		[],
+		{ or: Array.from({ length: 21 }, () => ({ and: [rawFilter] })) },
+		[],
+		'all',
+		21,
+		1,
+	],
+]) {
+	test(`final filter limits include ${name}`, () => {
+		assert.throws(
+			() => advancedFilterSelection(base, advanced, rows, match),
+			new RegExp(
+				`${groups} groups and up to ${count} filters per group; limits are 20 groups and 100 filters per group`,
+			),
+		);
+	});
+}
+test('final filter limits accept exactly 20 groups and 100 filters in each group', () => {
+	const selection = advancedFilterSelection([rawFilter], {
+		or: Array.from({ length: 20 }, () => ({ and: Array(99).fill(rawFilter) })),
+	});
+	assert.equal(selection.orFilter.or.length, 20);
+	assert.ok(selection.orFilter.or.every((group) => group.and.length === 100));
 });

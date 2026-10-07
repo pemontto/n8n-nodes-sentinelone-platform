@@ -21,6 +21,9 @@ importers:
       graphql:
         specifier: 16.14.2
         version: 16.14.2
+      luxon:
+        specifier: ^3.7.2
+        version: 3.7.2
       prettier:
         specifier: 3.6.2
         version: 3.6.2
