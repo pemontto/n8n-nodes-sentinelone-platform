@@ -1161,10 +1161,10 @@ test('nested saved blank scope IDs fail validation before requests', async () =>
 			{ resource: 'alert', operation: 'new', scope: { selection: { [name]: [''] } } },
 			async () => assert.fail('Must fail before requests'),
 		);
-		await assert.rejects(
-			new SentinelOnePlatformTrigger().poll.call(context),
-			/non-empty string or safe integer ID/,
-		);
+		await assert.rejects(new SentinelOnePlatformTrigger().poll.call(context), (error) => {
+			assert.match(error.description, /non-empty string or safe integer ID/);
+			return true;
+		});
 	}
 });
 

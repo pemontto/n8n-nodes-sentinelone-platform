@@ -2,6 +2,15 @@ import type { IDataObject, INodeProperties, INodePropertyOptions } from 'n8n-wor
 import type { AuthenticatedRequest } from './SentinelOneTriggerHelpers';
 import { tryToParseDateTime } from 'n8n-workflow';
 
+export class TriggerFilterError extends Error {
+	constructor(
+		message: string,
+		readonly description: string,
+	) {
+		super(message);
+	}
+}
+
 // This table drives editor options, validation and API encoding.
 const comparatorDefinitions = [
 	{ name: 'Contains', value: 'contains', types: ['FULLTEXT'], api: 'match' },
@@ -159,7 +168,10 @@ export async function loadAlertFilterMetadata(
 			return String(error);
 		});
 
-		throw new Error(`SentinelOne alert filter metadata: ${messages.join('; ')}`);
+		throw new TriggerFilterError(
+			'Unable to load SentinelOne alert filter metadata.',
+			messages.join('; '),
+		);
 	}
 
 	const fields = response?.data?.alertColumnMetadata;
@@ -199,16 +211,34 @@ export function parseAlertFilters(input: unknown, timezone?: string): IDataObjec
 
 	if (!Array.isArray(rows)) throw new Error('Alert Filters must contain filter rows.');
 
-	return rows.map((row) => {
+	return rows.map((row, index) => {
 		if (!row || typeof row !== 'object' || Array.isArray(row))
-			throw new Error('Alert Filters: each row must be a filter.');
+			throw new TriggerFilterError(
+				`Alert Filters row ${index + 1}: each row must be a filter.`,
+				`Row: ${JSON.stringify(row)}.`,
+			);
 		const fieldId = String(row.fieldId ?? '').trim();
 		const comparator = String(row.comparator ?? 'contains');
 
-		if (!fieldId) throw new Error('Alert Filters: select a field for every row.');
+		if (!fieldId)
+			throw new TriggerFilterError(
+				`Alert Filters row ${index + 1}: select a field.`,
+				`Row: ${JSON.stringify(row)}.`,
+			);
 		const definition = comparatorDefinitions.find(({ value }) => value === comparator);
 
-		if (!definition) throw new Error(`Alert Filters: ${fieldId} does not support ${comparator}`);
+		if (!definition)
+			throw new TriggerFilterError(
+				`Alert Filters row ${index + 1}: select an available comparator.`,
+				`Field: ${fieldId}. Comparator: ${comparator}. Value: ${JSON.stringify(row.value ?? row.date)}.`,
+			);
+
+		const invalid = (message: string) =>
+			new TriggerFilterError(
+				`Alert Filters row ${index + 1}: ${message}`,
+				`Field: ${fieldId}. Comparator: ${comparator}. Value: ${JSON.stringify(row.value ?? row.date)}.`,
+			);
+
 		let comparison: IDataObject;
 
 		if (textComparators.includes(comparator)) {
@@ -217,7 +247,7 @@ export function parseAlertFilters(input: unknown, timezone?: string): IDataObjec
 				Array.isArray(row.value) &&
 				row.value.some((entry: unknown) => typeof entry !== 'string' && typeof entry !== 'number')
 			)
-				throw new Error(`Alert Filters: ${fieldId} values must be strings or numbers.`);
+				throw invalid('values must be strings or numbers.');
 
 			const entries: string[] = Array.isArray(row.value)
 				? row.value.map(String)
@@ -225,15 +255,13 @@ export function parseAlertFilters(input: unknown, timezone?: string): IDataObjec
 
 			const values = entries.flatMap((line) => (line.trim() ? [line.trim()] : []));
 
-			if (!values.length) throw new Error(`Alert Filters: ${fieldId} needs at least one value.`);
+			if (!values.length) throw invalid('needs at least one value.');
 
 			if (definition.api === 'longIn') {
 				const numbers = values.map(Number);
 
 				if (numbers.some((value) => !Number.isSafeInteger(value)))
-					throw new Error(
-						`Alert Filters: ${fieldId} needs numeric values that are safe whole numbers.`,
-					);
+					throw invalid('needs numeric values that are safe whole numbers.');
 
 				comparison = { longIn: { values: numbers } };
 			} else {
@@ -254,7 +282,7 @@ export function parseAlertFilters(input: unknown, timezone?: string): IDataObjec
 				input.isLuxonDateTime === true;
 
 			if (!['string', 'number'].includes(typeof input) && !(input instanceof Date) && !isLuxonDate)
-				throw new Error(`Alert Filters: ${fieldId} needs a valid date.`);
+				throw invalid('needs a valid date.');
 			let date: number;
 
 			try {
@@ -278,10 +306,10 @@ export function parseAlertFilters(input: unknown, timezone?: string): IDataObjec
 				date = NaN;
 			}
 
-			if (!Number.isFinite(date)) throw new Error(`Alert Filters: ${fieldId} needs a valid date.`);
+			if (!Number.isFinite(date)) throw invalid('needs a valid date.');
 
 			comparison = { [definition.api]: { [comparator === 'after' ? 'start' : 'end']: date } };
-		} else throw new Error(`Alert Filters: ${fieldId} does not support ${comparator}`);
+		} else throw invalid(`${definition.name} is not available for this field`);
 
 		return {
 			fieldId,
@@ -295,13 +323,14 @@ export function validateAlertFilters(
 	filters: IDataObject[],
 	metadata: AlertFilterMetadata[],
 ): void {
-	for (const filter of filters) {
+	for (const [index, filter] of filters.entries()) {
 		const fieldId = String(filter.fieldId);
 		const field = metadata.find((entry) => entry.fieldId === fieldId);
 
 		if (!field?.filterTypes?.length)
-			throw new Error(
-				`Alert Filters: ${fieldId} is not a filterable field${fieldId === 'name' ? '. Use alertName instead' : ''}`,
+			throw new TriggerFilterError(
+				`Alert Filters row ${index + 1}: select a filterable field.`,
+				`${fieldId} is not a filterable field${fieldId === 'name' ? '. Use alertName instead' : ''}`,
 			);
 		const comparator = Object.keys(filter).find((key) => key !== 'fieldId' && key !== 'isNegated')!;
 
@@ -313,7 +342,14 @@ export function validateAlertFilters(
 		);
 
 		if (!definition?.types.some((type) => field.filterTypes?.includes(type)))
-			throw new Error(`Alert Filters: ${fieldId} does not support ${comparator}`);
+			throw new TriggerFilterError(
+				`Alert Filters row ${index + 1}: ${definition?.name ?? 'The selected comparator'} is not available for this field`,
+				`${fieldId} does not support ${comparator}. Values: ${JSON.stringify(filter[comparator])}. Supported comparators: ${comparatorsForField(
+					field,
+				)
+					.map(({ value }) => value)
+					.join(', ')}.`,
+			);
 
 		if (comparator === 'booleanEqual' && !field.filterTypes.includes('BOOLEAN_EQUAL')) {
 			const value = (filter.booleanEqual as IDataObject).value;
@@ -322,6 +358,9 @@ export function validateAlertFilters(
 		}
 
 		if (filter.isNegated && !field.enableNegation)
-			throw new Error(`Alert Filters: ${fieldId} does not support Exclude`);
+			throw new TriggerFilterError(
+				`Alert Filters row ${index + 1}: Exclude is not available for this field`,
+				`${fieldId} does not support Exclude.`,
+			);
 	}
 }

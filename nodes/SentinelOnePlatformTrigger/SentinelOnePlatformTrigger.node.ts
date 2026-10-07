@@ -4,6 +4,7 @@ import {
 	comparatorsForField,
 	loadAlertFilterMetadata,
 	parseAlertFilters,
+	TriggerFilterError,
 	validateAlertFilters,
 } from './AlertFilters';
 import {
@@ -400,7 +401,9 @@ async function scopeOptions(
 		const message = `Unable to load SentinelOne ${scopeType.toLowerCase()} scopes. Check the credential permissions and try again.`;
 
 		if (status === null)
-			throw new NodeOperationError(context.getNode(), `${message} ${errorMessage(error)}`);
+			throw new NodeOperationError(context.getNode(), message, {
+				description: errorMessage(error),
+			});
 		throw new NodeApiError(
 			context.getNode(),
 			{ message },
@@ -756,13 +759,20 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						throw new NodeApiError(
 							this.getNode(),
 							{ message: errorMessage(error) },
-							{ httpCode: String(status) },
+							{
+								httpCode: String(status),
+								message: 'Unable to load SentinelOne alert filter metadata.',
+								description: errorMessage(error),
+							},
 						);
 
 					throw new NodeOperationError(
 						this.getNode(),
 						'Unable to load SentinelOne alert filter fields. Check the credential and try again.',
-						{ description: errorMessage(error) },
+						{
+							description:
+								error instanceof TriggerFilterError ? error.description : errorMessage(error),
+						},
 					);
 				}
 			},
@@ -795,7 +805,11 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						throw new NodeApiError(
 							this.getNode(),
 							{ message: errorMessage(error) },
-							{ httpCode: String(status) },
+							{
+								httpCode: String(status),
+								message: 'Unable to load SentinelOne alert filter metadata.',
+								description: errorMessage(error),
+							},
 						);
 
 					return alertFilterComparators;
@@ -1080,7 +1094,9 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						try {
 							validateAlertFilters(config.alertFilters, metadata);
 						} catch (error) {
-							throw new NodeOperationError(node, errorMessage(error));
+							throw new NodeOperationError(node, errorMessage(error), {
+								description: error instanceof TriggerFilterError ? error.description : undefined,
+							});
 						}
 					}
 				}
@@ -1127,7 +1143,8 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						node,
 						{ message: errorMessage(error) },
 						{
-							message: errorMessage(error),
+							message: 'Unable to poll SentinelOne Unified Alerts.',
+							description: errorMessage(error),
 							httpCode: String(status),
 						},
 					);
@@ -1141,7 +1158,13 @@ export class SentinelOnePlatformTrigger implements INodeType {
 
 				const operationError = new NodeOperationError(
 					this.getNode(),
-					`Unable to poll SentinelOne Unified Alerts. ${errorMessage(error)}`,
+					error instanceof TriggerFilterError
+						? error.message
+						: 'Unable to poll SentinelOne Unified Alerts.',
+					{
+						description:
+							error instanceof TriggerFilterError ? error.description : errorMessage(error),
+					},
 				);
 
 				throw Object.assign(operationError, { cause: error });

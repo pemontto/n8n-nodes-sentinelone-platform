@@ -441,10 +441,13 @@ test('Match Any rejects a filter and Advanced Filters cross product over 20 grou
 		alertFilterMatch: 'any',
 		options: { advancedFilters: JSON.stringify(advanced) },
 	});
-	await assert.rejects(
-		trigger.poll.call(ctx),
-		/21 groups and up to 3 filters per group; limits are 20 groups/,
-	);
+	await assert.rejects(trigger.poll.call(ctx), (error) => {
+		assert.match(
+			error.description ?? error.message,
+			/21 groups and up to 3 filters per group; limits are 20 groups/,
+		);
+		return true;
+	});
 	assert.equal(alertQuery(ctx), undefined);
 });
 
@@ -483,7 +486,10 @@ for (const [name, input, metadataResponse, message] of [
 			},
 			{ metadataResponse },
 		);
-		await assert.rejects(trigger.poll.call(ctx), message);
+		await assert.rejects(trigger.poll.call(ctx), (error) => {
+			assert.match(`${error.message} ${error.description}`, message);
+			return true;
+		});
 		assert.equal(alertQuery(ctx), undefined);
 	});
 }
@@ -502,13 +508,16 @@ for (const [name, row, message] of [
 	[
 		'unknown comparator',
 		{ fieldId: 'alertName', comparator: 'fuzzy', value: 'x' },
-		/does not support fuzzy/,
+		/Comparator: fuzzy/,
 	],
 ]) {
 	test(`alert filter parsing rejects ${name} before metadata lookup`, async () => {
 		const trigger = new SentinelOnePlatformTrigger();
 		const ctx = context(`alert-filter-parse-${name}`, { alertFilters: { filter: [row] } });
-		await assert.rejects(trigger.poll.call(ctx), message);
+		await assert.rejects(trigger.poll.call(ctx), (error) => {
+			assert.match(`${error.message} ${error.description}`, message);
+			return true;
+		});
 		assert.equal(hasMetadataRequest(ctx), false);
 		assert.equal(alertQuery(ctx), undefined);
 	});
@@ -524,7 +533,10 @@ for (const [name, row] of [
 		const ctx = context(`alert-filter-invalid-row-${name}`, {
 			alertFilters: { filter: [row] },
 		});
-		await assert.rejects(trigger.poll.call(ctx), /each row must be a filter/);
+		await assert.rejects(trigger.poll.call(ctx), (error) => {
+			assert.match(error.message, /each row must be a filter/);
+			return true;
+		});
 		assert.equal(hasMetadataRequest(ctx), false);
 		assert.equal(alertQuery(ctx), undefined);
 	});
@@ -781,7 +793,10 @@ for (const [comparator, type] of [
 					],
 				},
 			),
-			/exampleField does not support match/,
+			(error) => {
+				assert.match(error.description, /exampleField does not support match/);
+				return true;
+			},
 		);
 	});
 }
@@ -790,7 +805,7 @@ for (const value of [['x'], [NaN], [Infinity], '123\nno-number', '1.5', '9007199
 	test(`number filters reject non-numeric values ${JSON.stringify(value)}`, () => {
 		assert.throws(
 			() => parseAlertFilters({ filter: [{ fieldId: 'count', comparator: 'longIn', value }] }),
-			/count needs numeric values/,
+			/needs numeric values/,
 		);
 	});
 }
@@ -799,7 +814,7 @@ for (const value of [[{}], [true], [null], [[]], [undefined]]) {
 		assert.throws(
 			() =>
 				parseAlertFilters({ filter: [{ fieldId: 'alertName', comparator: 'stringIn', value }] }),
-			/alertName values must be strings or numbers/,
+			/values must be strings or numbers/,
 		);
 	});
 }
@@ -857,7 +872,7 @@ for (const date of [
 					{ filter: [{ fieldId: 'createdAt', comparator: 'after', date }] },
 					'Europe/London',
 				),
-			/createdAt needs a valid date/,
+			/needs a valid date/,
 		);
 	});
 }
@@ -868,7 +883,10 @@ test('metadata GraphQL errors include SentinelOne messages', async () => {
 			async () => ({ errors: [{ message: 'fixture metadata unavailable' }] }),
 			'https://tenant.example',
 		),
-		/fixture metadata unavailable/,
+		(error) => {
+			assert.match(error.description ?? error.message, /fixture metadata unavailable/);
+			return true;
+		},
 	);
 });
 for (const failure of [
@@ -1041,3 +1059,69 @@ test('final filter limits accept exactly 20 groups and 100 filters in each group
 	assert.equal(selection.orFilter.or.length, 20);
 	assert.ok(selection.orFilter.or.every((group) => group.and.length === 100));
 });
+
+for (const mode of ['manual', 'trigger']) {
+	test(`real NodeOperationError preserves Alert Filters message during ${mode} polling`, async () => {
+		const { NodeOperationError } = require('n8n-workflow');
+		const trigger = new SentinelOnePlatformTrigger();
+		const ctx = context(
+			`rewrite-${mode}`,
+			{
+				alertFilters: {
+					filter: [
+						{ fieldId: 'alertName', comparator: 'contains', value: 'x' },
+						{ fieldId: 'alertNoteExists', comparator: 'stringIn', value: 'true' },
+					],
+				},
+			},
+			{
+				metadataResponse: [
+					...metadata,
+					{ fieldId: 'alertNoteExists', filterTypes: ['BOOLEAN_EQUAL'], enableNegation: false },
+				],
+			},
+		);
+		ctx.getMode = () => mode;
+		await assert.rejects(trigger.poll.call(ctx), (error) => {
+			assert.ok(error instanceof NodeOperationError);
+			assert.equal(error.message, 'Alert Filters row 2: Is Any Of is not available for this field');
+			assert.notEqual(error.message, 'The file or directory already exists');
+			assert.match(error.description, /alertNoteExists/);
+			return true;
+		});
+	});
+}
+
+for (const [name, parameters, message, details] of [
+	[
+		'parse',
+		{
+			alertFilters: {
+				filter: [{ fieldId: 'alertNoteExists', comparator: 'longIn', value: 'EEXIST' }],
+			},
+		},
+		'Alert Filters row 1: needs numeric values that are safe whole numbers.',
+		/alertNoteExists.*EEXIST/,
+	],
+	[
+		'advanced',
+		{
+			options: {
+				advancedFilters: JSON.stringify([
+					{ fieldId: 'alertNoteExists', stringIn: {}, booleanEqual: {} },
+				]),
+			},
+		},
+		'Advanced Filters: must use exactly one comparator.',
+		/alertNoteExists/,
+	],
+]) {
+	test(`${name} errors preserve details outside the real NodeOperationError message`, async () => {
+		const trigger = new SentinelOnePlatformTrigger();
+		await assert.rejects(trigger.poll.call(context(`rewrite-${name}`, parameters)), (error) => {
+			assert.equal(error.message, message);
+			assert.match(error.description, details);
+			return true;
+		});
+	});
+}

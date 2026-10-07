@@ -1,3 +1,4 @@
+import { TriggerFilterError } from './AlertFilters';
 import type { IDataObject, IHttpRequestOptions } from 'n8n-workflow';
 import type { ScopeType } from '../shared/Scopes';
 import { alertFieldSelection, additionalAlertOutput } from '../shared/AlertFields';
@@ -179,7 +180,10 @@ function validateRawFilter(value: unknown): IDataObject {
 	const unknownKeys = Object.keys(filter).filter((key) => !allowedKeys.has(key));
 
 	if (unknownKeys.length > 0)
-		throw new Error(`Unknown advanced filter key: ${unknownKeys.join(', ')}.`);
+		throw new TriggerFilterError(
+			'Advanced Filters contains an unknown key.',
+			`Unknown keys: ${unknownKeys.join(', ')}.`,
+		);
 	const fieldId = typeof filter.fieldId === 'string' ? filter.fieldId.trim() : '';
 
 	if (!fieldId) throw new Error('Each advanced filter needs a non-empty fieldId.');
@@ -189,10 +193,17 @@ function validateRawFilter(value: unknown): IDataObject {
 	const comparators = FILTER_COMPARATORS.filter((key) => filter[key] !== undefined);
 
 	if (comparators.length !== 1)
-		throw new Error(`Advanced filter ${fieldId} must use exactly one comparator.`);
+		throw new TriggerFilterError(
+			'Advanced Filters: must use exactly one comparator.',
+			`Field: ${fieldId}.`,
+		);
 	const comparator = asRecord(filter[comparators[0]]);
 
-	if (!comparator) throw new Error(`Advanced filter ${fieldId} comparator must be an object.`);
+	if (!comparator)
+		throw new TriggerFilterError(
+			'Advanced Filters: comparator must be an object.',
+			`Field: ${fieldId}.`,
+		);
 
 	return {
 		fieldId,
