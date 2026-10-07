@@ -165,19 +165,19 @@ With Simplify disabled, the event keeps its full envelope. Optional `note`, `mit
 }
 ```
 
-Alert trigger outputs use the same Simplify option. Simplified alerts rename `name`, `status`, `severity`, and `externalId` to `alertName`, `alertStatus`, `alertSeverity`, and `alertExternalId`, flatten scope names into `accountName`, `siteName`, and `groupName`, and omit `scope` and `eventTimestamp`. Additional Alert Fields are prefixed with `alert`, such as `alertAnalystVerdict`. Raw output keeps the original alert object under `alert`. Examples:
+Alert trigger outputs use the same Simplify option. Simplified alerts use SentinelOne's filter field IDs, so output names line up with Advanced Filters: `id`, `externalId`, `alertName`, `status`, `severity`, `ticketId`, `analystVerdict`, `alertNoteExists` and so on. The raw alert object calls the title `name`; the filter field, and so simplified output, calls it `alertName`. Scope is flattened into `accountId`, `accountName`, `siteId`, `siteName`, `groupId`, and `groupName`; `scope` and `eventTimestamp` are omitted. Additional Alert Fields are unprefixed, such as `ticketId` and `analystVerdict`. Raw output keeps the original alert object under `alert`. Examples:
 
 ```json
 {
 	"eventId": "tenant.example/alert/alert-123/new",
 	"eventType": "alert.new",
 	"eventTime": "2025-02-03T09:55:00Z",
-	"alertId": "alert-123",
-	"alertExternalId": "source-789",
+	"id": "alert-123",
+	"externalId": "source-789",
 	"alertName": "Example detection",
-	"alertSeverity": "HIGH",
-	"alertStatus": "NEW",
-	"alertAnalystVerdict": "UNDEFINED",
+	"severity": "HIGH",
+	"status": "NEW",
+	"analystVerdict": "UNDEFINED",
 	"accountName": "Example account",
 	"siteName": "London",
 	"groupName": "Workstations",
@@ -186,7 +186,7 @@ Alert trigger outputs use the same Simplify option. Simplified alerts rename `na
 	"detectedAt": "2025-02-03T09:54:50Z",
 	"firstSeenAt": "2025-02-03T09:54:50Z",
 	"lastSeenAt": "2025-02-03T09:55:00Z",
-	"noteExists": false
+	"alertNoteExists": false
 }
 ```
 
@@ -235,3 +235,5 @@ Fetch Test Event searches newest windows first, down to the existing January 202
 Scope resolution, SDL launch/poll, and alert lookup errors identify the failed stage without including source records or credentials. Incomplete results, malformed current-scope metadata, conflicting duplicates and saturated windows that cannot be split further fail without advancing scheduled state. A deadline or page-cap stop can save only the already completed prefix. An activity whose parent alert cannot be found also fails while its source timestamp remains inside the overlap retry window. Once older than that window, the trigger skips it and logs a warning with the dropped count, allowing other activities and the checkpoint to proceed. It never emits an activity with unverified scope. This expiry also applies during manual preview; request failures are not treated as deleted alerts.
 
 Delivery depends on source retention, late-arrival timing, and the bounded overlap/checkpoint history. It is not an exactly-once downstream guarantee or a complete historical archive. Use `eventId` for downstream idempotency where needed. Actor exclusions can reduce self-triggering but do not guarantee loop prevention.
+
+Severity options use Critical, High, Medium, Low, Info, Unknown order. Status options use New, In Progress, Resolved order.

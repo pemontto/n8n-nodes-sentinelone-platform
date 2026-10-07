@@ -886,32 +886,29 @@ function alertOutput(
 		.join('/');
 
 	if (config.simplifyOutput) {
+		// Field names match SentinelOne's filter field IDs, so output lines up with Advanced Filters.
 		return {
 			eventId,
 			eventType,
 			eventTime: eventTimestamp,
+			id: alert.id,
+			externalId: alert.externalId ?? null,
+			alertName: alert.name ?? null,
+			severity: alert.severity ?? null,
+			status: alert.status ?? null,
+			createdAt: alert.createdAt ?? null,
+			updatedAt: alert.updatedAt ?? null,
+			detectedAt: alert.detectedAt ?? null,
+			firstSeenAt: alert.firstSeenAt ?? null,
+			lastSeenAt: alert.lastSeenAt ?? null,
+			alertNoteExists: alert.noteExists ?? null,
+			...additionalAlertOutput(config.additionalAlertFields, alert),
 			accountId: asRecord(scope.account)?.id ?? null,
 			accountName: asRecord(scope.account)?.name ?? null,
 			siteId: asRecord(scope.site)?.id ?? null,
 			siteName: asRecord(scope.site)?.name ?? null,
 			groupId: asRecord(scope.group)?.id ?? null,
 			groupName: asRecord(scope.group)?.name ?? null,
-			...Object.fromEntries(
-				Object.entries(additionalAlertOutput(config.additionalAlertFields, alert)).map(
-					([key, value]) => [`alert${key[0].toUpperCase()}${key.slice(1)}`, value],
-				),
-			),
-			alertId: alert.id,
-			alertExternalId: alert.externalId ?? null,
-			alertName: alert.name ?? null,
-			alertSeverity: alert.severity ?? null,
-			alertStatus: alert.status ?? null,
-			createdAt: alert.createdAt ?? null,
-			updatedAt: alert.updatedAt ?? null,
-			detectedAt: alert.detectedAt ?? null,
-			firstSeenAt: alert.firstSeenAt ?? null,
-			lastSeenAt: alert.lastSeenAt ?? null,
-			noteExists: alert.noteExists ?? null,
 		};
 	}
 

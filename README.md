@@ -25,7 +25,7 @@ For example, escalate High and Critical alerts to ServiceNow and write the incid
 | Alert          | New, Updated, New or Updated |
 | Alert Activity | Activity types               |
 
-Alert Activity covers alert creation, status, verdict, severity and assignee changes, mitigation activity, notes and agentic investigations. Other (Unrecognised Types) selects alert-linked types outside the named list, including `16006`, and can be combined with named types. Choose activity types with the Operation multi-select, which defaults to Any. Simplify defaults to enabled and returns concise changes such as `{ "field": "status", "from": "NEW", "to": "IN_PROGRESS" }`. Scope is its own section straight after Credential and Poll Times for both trigger resources, containing Accounts, Sites, and Groups; Alert Get Many keeps scope under Options. Alert summaries include flat scope names, and Additional Alert Fields are prefixed with `alert`. See [trigger output examples](docs/trigger.md#output) for simplified and full activity and alert records, plus filters, conditions and delivery limits.
+Alert Activity covers alert creation, status, verdict, severity and assignee changes, mitigation activity, notes and agentic investigations. Other (Unrecognised Types) selects alert-linked types outside the named list, including `16006`, and can be combined with named types. Choose activity types with the Operation multi-select, which defaults to Any. Simplify defaults to enabled and returns concise changes such as `{ "field": "status", "from": "NEW", "to": "IN_PROGRESS" }`. Scope is its own section straight after Credential and Poll Times for both trigger resources, containing Accounts, Sites, and Groups; Alert Get Many keeps scope under Options. Alert summaries include flat scope names. Simplified Alert output uses SentinelOne field names matching Advanced Filters, including `id`, `status`, `severity`, and Additional Alert Fields such as `ticketId`. Alert Activity summaries keep their `alert` prefixes. See [trigger output examples](docs/trigger.md#output) for simplified and full activity and alert records, plus filters, conditions and delivery limits.
 
 For example, a simplified Alert trigger item can contain:
 
@@ -34,11 +34,11 @@ For example, a simplified Alert trigger item can contain:
 	"eventId": "tenant.example/alert/alert-123/new",
 	"eventType": "alert.new",
 	"eventTime": "2025-02-03T09:55:00Z",
-	"alertId": "alert-123",
-	"alertName": "Example detection",
-	"alertSeverity": "HIGH",
-	"alertStatus": "NEW",
-	"alertAnalystVerdict": "UNDEFINED",
+	"id": "alert-123",
+	"name": "Example detection",
+	"severity": "HIGH",
+	"status": "NEW",
+	"analystVerdict": "UNDEFINED",
 	"accountName": "Example account",
 	"siteName": "London",
 	"groupName": "Workstations"
@@ -62,3 +62,5 @@ Every trigger event includes a stable `eventId` for downstream deduplication. Ra
 Use `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm test`, and `pnpm lint`. Run `pnpm dev` for the normal package-local n8n development process. See [development runtime checks](docs/testing.md#development-runtime) for maintainer-specific runtime checks.
 
 [Source and issues](https://github.com/pemontto/n8n-nodes-sentinelone-platform). MIT licence; see LICENSE.
+
+Severity options use Critical, High, Medium, Low, Info, Unknown order. Status options use New, In Progress, Resolved order.

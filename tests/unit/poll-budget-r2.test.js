@@ -161,7 +161,7 @@ test('A starved New read in the second scope batch does not crash or discard the
 
 	const result = await pollSentinelOne(request, triggerConfig, state, 'scheduled', NOW);
 	assert.deepEqual(
-		result.items.map((item) => item.alertId),
+		result.items.map((item) => item.id),
 		['first-batch-alert'],
 	);
 });
@@ -186,7 +186,7 @@ test('A resumed poll without a host budget keeps the ordinary cursor and ascendi
 		NOW - 10_000,
 	);
 	assert.deepEqual(
-		first.items.map((item) => item.alertId),
+		first.items.map((item) => item.id),
 		['first', 'second'],
 	);
 	const cursor = Object.values(first.nextState.alertCursors)[0];
@@ -201,7 +201,7 @@ test('A resumed poll without a host budget keeps the ordinary cursor and ascendi
 		NOW,
 	);
 	assert.deepEqual(
-		second.items.map((item) => item.alertId),
+		second.items.map((item) => item.id),
 		['third'],
 	);
 	assert.equal(replay.requests.length, 1, 'the fallback host uses one ascending New range');

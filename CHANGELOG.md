@@ -2,6 +2,7 @@
 
 ## 0.2.0 (unreleased)
 
+- Simplified Alert trigger output now uses SentinelOne's filter field IDs, so names line up with Advanced Filters: `alertName`, `ticketId`, `status`, `severity`, `id`, `alertNoteExists`. Alert Activity prefixes and raw output are unchanged.
 - Severity lists use Critical, High, Medium, Low, Info, Unknown order; status lists use New, In Progress, Resolved order.
 
 ## 0.1.0 (2026-10-07)

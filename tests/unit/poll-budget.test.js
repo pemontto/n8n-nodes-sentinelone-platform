@@ -176,11 +176,11 @@ function tenant(alerts, options = {}) {
 	return { request: raw, budgeted, state };
 }
 
-const ids = (result) => result.items.map((item) => item.alertId);
+const ids = (result) => result.items.map((item) => item.id);
 const alertCheckpoint = (state) =>
 	Math.min(...Object.values(state.alertCursors).map((cursor) => cursor.throughMs));
 
-const events = (result) => result.items.map((item) => [item.eventType, item.alertId]);
+const events = (result) => result.items.map((item) => [item.eventType, item.id]);
 
 const backlog = [
 	alert('A', CHECKPOINT + 60_000),
@@ -339,7 +339,7 @@ test('A large backlog drains over polls that each get the same finite budget, in
 		pageCostMs: 6_000,
 	});
 	assert.deepEqual(
-		emitted.map((item) => item.alertId),
+		emitted.map((item) => item.id),
 		alerts.map((row) => row.id),
 	);
 	assert.ok(polls >= 4, 'the budget cut every poll short');
@@ -356,7 +356,7 @@ test('A 1,000-alert bulk edit sharing one timestamp drains with the same finite 
 		pageCostMs: 6_000,
 	});
 	assert.deepEqual(
-		emitted.map((item) => item.alertId),
+		emitted.map((item) => item.id),
 		alerts.map((row) => row.id),
 	);
 	assert.equal(alertCheckpoint(state), NOW);
@@ -562,7 +562,7 @@ test('A scheduled page cap hands over its completed prefix and resumes a dense o
 		pageCostMs: 600,
 	});
 	assert.deepEqual(
-		emitted.map((item) => item.alertId),
+		emitted.map((item) => item.id),
 		alerts.map((row) => row.id),
 	);
 	assert.equal(alertCheckpoint(final), NOW);
@@ -586,10 +586,10 @@ test('A budget stop in one scope batch preserves progress from batches that were
 		maxPolls: 8,
 	});
 	assert.deepEqual(
-		result.emitted.map((item) => item.alertId).sort(),
+		result.emitted.map((item) => item.id).sort(),
 		alerts.map((row) => row.id).sort(),
 	);
-	assert.equal(new Set(result.emitted.map((item) => item.alertId)).size, alerts.length);
+	assert.equal(new Set(result.emitted.map((item) => item.id)).size, alerts.length);
 	assert.equal(alertCheckpoint(result.state), NOW);
 });
 
@@ -612,10 +612,10 @@ test('Budgeted alert polling drains an 8,000 alert storm with fixed page latency
 		maxPolls: 12,
 	});
 	assert.deepEqual(
-		result.emitted.map((item) => item.alertId),
+		result.emitted.map((item) => item.id),
 		alerts.map((row) => row.id),
 	);
-	assert.equal(new Set(result.emitted.map((item) => item.alertId)).size, alerts.length);
+	assert.equal(new Set(result.emitted.map((item) => item.id)).size, alerts.length);
 	assert.ok(result.polls <= 12);
 	assert.ok(result.requestCount <= 8_000 / 100 + result.polls * 2);
 });
@@ -639,10 +639,10 @@ test('Budgeted alert polling drains an 8,000 alert storm with jittered page late
 		maxPolls: 12,
 	});
 	assert.deepEqual(
-		result.emitted.map((item) => item.alertId),
+		result.emitted.map((item) => item.id),
 		alerts.map((row) => row.id),
 	);
-	assert.equal(new Set(result.emitted.map((item) => item.alertId)).size, alerts.length);
+	assert.equal(new Set(result.emitted.map((item) => item.id)).size, alerts.length);
 	assert.ok(result.polls <= 12);
 	assert.ok(result.requestCount <= 8_000 / 100 + result.polls * 2);
 });
@@ -856,7 +856,7 @@ test('The node passes its host budget to the transport, stops at it, and a host 
 		return { output, state: budgeted.staticData };
 	});
 	assert.deepEqual(
-		first.output[0].map((item) => item.json.alertId),
+		first.output[0].map((item) => item.json.id),
 		['A', 'B'],
 	);
 	assert.equal(alertCheckpoint(first.state.sentinelOneTrigger), CHECKPOINT + 120_000);
@@ -865,7 +865,7 @@ test('The node passes its host budget to the transport, stops at it, and a host 
 	Object.assign(unbudgetedHost.staticData, first.state);
 	const second = await node.poll.call(unbudgetedHost);
 	assert.deepEqual(
-		second[0].map((item) => item.json.alertId),
+		second[0].map((item) => item.json.id),
 		['C'],
 	);
 });

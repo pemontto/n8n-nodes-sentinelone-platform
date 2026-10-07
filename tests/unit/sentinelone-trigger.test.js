@@ -717,7 +717,7 @@ test('simplified alert output resolves the actual scope hierarchy without config
 	assert.equal(item.accountName, 'Account One');
 	assert.equal(item.siteName, 'Site One');
 	assert.equal(item.groupName, 'Group One');
-	assert.equal(item.alertId, 'simplified-alert');
+	assert.equal(item.id, 'simplified-alert');
 	assert.equal('scopeIds' in item, false);
 	assert.equal(typeof item.accountId, 'string');
 	assert.equal('scopeId' in item, false);
@@ -1504,7 +1504,7 @@ test('site-scoped node polls accessible sites without account-list permission', 
 	);
 	assert.deepEqual(await node.methods.loadOptions.getAccounts.call(context), []);
 	assert.equal((await node.methods.loadOptions.getSites.call(context)).length, 1);
-	assert.equal((await node.poll.call(context))[0][0].json.alertId, 'accessible');
+	assert.equal((await node.poll.call(context))[0][0].json.id, 'accessible');
 	calls.length = 0;
 	const selected = createNodeContext(
 		{
@@ -1519,7 +1519,7 @@ test('site-scoped node polls accessible sites without account-list permission', 
 		},
 		request,
 	);
-	assert.equal((await node.poll.call(selected))[0][0].json.alertId, 'accessible');
+	assert.equal((await node.poll.call(selected))[0][0].json.id, 'accessible');
 	assert.equal(
 		calls.some((url) => url.endsWith('/accounts')),
 		false,
@@ -1597,17 +1597,11 @@ test('selected additional alert fields are queried and returned in simplified an
 				'process',
 				'aiInvestigation',
 			]) {
-				assert.equal(key in result.items[0], false);
-				assert.ok(`alert${key[0].toUpperCase()}${key.slice(1)}` in result.items[0]);
+				assert.equal(key in result.items[0], true);
+				assert.equal(`alert${key[0].toUpperCase()}${key.slice(1)}` in result.items[0], false);
 			}
 		}
-		const output = simplifyOutput
-			? Object.fromEntries(
-					Object.entries(result.items[0])
-						.filter(([key]) => key.startsWith('alert'))
-						.map(([key, value]) => [key[5].toLowerCase() + key.slice(6), value]),
-				)
-			: result.items[0].alert;
+		const output = simplifyOutput ? result.items[0] : result.items[0].alert;
 		assert.equal(output.ticketId, 'CASE-42');
 		assert.equal(output.assignee.fullName, 'Analyst');
 		assert.equal(output.description, null);
@@ -2076,7 +2070,7 @@ test('both resources expose the same Simplify option with default true', () => {
 	assert.equal(controls[0].type, 'boolean');
 });
 
-test('alert output renames only simplified fields and preserves full output', async () => {
+test('alert output uses SentinelOne field IDs when simplified and preserves full output', async () => {
 	for (const simplifyOutput of [true, false]) {
 		const c = config({ simplifyOutput });
 		const parent = { ...alert('output-alert'), externalId: 'source-alert' };
@@ -2089,21 +2083,24 @@ test('alert output renames only simplified fields and preserves full output', as
 		);
 		const item = result.items[0];
 		if (simplifyOutput) {
+			// Names follow SentinelOne's filter field IDs, so the title is alertName.
 			assert.equal(item.alertName, parent.name);
-			assert.equal(item.alertStatus, parent.status);
-			assert.equal(item.alertSeverity, parent.severity);
-			assert.equal(item.alertExternalId, parent.externalId);
-			for (const key of ['name', 'status', 'severity', 'externalId', 'eventTimestamp'])
+			assert.equal(item.alertNoteExists, parent.noteExists ?? null);
+			assert.equal('name' in item, false);
+			assert.equal('noteExists' in item, false);
+			assert.equal(item.status, parent.status);
+			assert.equal(item.severity, parent.severity);
+			assert.equal(item.externalId, parent.externalId);
+			for (const key of [
+				'alertId',
+				'alertStatus',
+				'alertSeverity',
+				'alertExternalId',
+				'eventTimestamp',
+			])
 				assert.equal(key in item, false);
 			assert.equal(item.eventTime, parent.createdAt);
-			for (const key of [
-				'createdAt',
-				'updatedAt',
-				'detectedAt',
-				'firstSeenAt',
-				'lastSeenAt',
-				'noteExists',
-			])
+			for (const key of ['createdAt', 'updatedAt', 'detectedAt', 'firstSeenAt', 'lastSeenAt'])
 				assert.equal(item[key], parent[key] ?? null);
 		} else {
 			assert.deepEqual(item, {
