@@ -6,6 +6,16 @@ Alert supports New, Updated, and New or Updated events. Updated emits alerts rev
 
 The Alert resource Options include Advanced Filters, Alert Name, Exclude Account Name, Exclude Group Name, Exclude Site Name, Alert Severity, Simplify, and Alert Status. Alert Name is an optional full-text match. Alert Severity and Alert Status accept multiple values and are left empty by default. Simplify defaults to enabled. Scope is its own section straight after Credential and Poll Times, shared by both trigger resources, containing Accounts, Sites, and Groups. Sites are hidden until Accounts has a value, and Groups are hidden until Sites has a value. Site options can still load accessible sites when account-list permission is unavailable. Alert Get Many keeps its scope selections under Options > Scope. Scope and name exclusions apply to both Alert and Alert Activity triggers; activity Options also provide Exclude User Name and Exclude User IDs.
 
+### Alert Filters
+
+Alert Filters provides repeatable Field, Comparator, Value and Exclude rows for GUI workflow builders. Contains, Starts With, Ends With and Exact Match use the case-insensitive `match` operators; Is Any Of uses exact, case-sensitive `stringIn`; enter one or more non-empty values on separate lines for these text comparators. Is True and Is False use `booleanEqual`, while After and Before use `dateTimeRange` with the selected date converted to epoch milliseconds. Exclude negates the row with `isNegated: true`; boolean comparators need no value.
+
+Match All is the default: every row must match, alongside Alert Severity, Alert Status and Alert Name. With Advanced Filters, Match All adds the rows to a plain array or copies them into each `or` group's `and` array.
+
+Match Any requires at least one row to match; Alert Severity, Alert Status and Alert Name must still match. With Advanced Filters, Match Any adds a plain array to every row's group or combines every row with every Advanced `or` group, with a limit of 20 resulting groups.
+
+Choose fields and supported comparators from the [Alert filter fields reference](reference/alert-filter-fields.md).
+
 ### Advanced filters
 
 Advanced Filters passes SentinelOne alert filters straight to the API. Write a JSON array of filter objects; every filter in the array must match. Each filter has a `fieldId`, exactly one comparator, and optionally `"isNegated": true` to exclude what it matches.

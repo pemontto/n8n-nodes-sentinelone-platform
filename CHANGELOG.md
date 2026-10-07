@@ -2,6 +2,7 @@
 
 ## 0.2.0 (unreleased)
 
+- Alert triggers add repeatable GUI Alert Filters rows with Match All or Match Any behaviour and a reference for supported alert fields and comparators.
 - Exclude Account, Site, Group and User Name accept one pattern per line; any line can exclude. Previously several lines formed one pattern that matched nothing.
 - Simplified Alert trigger output now uses SentinelOne's filter field IDs, so names line up with Advanced Filters: `alertName`, `ticketId`, `status`, `severity`, `id`, `alertNoteExists`. Alert Activity prefixes and raw output are unchanged.
 - Severity lists use Critical, High, Medium, Low, Info, Unknown order; status lists use New, In Progress, Resolved order.

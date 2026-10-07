@@ -1,4 +1,10 @@
 import {
+	alertFilterProperties,
+	loadAlertFilterMetadata,
+	parseAlertFilters,
+	validateAlertFilters,
+} from './AlertFilters';
+import {
 	additionalAlertFields,
 	analystVerdictOptions,
 	managementScopeFields,
@@ -543,6 +549,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 			},
 			activityFields[0],
 			...activityFields.slice(1),
+			...alertFilterProperties,
 			{
 				displayName: 'Options',
 				name: 'options',
@@ -568,7 +575,8 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						type: 'string',
 						default: '',
 						placeholder: 'Suspicious process',
-						description: 'Search for text in the alert name',
+						description:
+							'Shortcut for alertName contains: search the alert name for text, ignoring case',
 					},
 					{
 						displayName: 'Alert Severity',
@@ -633,7 +641,8 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						type: 'string',
 						default: '',
 						placeholder: 'Suspicious process',
-						description: 'Search for text in the alert name',
+						description:
+							'Shortcut for alertName contains: search the alert name for text, ignoring case',
 					},
 					{
 						displayName: 'Alert Severity',
@@ -724,6 +733,28 @@ export class SentinelOnePlatformTrigger implements INodeType {
 
 	methods = {
 		loadOptions: {
+			async getAlertFilterFields(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
+				try {
+					const credentials = await this.getCredentials('sentinelOnePlatformApi');
+
+					const fields = await loadAlertFilterMetadata(
+						authenticatedRequest(this),
+						normalizeBaseUrl(credentials.baseUrl),
+					);
+
+					return fields.map(({ fieldId }) => ({ name: fieldId, value: fieldId }));
+				} catch (error) {
+					// Preserve authentication, permission, rate limit and timeout errors.
+					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+					if (error instanceof NodeApiError) throw error;
+
+					throw new NodeOperationError(
+						this.getNode(),
+						'Unable to load SentinelOne alert filter fields. Check the credential and try again.',
+						{ description: errorMessage(error) },
+					);
+				}
+			},
 			async getAccounts(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const credentials = await this.getCredentials('sentinelOnePlatformApi');
 
@@ -885,6 +916,12 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					statuses: (options.statuses as string[] | undefined) ?? [],
 					alertName: String(options.alertName ?? ''),
 					advancedFilters: resource === 'alert' ? options.advancedFilters : undefined,
+					alertFilters:
+						resource === 'alert'
+							? parseAlertFilters(this.getNodeParameter('alertFilters', {}))
+							: [],
+					alertFilterMatch:
+						this.getNodeParameter('alertFilterMatch', 'all') === 'any' ? 'any' : 'all',
 					// SAFETY: this multi-select parameter contains only the declared string field values.
 					additionalAlertFields:
 						resource === 'alert'
@@ -959,6 +996,19 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					scheduled && !committed
 						? (pendingBaselines.get(pollKey)?.state ?? previousState)
 						: previousState;
+
+				if (
+					config.alertFilters?.length &&
+					(!scheduled || state.initialized !== true || state.configFingerprint !== fingerprint)
+				) {
+					const metadata = await loadAlertFilterMetadata(request, baseUrl);
+
+					try {
+						validateAlertFilters(config.alertFilters, metadata);
+					} catch (error) {
+						throw new NodeOperationError(node, errorMessage(error));
+					}
+				}
 
 				const result = await (resource === 'alertActivity' ? pollAlertActivities : pollSentinelOne)(
 					request,

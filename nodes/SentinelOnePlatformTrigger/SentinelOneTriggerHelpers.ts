@@ -40,6 +40,8 @@ export interface TriggerConfig extends ExclusionPatterns {
 	statuses: string[];
 	alertName: string;
 	advancedFilters?: unknown;
+	alertFilters?: IDataObject[];
+	alertFilterMatch?: 'all' | 'any';
 	simplifyOutput: boolean;
 	additionalAlertFields?: string[];
 	debug: boolean;
@@ -198,10 +200,7 @@ type FilterSelection = {
 	orFilter: IDataObject | null;
 };
 
-export function advancedFilterSelection(
-	baseFilters: IDataObject[],
-	input: unknown,
-): FilterSelection {
+function advancedSelection(baseFilters: IDataObject[], input: unknown): FilterSelection {
 	if (input === undefined || input === null || input === '')
 		return { filters: baseFilters, orFilter: null };
 	let value: unknown = input;
@@ -246,6 +245,36 @@ export function advancedFilterSelection(
 	});
 
 	return { filters: null, orFilter: { or: groups } };
+}
+
+export function advancedFilterSelection(
+	baseFilters: IDataObject[],
+	input: unknown,
+	rows: IDataObject[] = [],
+	match: 'all' | 'any' = 'all',
+): FilterSelection {
+	if (match === 'all' || rows.length === 0)
+		return advancedSelection([...baseFilters, ...rows], input);
+	const advanced = advancedSelection([], input);
+	// SAFETY: advancedSelection constructs only groups with an and array.
+
+	const groups = advanced.orFilter
+		? (advanced.orFilter.or as Array<{ and: IDataObject[] }>)
+		: [{ and: advanced.filters ?? [] }];
+
+	if (rows.length * groups.length > 20)
+		throw new Error(
+			'Alert Filters with Advanced Filters supports at most 20 OR groups. Reduce the filter rows or Advanced Filters groups.',
+		);
+
+	return {
+		filters: null,
+		orFilter: {
+			or: rows.flatMap((row) =>
+				groups.map((group) => ({ and: [...baseFilters, row, ...group.and] })),
+			),
+		},
+	};
 }
 
 function stableStringify(value: unknown): string {
@@ -346,7 +375,12 @@ export function fingerprintConfig(config: TriggerConfig): string {
 			severities: [...config.severities].sort(),
 			statuses: [...config.statuses].sort(),
 			alertName: config.alertName.trim(),
-			advancedFilters: advancedFilterSelection([], config.advancedFilters),
+			advancedFilters: advancedFilterSelection(
+				[],
+				config.advancedFilters,
+				config.alertFilters,
+				config.alertFilterMatch,
+			),
 			excludeAccountName: config.excludeAccountName ?? '',
 			excludeSiteName: config.excludeSiteName ?? '',
 			excludeGroupName: config.excludeGroupName ?? '',
@@ -467,6 +501,8 @@ async function requestAlertPage(
 	const selection = advancedFilterSelection(
 		buildFilters(config, fieldId, start, end, excludeIds),
 		config.advancedFilters,
+		config.alertFilters,
+		config.alertFilterMatch,
 	);
 
 	const remainingMs = (config.pollDeadlineMs ?? Infinity) - Date.now();
