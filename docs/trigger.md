@@ -16,6 +16,25 @@ Match Any requires at least one row to match; Alert Severity, Alert Status and A
 
 Choose fields and supported comparators from the [Alert filter fields reference](reference/alert-filter-fields.md).
 
+### How the filters combine
+
+Every filter setting is ANDed together. There is one rule:
+
+> **Alert Severity AND Alert Status AND Alert Name AND Alert Filters AND Advanced Filters**
+
+Alert Filters is the rows with Match All (every row) or Match Any (at least one row). Advanced Filters is read in one of two ways:
+
+| You write in Advanced Filters                                     | It means                      | Result                                 |
+| ----------------------------------------------------------------- | ----------------------------- | -------------------------------------- |
+| A list: `[ X, Y ]`                                                | every filter must match       | `everything else AND X AND Y`          |
+| An `or` object: `{ "or": [ { "and": [X] }, { "and": [Y, Z] } ] }` | at least one group must match | `everything else AND (X OR (Y AND Z))` |
+
+"Everything else" is Alert Severity, Alert Status, Alert Name and Alert Filters: they always apply, to every group.
+
+Example: Alert Severity High and Critical, Alert Filters Match All with `alertName` Contains `CloudTrail`, and Advanced Filters `{ "or": [ { "and": [ status NEW ] }, { "and": [ ticketIdExists true ] } ] }` delivers CloudTrail alerts of high or critical severity that are either new or already have a ticket.
+
+SentinelOne's API cannot nest `and` and `or`, and does not accept a list and an `or` together (both verified against a live console). The trigger therefore sends the result as one `or` of flat `and` groups: it copies the shared filters into every group, and with Alert Filters Match Any plus an Advanced `or` it builds every row by group combination. That is the same logic written out, and SentinelOne allows at most 20 groups, so Match Any with 4 rows and an `or` of 5 groups (20) is the largest such combination. You never need to write the expanded form yourself.
+
 ### Advanced filters
 
 Advanced Filters passes SentinelOne alert filters straight to the API. Write a JSON array of filter objects; every filter in the array must match. Each filter has a `fieldId`, exactly one comparator, and optionally `"isNegated": true` to exclude what it matches.
