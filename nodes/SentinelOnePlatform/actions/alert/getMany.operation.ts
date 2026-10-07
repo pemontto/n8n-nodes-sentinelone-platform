@@ -11,7 +11,7 @@ import { graphQlRequest } from '../../transport/graphql';
 import { getManyAlertsDocument } from '../documents';
 import { readListScope } from '../../../shared/Scopes';
 import { buildFilters } from './filters';
-import { alertListSelection } from '../../../shared/AlertFields';
+import { alertListSelection, alertOutput } from '../../../shared/AlertFields';
 
 const MAX_PAGE_SIZE = 100;
 
@@ -124,7 +124,7 @@ export async function getManyUnifiedAlerts(
 			}
 
 			assertAlert(context, itemIndex, edge.node, null, scope);
-			alerts.push(edge.node as IDataObject);
+			alerts.push(alertOutput(edge.node as IDataObject));
 
 			if (alerts.length >= rawLimit) break;
 		}

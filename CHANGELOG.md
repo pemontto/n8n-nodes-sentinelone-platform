@@ -2,10 +2,9 @@
 
 ## 0.2.0 (unreleased)
 
-- **Breaking change:** Simplified Alert trigger output maps `alertId` to `id`, `alertExternalId` to `externalId`, `alertSeverity` to `severity`, `alertStatus` to `status`, and `noteExists` to `alertNoteExists`; `alertName` remains `alertName`. Every selected Additional Alert Field now follows `alert<Field>` → `<field>`, including `alertTicketId` → `ticketId` and `alertAnalystVerdict` → `analystVerdict`. Optional list fields also follow this mapping: `alertAiInvestigation` → `aiInvestigation`, `alertAttackPaths` → `attackPaths`, `alertExclusionHashes` → `exclusionHashes`, `alertIncident` → `incident`, `alertLabels` → `labels`, and `alertSloDetails` → `sloDetails`. Saved workflows that reference the previous output names must be updated. This change is within the 0.x series, where a minor release may include breaking changes.
 - Alert triggers add repeatable GUI Alert Filters rows with Match All or Match Any behaviour and a reference for supported alert fields and comparators.
 - Exclude Account, Site, Group and User Name accept one pattern per line; any line can exclude. Previously several lines formed one pattern that matched nothing.
-- Simplified Alert trigger output aligns top-level scalar fields with SentinelOne filter IDs, including `alertName`; selected Additional Alert Fields retain their API keys. Alert Activity prefixes and raw output are unchanged.
+- Regular node and simplified Alert trigger output use SentinelOne filter field IDs, including `alertName`, `alertNoteExists`, `ticketId`, `status`, and `severity`. Raw output keeps the API object. Alert Activity summaries keep their `alert` prefixes.
 - Severity lists use Critical, High, Medium, Low, Info, Unknown order; status lists use New, In Progress, Resolved order.
 
 ## 0.1.0 (2026-10-07)

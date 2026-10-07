@@ -50,7 +50,7 @@ Advanced Filters passes SentinelOne alert filters straight to the API. Write a J
 | `booleanEqual` / `booleanIn` | true or false                                                                                                                  | `{ "value": true }`                                    |
 | `longEqual` / `longIn`       | Whole numbers, such as `assigneeUserId`                                                                                        | `{ "value": 123 }`                                     |
 
-Field IDs are SentinelOne's filter names, which sometimes differ from the alert's own field names: the title is filtered as `alertName`, not `name`. Simplified trigger output aligns top-level scalar fields with filter IDs, including `alertName`; selected Additional Alert Fields retain their API keys. Common filter fields: `alertName`, `ticketId`, `status`, `severity`, `analystVerdict`, `classification`, `confidenceLevel`, `externalId`, `assetName`, `processName`, `fileSha256`, `detectionProduct`, `analyticsName`, `mitreTactics`, `ticketIdExists`, `alertNoteExists` and `createdAt`. See [Alert filter fields](reference/alert-filter-fields.md) for all 111 with the comparators each allows. Account, site and group are not filterable: use Scope or the name exclusions.
+Field IDs are SentinelOne's filter names. Common filter fields: `alertName`, `ticketId`, `status`, `severity`, `analystVerdict`, `classification`, `confidenceLevel`, `externalId`, `assetName`, `processName`, `fileSha256`, `detectionProduct`, `analyticsName`, `mitreTactics`, `ticketIdExists`, `alertNoteExists` and `createdAt`. See [Alert filter fields](reference/alert-filter-fields.md) for all 111 with the comparators each allows. Account, site and group are not filterable: use Scope or the name exclusions.
 
 ```json
 [
@@ -223,7 +223,7 @@ With Simplify disabled, the event keeps its full envelope. Optional `note`, `mit
 }
 ```
 
-Alert trigger outputs use the same Simplify option. Simplified alerts map top-level scalar fields to SentinelOne filter IDs: `alertId` becomes `id`, `alertExternalId` becomes `externalId`, `alertSeverity` becomes `severity`, `alertStatus` becomes `status`, and `noteExists` becomes `alertNoteExists`; `alertName` already is the filter ID. The raw API object calls the title `name`. Every selected Additional Alert Field keeps its API key without an `alert` prefix, such as `ticketId` and `analystVerdict`. Nested fields such as `detectionSource`, `assets`, `process`, `analytics`, and `assignee` keep their API shape. Scope is flattened into `accountId`, `accountName`, `siteId`, `siteName`, `groupId`, and `groupName`; `scope` and `eventTimestamp` are omitted. Raw output keeps the original alert object under `alert`, and action node responses retain API fields such as `name` and `noteExists`. Examples:
+Alert trigger outputs use the same Simplify option. Regular node and simplified Alert trigger output use SentinelOne filter field IDs, including `alertName`, `alertNoteExists`, `ticketId`, `status`, and `severity`. Additional Alert Fields use their output keys, such as `ticketId` and `analystVerdict`. Nested fields such as `detectionSource`, `assets`, `process`, `analytics`, and `assignee` keep their API shape. Scope is flattened into `accountId`, `accountName`, `siteId`, `siteName`, `groupId`, and `groupName`; `scope` and `eventTimestamp` are omitted. Raw output keeps the API object under `alert`. Examples:
 
 ```json
 {

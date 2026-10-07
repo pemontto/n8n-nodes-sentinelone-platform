@@ -218,16 +218,42 @@ test('action node description exposes the intended v1 resources, operations, and
 	);
 });
 
+test('Get Many output uses alert filter field IDs and preserves other fields', async () => {
+	const source = {
+		...alert(),
+		name: 'Example detection',
+		noteExists: false,
+		incident: { id: 'incident-1', name: 'Example incident' },
+	};
+	const context = executionContext(
+		[alertParameters({ operation: 'getAll', returnAll: false, limit: 1 })],
+		async (_credential, options) => {
+			assert.match(options.body.query, /\bname\b/);
+			assert.match(options.body.query, /\bnoteExists\b/);
+			assert.doesNotMatch(options.body.query, /\balertName\b|\balertNoteExists\b/);
+			return getManyEnvelope([source]);
+		},
+	);
+	const [[item]] = await new SentinelOnePlatform().execute.call(context);
+	const { name, noteExists, ...rest } = source;
+
+	assert.deepEqual(item.json, { ...rest, alertName: name, alertNoteExists: noteExists });
+	assert.equal('name' in item.json, false);
+	assert.equal('noteExists' in item.json, false);
+	assert.equal(source.name, 'Example detection');
+	assert.equal(source.noteExists, false);
+});
+
 test('router dispatches Alert Get and preserves the selected scope', async () => {
 	let requestOptions;
 	const context = executionContext([alertParameters()], async (_credentialName, options) => {
 		requestOptions = options;
-		return { data: { alert: alert() } };
+		return { data: { alert: { ...alert(), name: 'Example detection', noteExists: true } } };
 	});
 
 	const result = await routeSentinelOneOperation(context, 0);
 
-	assert.deepEqual(result, [alert()]);
+	assert.deepEqual(result, [{ ...alert(), alertName: 'Example detection', alertNoteExists: true }]);
 	assert.equal(requestOptions.method, 'POST');
 	assert.equal(requestOptions.url, 'https://tenant.example/web/api/v2.1/unifiedalerts/graphql');
 	assert.deepEqual(requestOptions.body.variables, {

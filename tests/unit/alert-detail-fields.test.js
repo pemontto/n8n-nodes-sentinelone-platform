@@ -11,7 +11,10 @@ test('detail selection always includes common fields and keeps raw data opt-in',
 	assert.match(alertDetailSelection([]), /assets \{/);
 	assert.doesNotMatch(alertDetailSelection(), /rawData/);
 	assert.match(alertDetailSelection(['rawData']), /rawData/);
-	const selection = alertDetailSelection(['name'], 'process { username file { sha256 } }');
+	const selection = alertDetailSelection(
+		['alertName', 'alertNoteExists'],
+		'process { username file { sha256 } }',
+	);
 	assert.match(selection, /process \{ username file \{ sha256 \} \}/);
 	assert.doesNotMatch(selection, /rawData/);
 	assert.match(

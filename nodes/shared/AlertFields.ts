@@ -20,7 +20,7 @@ const fields: Record<string, AlertField> = {
 		standard: true,
 		core: true,
 	},
-	name: { name: 'Name', list: 'name', detail: 'name', standard: true, core: true },
+	alertName: { name: 'Alert Name', list: 'name', detail: 'name', standard: true, core: true },
 	severity: { name: 'Severity', list: 'severity', detail: 'severity', standard: true, core: true },
 	status: { name: 'Status', list: 'status', detail: 'status', standard: true, core: true },
 	createdAt: {
@@ -58,8 +58,8 @@ const fields: Record<string, AlertField> = {
 		standard: true,
 		core: true,
 	},
-	noteExists: {
-		name: 'Note Exists',
+	alertNoteExists: {
+		name: 'Alert Note Exists',
 		list: 'noteExists',
 		detail: 'noteExists',
 		standard: true,
@@ -336,8 +336,19 @@ export function alertFieldSelection(selected: unknown): string {
 		.join('\n');
 }
 
+export function alertOutput(alert: IDataObject): IDataObject {
+	return Object.fromEntries(
+		Object.entries(alert).map(([key, value]) => [
+			key === 'name' ? 'alertName' : key === 'noteExists' ? 'alertNoteExists' : key,
+			value,
+		]),
+	);
+}
+
 export function additionalAlertOutput(selected: unknown, alert: IDataObject): IDataObject {
-	return Object.fromEntries(selectedAlertFields(selected).map((key) => [key, alert[key] ?? null]));
+	const output = alertOutput(alert);
+
+	return Object.fromEntries(selectedAlertFields(selected).map((key) => [key, output[key] ?? null]));
 }
 
 export function alertListSelection(selected?: unknown): string {

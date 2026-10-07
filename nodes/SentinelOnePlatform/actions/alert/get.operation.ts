@@ -1,6 +1,6 @@
 import { additionalAlertFields, alertId } from '../../../shared/Descriptions';
 import type { INodeProperties, IDataObject, IExecuteFunctions } from 'n8n-workflow';
-import { alertDetailSelection } from '../../../shared/AlertFields';
+import { alertDetailSelection, alertOutput } from '../../../shared/AlertFields';
 import { isRecord, localError, requiredId, assertAlert } from '../common';
 import { graphQlRequest } from '../../transport/graphql';
 
@@ -33,7 +33,7 @@ export async function getUnifiedAlert(
 	const alert = await graphQlRequest(context, itemIndex, document, { id: alertId }, 'alert');
 	assertAlert(context, itemIndex, alert, alertId, null);
 
-	return [alert as IDataObject];
+	return [alertOutput(alert as IDataObject)];
 }
 
 export const description: INodeProperties[] = [
