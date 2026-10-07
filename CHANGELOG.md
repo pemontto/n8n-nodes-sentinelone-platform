@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-07)
 
 This first release adds n8n nodes for working with SentinelOne alerts, alert notes, and SDL PowerQueries, plus triggers for new and updated alerts and alert activity.
 
