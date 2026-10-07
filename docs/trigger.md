@@ -8,9 +8,36 @@ The Alert resource Options include Advanced Filters, Alert Name, Exclude Account
 
 ### Advanced filters
 
-Advanced Filters accepts a JSON array of filter objects. Each filter uses a `fieldId`, an optional boolean `isNegated`, and exactly one comparator: `stringIn`, `stringEqual`, or `dateTimeRange`. An array combines filters with AND. The `fieldId` and comparator must be supported by SentinelOne. Common fields include `severity`, `status`, `analystVerdict`, `createdAt`, `externalId`, and `ticketId`. For example, `[ { "fieldId": "severity", "stringIn": { "values": ["HIGH", "CRITICAL"] } } ]` matches either listed severity.
+Advanced Filters passes SentinelOne alert filters straight to the API. Write a JSON array of filter objects; every filter in the array must match. Each filter has a `fieldId`, exactly one comparator, and optionally `"isNegated": true` to exclude what it matches.
 
-To express OR, provide an object with an `or` array of groups, each containing an `and` array of filters. For example, `{ "or": [ { "and": [ { "fieldId": "severity", "stringIn": { "values": ["HIGH"] } } ] }, { "and": [ { "fieldId": "status", "stringIn": { "values": ["NEW"] } } ] } ] }` matches either group. Each array supports at most 100 filters and an `or` object supports at most 20 groups. The built-in Severity, Status, Alert Name, and time filters still apply alongside these filters.
+| Comparator                   | Matches                                                                                                                        | Shape                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
+| `match`                      | Text, ignoring case. `operator` is `contains` (default), `startsWith`, `endsWith` or `exactMatch`. Any listed value can match. | `{ "operator": "contains", "values": ["CloudTrail"] }` |
+| `stringIn`                   | Exact text, case-sensitive, any of the values                                                                                  | `{ "values": ["HIGH", "CRITICAL"] }`                   |
+| `stringEqual`                | Exact text, case-sensitive, one value                                                                                          | `{ "value": "NEW" }`                                   |
+| `dateTimeRange`              | Epoch milliseconds, `start` and/or `end`                                                                                       | `{ "start": 1759795200000 }`                           |
+| `booleanEqual` / `booleanIn` | true or false                                                                                                                  | `{ "value": true }`                                    |
+| `longEqual` / `longIn`       | Whole numbers, such as `assigneeUserId`                                                                                        | `{ "value": 123 }`                                     |
+
+Field IDs are SentinelOne's filter names, which sometimes differ from the alert's own field names: the title is filtered as `alertName`, not `name`. Simplified trigger output uses the same IDs, so `alertName`, `ticketId`, `status` and `severity` line up. Common fields: `alertName`, `ticketId`, `status`, `severity`, `analystVerdict`, `classification`, `confidenceLevel`, `externalId`, `assetName`, `processName`, `fileSha256`, `detectionProduct`, `analyticsName`, `mitreTactics`, `ticketIdExists`, `alertNoteExists` and `createdAt`. See [Alert filter fields](reference/alert-filter-fields.md) for all 111 with the comparators each allows. Account, site and group are not filterable: use Scope or the name exclusions.
+
+```json
+[
+	{ "fieldId": "ticketId", "match": { "values": ["SOC-"] }, "isNegated": true },
+	{
+		"fieldId": "alertName",
+		"stringIn": { "values": ["Email reported by user as junk"] },
+		"isNegated": true
+	},
+	{
+		"fieldId": "alertName",
+		"match": { "operator": "contains", "values": ["AWS CloudTrail"] },
+		"isNegated": true
+	}
+]
+```
+
+For alternatives, use one object with an `or` array of groups, each with an `and` array: `{ "or": [ { "and": [ ... ] }, { "and": [ ... ] } ] }`. SentinelOne allows one such object per query, at most 20 groups and 100 filters per group. The trigger's Severity, Status, Alert Name and time filters still apply alongside Advanced Filters.
 
 ### Exclusions
 
