@@ -457,7 +457,8 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				placeholder: 'Add Scope',
 				// Must stay empty: a pre-filled default makes the n8n editor fail to open the node.
 				default: {},
-				description: 'Limit to accounts, sites or groups. Leave empty for everything the credential can see.',
+				description:
+					'Limit to accounts, sites or groups. Leave empty for everything the credential can see.',
 				options: [
 					{
 						displayName: 'Selection',

@@ -197,11 +197,11 @@ export async function graphQlRequest(
 		// Return SentinelOne's own error text: it is what tells a user what went wrong.
 		// Mutation values (such as note text) are masked if SentinelOne echoes them back.
 		const submitted = mutation
-			? JSON.stringify(variables)
+			? (JSON.stringify(variables)
 					.match(/"(?:[^"\\]|\\.)*"/g)
 					?.map((value) => JSON.parse(value) as string)
 					.filter((value) => value.length >= 4)
-					.flatMap((value) => [JSON.stringify(value).slice(1, -1), value]) ?? []
+					.flatMap((value) => [JSON.stringify(value).slice(1, -1), value]) ?? [])
 			: [];
 
 		const mask = (text: string) =>
