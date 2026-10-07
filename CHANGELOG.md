@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-10-07)
 
 - Alert triggers add repeatable GUI Alert Filters rows with Match All or Match Any behaviour and a reference for supported alert fields and comparators.
 - Exclude Account, Site, Group and User Name accept one pattern per line; any line can exclude. Previously several lines formed one pattern that matched nothing.
