@@ -588,28 +588,31 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						displayName: 'Exclude Account Name',
 						name: 'excludeAccountName',
 						type: 'string',
+						typeOptions: { rows: 3 },
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Regular expression to exclude matching names, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
+							'Regular expressions to exclude matching names, one per line, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Exclude Group Name',
 						name: 'excludeGroupName',
 						type: 'string',
+						typeOptions: { rows: 3 },
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Regular expression to exclude matching names, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
+							'Regular expressions to exclude matching names, one per line, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Exclude Site Name',
 						name: 'excludeSiteName',
 						type: 'string',
+						typeOptions: { rows: 3 },
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Regular expression to exclude matching names, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
+							'Regular expressions to exclude matching names, one per line, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					simplifyOption,
 				],
@@ -652,28 +655,31 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						displayName: 'Exclude Account Name',
 						name: 'excludeAccountName',
 						type: 'string',
+						typeOptions: { rows: 3 },
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Regular expression to exclude matching names, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
+							'Regular expressions to exclude matching names, one per line, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Exclude Group Name',
 						name: 'excludeGroupName',
 						type: 'string',
+						typeOptions: { rows: 3 },
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Regular expression to exclude matching names, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
+							'Regular expressions to exclude matching names, one per line, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Exclude Site Name',
 						name: 'excludeSiteName',
 						type: 'string',
+						typeOptions: { rows: 3 },
 						default: '',
 						placeholder: 'demo|test',
 						description:
-							'Regular expression to exclude matching names, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
+							'Regular expressions to exclude matching names, one per line, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Exclude User IDs',
@@ -687,10 +693,11 @@ export class SentinelOnePlatformTrigger implements INodeType {
 						displayName: 'Exclude User Name',
 						name: 'excludeActorName',
 						type: 'string',
+						typeOptions: { rows: 3 },
 						default: '',
 						placeholder: 'automation|integration',
 						description:
-							'Regular expression to exclude people or services by name, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
+							'Regular expressions to exclude people or services by name, one per line, ignoring case. Leave empty to disable. Missing names are kept. See <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#exclusions">supported syntax</a>.',
 					},
 					{
 						displayName: 'Include Current Alert',

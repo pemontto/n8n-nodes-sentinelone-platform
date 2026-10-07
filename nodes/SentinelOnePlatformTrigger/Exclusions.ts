@@ -10,6 +10,22 @@ export interface ExclusionPatterns {
 export function compileExclusion(pattern: string | undefined, label: string): RegExp | undefined {
 	if (!pattern) return undefined;
 
+	// One pattern per line: each line is checked on its own, and any line can exclude.
+	const lines = pattern
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+
+	if (lines.length === 0) return undefined;
+
+	if (lines.length > 1) {
+		const compiled = lines.map((line) => compileExclusion(line, label)!);
+
+		return new RegExp(compiled.map((regex) => `(?:${regex.source})`).join('|'), 'i');
+	}
+
+	pattern = lines[0];
+
 	const invalid = () =>
 		new Error(
 			`${label}: use a valid regex of at most 256 characters, with at most one single-character quantifier (*, +, or ?). Multiple groups, group quantifiers, counted repetitions, lookarounds, and backreferences are not supported. Leave empty to disable.`,

@@ -14,7 +14,7 @@ To express OR, provide an object with an `or` array of groups, each containing a
 
 ### Exclusions
 
-Account, Site, Group, and activity user-name exclusions use case-insensitive regular expressions. Enter an empty value to disable the exclusion; missing names are kept. Patterns are limited to 256 characters, at most one simple `*`, `+`, or `?` quantifier, and at most one group. A non-capturing group is supported. Counted repetitions, lookarounds, backreferences, and multiple groups are not supported. User ID exclusions are exact IDs, not regular expressions.
+Account, Site, Group, and activity user-name exclusions use case-insensitive regular expressions, one per line; any line can exclude. Enter an empty value to disable the exclusion; missing names are kept. Patterns are limited to 256 characters, at most one simple `*`, `+`, or `?` quantifier, and at most one group. A non-capturing group is supported. Counted repetitions, lookarounds, backreferences, and multiple groups are not supported. User ID exclusions are exact IDs, not regular expressions.
 
 ## Activity selection
 

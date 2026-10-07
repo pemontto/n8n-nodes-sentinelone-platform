@@ -221,6 +221,19 @@ test('site and account name exclusions drop matching activity in scheduled and m
 	}
 });
 
+test('exclusions take one pattern per line and any line excludes', async () => {
+	for (const [pattern, excluded] of [
+		['Other\nSite', true],
+		['Other\r\nSite\n', true],
+		['Other\nNothing', false],
+		['\n\n', false],
+	]) {
+		const c = cfg({ excludeSiteName: pattern });
+		const result = await pollAlertActivities(request(), c, state(c), 'scheduled', NOW);
+		assert.equal(result.items.length === 0, excluded, JSON.stringify(pattern));
+	}
+});
+
 test('unindexed alert scope fails without advancing or mutating state', async () => {
 	const c = cfg(),
 		previous = state(c),
