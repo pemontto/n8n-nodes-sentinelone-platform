@@ -55,7 +55,7 @@ export const alertFilterProperties: INodeProperties[] = [
 						typeOptions: { rows: 2 },
 						displayOptions: { show: { comparator: textComparators } },
 						description:
-							'One value per line. Any non-empty line can match. Text matching ignores case; Is Any Of uses exact, case-sensitive values.',
+							'One value per line, or an array from an expression such as {{ ["A", "B"] }}. Any value can match. Contains, Starts With, Ends With and Exact Match ignore case; Is Any Of needs the whole value, exactly, including case.',
 					},
 					{
 						displayName: 'Date',
@@ -153,10 +153,12 @@ export function parseAlertFilters(input: unknown): IDataObject[] {
 		let comparison: IDataObject;
 
 		if (textComparators.includes(comparator)) {
-			const values = String(row.value ?? '')
-				.split(/\r?\n/)
-				.map((line) => line.trim())
-				.filter(Boolean);
+			// One value per line, or an array from an expression such as {{ ["A", "B"] }}.
+			const entries: string[] = Array.isArray(row.value)
+				? row.value.map(String)
+				: String(row.value ?? '').split(/\r?\n/);
+
+			const values = entries.flatMap((line) => (line.trim() ? [line.trim()] : []));
 
 			if (!values.length) throw new Error(`Alert Filters: ${fieldId} needs at least one value.`);
 			comparison =

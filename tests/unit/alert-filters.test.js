@@ -591,3 +591,22 @@ test('scheduled polls skip metadata lookup after an empty activation poll loses 
 		Date.now = originalNow;
 	}
 });
+
+test('Alert Filters values come from lines or from an expression array', () => {
+	const {
+		parseAlertFilters,
+	} = require('../../dist/nodes/SentinelOnePlatformTrigger/AlertFilters.js');
+	const expected = [{ fieldId: 'alertName', stringIn: { values: ['A', 'B c'] } }];
+	assert.deepEqual(
+		parseAlertFilters({
+			filter: [{ fieldId: 'alertName', comparator: 'stringIn', value: 'A\n B c \n' }],
+		}),
+		expected,
+	);
+	assert.deepEqual(
+		parseAlertFilters({
+			filter: [{ fieldId: 'alertName', comparator: 'stringIn', value: ['A', ' B c', ''] }],
+		}),
+		expected,
+	);
+});
