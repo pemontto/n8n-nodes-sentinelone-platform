@@ -599,7 +599,8 @@ async function fetchAlertsNewestFirst(
 			fieldId,
 			start,
 			end,
-			Math.min(config.alertPageSize, remaining),
+			// Full pages: exclusions are applied after fetching, so small pages exhaust the page cap early.
+			config.alertPageSize,
 			after,
 			'DESC',
 			[],
@@ -628,9 +629,8 @@ async function fetchAlertsNewestFirst(
 		after = nextCursor;
 	}
 
-	throw new Error(
-		`The ${fieldId} alert query exceeded the configured page limit. Narrow the scope or filters; state was not advanced.`,
-	);
+	// A preview has no state to protect: show what the page limit found rather than failing.
+	return alerts.slice(0, maxItems);
 }
 
 /** Scope batches in a stable order, so a batch keeps its cursor while its membership is unchanged. */

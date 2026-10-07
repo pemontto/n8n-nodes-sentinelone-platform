@@ -579,7 +579,8 @@ test('manual poll uses the widest alert range and returns at most ten results', 
 		NOW,
 	);
 
-	assert.equal(observedVariables.first, 10);
+	// Previews read full pages because exclusions apply after fetching.
+	assert.equal(observedVariables.first, triggerConfig.alertPageSize);
 	assert.equal(observedVariables.filters[0].dateTimeRange.start, 0);
 	assert.equal(result.items.length, 10);
 	assert.equal(result.nextState, undefined);
@@ -2194,25 +2195,24 @@ test('SDL error routing survives the node authenticated request wrapper on 404 a
 	);
 });
 
-test('A dense manual alert preview stops at its page cap without splitting its time range', async () => {
+test('A dense manual alert preview stops at its page cap and returns what it found', async () => {
 	let calls = 0;
 	const triggerConfig = config({
 		maxAlertPages: 1,
 		alertPageSize: 1,
 		excludeAccountName: 'Account One',
 	});
-	await assert.rejects(
-		pollSentinelOne(
-			async () => {
-				calls++;
-				return alertResponse([alert('excluded')], { hasNextPage: true, endCursor: 'next' });
-			},
-			triggerConfig,
-			{},
-			'manual',
-			NOW,
-		),
-		/configured page limit/,
+	const result = await pollSentinelOne(
+		async () => {
+			calls++;
+			return alertResponse([alert('excluded')], { hasNextPage: true, endCursor: 'next' });
+		},
+		triggerConfig,
+		{},
+		'manual',
+		NOW,
 	);
+	// A preview has no state to protect, so hitting the cap is not an error.
+	assert.deepEqual(result.items, []);
 	assert.equal(calls, 1);
 });
