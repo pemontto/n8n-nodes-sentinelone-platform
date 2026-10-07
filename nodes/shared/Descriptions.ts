@@ -5,18 +5,20 @@ import {
 	type AlertProjection,
 } from './AlertFields';
 
+// eslint-disable-next-line n8n-nodes-base/node-param-options-type-unsorted-items -- Order by severity.
 export const severityOptions = [
 	{ name: 'Critical', value: 'CRITICAL' },
 	{ name: 'High', value: 'HIGH' },
-	{ name: 'Informational', value: 'INFO' },
-	{ name: 'Low', value: 'LOW' },
 	{ name: 'Medium', value: 'MEDIUM' },
+	{ name: 'Low', value: 'LOW' },
+	{ name: 'Info', value: 'INFO' },
 	{ name: 'Unknown', value: 'UNKNOWN' },
 ];
 
+// eslint-disable-next-line n8n-nodes-base/node-param-options-type-unsorted-items -- Order by workflow stage.
 export const statusOptions = [
-	{ name: 'In Progress', value: 'IN_PROGRESS' },
 	{ name: 'New', value: 'NEW' },
+	{ name: 'In Progress', value: 'IN_PROGRESS' },
 	{ name: 'Resolved', value: 'RESOLVED' },
 ];
 
