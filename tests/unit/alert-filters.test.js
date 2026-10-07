@@ -610,3 +610,86 @@ test('Alert Filters values come from lines or from an expression array', () => {
 		expected,
 	);
 });
+
+const allComparators = [
+	'contains',
+	'startsWith',
+	'endsWith',
+	'exactMatch',
+	'stringIn',
+	'isTrue',
+	'isFalse',
+	'after',
+	'before',
+];
+for (const [fieldId, expected] of [
+	['alertName', ['contains', 'exactMatch', 'stringIn']],
+	['severity', ['stringIn']],
+	['ticketIdExists', ['isTrue', 'isFalse']],
+	['createdAt', ['after', 'before']],
+	['', allComparators],
+	['unknown', allComparators],
+	['={{ $json.field }}', allComparators],
+]) {
+	test(`comparator loader offers supported comparisons for ${fieldId || 'no field'}`, async () => {
+		const trigger = new SentinelOnePlatformTrigger();
+		const ctx = context(
+			'comparator-options',
+			{},
+			{
+				metadataResponse: [...metadata, { fieldId: 'severity', filterTypes: ['STRING_IN'] }],
+			},
+		);
+		ctx.getCurrentNodeParameter = (path) => {
+			assert.equal(path, '&fieldId');
+			return fieldId;
+		};
+		const options = await trigger.methods.loadOptions.getAlertFilterComparators.call(ctx);
+		assert.deepEqual(
+			options.map((option) => option.value),
+			expected,
+		);
+	});
+}
+
+test('comparator loader falls back to every comparator when metadata fails', async () => {
+	const ctx = context('comparator-failure');
+	ctx.getCurrentNodeParameter = () => 'alertName';
+	ctx.helpers.httpRequestWithAuthentication = async () => {
+		throw new Error('fixture failure');
+	};
+	const options =
+		await new SentinelOnePlatformTrigger().methods.loadOptions.getAlertFilterComparators.call(ctx);
+	assert.deepEqual(
+		options.map((option) => option.value),
+		allComparators,
+	);
+});
+
+test('n8n accepts empty and saved Alert Filters with dynamic comparator options', () => {
+	const { NodeHelpers } = require('n8n-workflow');
+	const trigger = new SentinelOnePlatformTrigger();
+	const filters = trigger.description.properties.find(
+		(property) => property.name === 'alertFilters',
+	);
+	const comparator = filters.options[0].values.find((property) => property.name === 'comparator');
+	assert.equal(comparator.default, 'contains');
+	assert.deepEqual(comparator.typeOptions, {
+		loadOptionsMethod: 'getAlertFilterComparators',
+		loadOptionsDependsOn: ['&fieldId'],
+	});
+	for (const alertFilters of [
+		{},
+		{ filter: [{ fieldId: 'severity', comparator: 'stringIn', value: 'HIGH', exclude: false }] },
+	]) {
+		const parameters = NodeHelpers.getNodeParameters(
+			trigger.description.properties,
+			{ resource: 'alert', alertFilters },
+			true,
+			false,
+			{ typeVersion: 1 },
+			trigger.description,
+		);
+		assert.deepEqual(parameters.alertFilters, alertFilters);
+	}
+});

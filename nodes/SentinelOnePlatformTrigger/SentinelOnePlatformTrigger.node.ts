@@ -1,5 +1,7 @@
 import {
 	alertFilterProperties,
+	alertFilterComparators,
+	alertComparatorFilterTypes,
 	loadAlertFilterMetadata,
 	parseAlertFilters,
 	validateAlertFilters,
@@ -755,6 +757,36 @@ export class SentinelOnePlatformTrigger implements INodeType {
 					);
 				}
 			},
+			async getAlertFilterComparators(
+				this: ILoadOptionsFunctions,
+			): Promise<INodePropertyOptions[]> {
+				const fieldId = this.getCurrentNodeParameter('&fieldId');
+
+				if (typeof fieldId !== 'string' || !fieldId || fieldId.startsWith('='))
+					return alertFilterComparators;
+
+				try {
+					const credentials = await this.getCredentials('sentinelOnePlatformApi');
+
+					const fields = await loadAlertFilterMetadata(
+						authenticatedRequest(this),
+						normalizeBaseUrl(credentials.baseUrl),
+					);
+
+					const field = fields.find((entry) => entry.fieldId === fieldId);
+
+					if (!field) return alertFilterComparators;
+
+					return alertFilterComparators.filter((option) =>
+						alertComparatorFilterTypes[String(option.value)].some((type) =>
+							field.filterTypes?.includes(type),
+						),
+					);
+				} catch {
+					return alertFilterComparators;
+				}
+			},
+
 			async getAccounts(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const credentials = await this.getCredentials('sentinelOnePlatformApi');
 

@@ -1,7 +1,31 @@
-import type { IDataObject, INodeProperties } from 'n8n-workflow';
+import type { IDataObject, INodeProperties, INodePropertyOptions } from 'n8n-workflow';
 import type { AuthenticatedRequest } from './SentinelOneTriggerHelpers';
 
 const textComparators = ['contains', 'startsWith', 'endsWith', 'exactMatch', 'stringIn'];
+
+export const alertFilterComparators: INodePropertyOptions[] = [
+	{ name: 'Contains', value: 'contains' },
+	{ name: 'Starts With', value: 'startsWith' },
+	{ name: 'Ends With', value: 'endsWith' },
+	{ name: 'Exact Match', value: 'exactMatch' },
+	{ name: 'Is Any Of', value: 'stringIn' },
+	{ name: 'Is True', value: 'isTrue' },
+	{ name: 'Is False', value: 'isFalse' },
+	{ name: 'After', value: 'after' },
+	{ name: 'Before', value: 'before' },
+];
+
+export const alertComparatorFilterTypes: Record<string, string[]> = {
+	contains: ['FULLTEXT'],
+	startsWith: ['STRING_STARTS_WITH'],
+	endsWith: ['STRING_ENDS_WITH'],
+	exactMatch: ['FULLTEXT'],
+	stringIn: ['STRING_IN'],
+	isTrue: ['BOOLEAN_EQUAL', 'BOOLEAN_IN'],
+	isFalse: ['BOOLEAN_EQUAL', 'BOOLEAN_IN'],
+	after: ['DATE_RANGE'],
+	before: ['DATE_RANGE'],
+};
 
 export const alertFilterProperties: INodeProperties[] = [
 	{
@@ -29,23 +53,18 @@ export const alertFilterProperties: INodeProperties[] = [
 							'Choose from the list, or specify an ID using an <a href="https://docs.n8n.io/code/expressions/">expression</a>',
 					},
 					{
+						// Comparators are operators rather than entity IDs.
+						// eslint-disable-next-line n8n-nodes-base/node-param-display-name-wrong-for-dynamic-options
 						displayName: 'Comparator',
 						name: 'comparator',
+						// The operator labels describe the supported comparisons.
+						// eslint-disable-next-line n8n-nodes-base/node-param-description-missing-from-dynamic-options
 						type: 'options',
 						default: 'contains',
-						// Present text, boolean and date comparisons together.
-						// eslint-disable-next-line n8n-nodes-base/node-param-options-type-unsorted-items
-						options: [
-							{ name: 'Contains', value: 'contains' },
-							{ name: 'Starts With', value: 'startsWith' },
-							{ name: 'Ends With', value: 'endsWith' },
-							{ name: 'Exact Match', value: 'exactMatch' },
-							{ name: 'Is Any Of', value: 'stringIn' },
-							{ name: 'Is True', value: 'isTrue' },
-							{ name: 'Is False', value: 'isFalse' },
-							{ name: 'After', value: 'after' },
-							{ name: 'Before', value: 'before' },
-						],
+						typeOptions: {
+							loadOptionsMethod: 'getAlertFilterComparators',
+							loadOptionsDependsOn: ['&fieldId'],
+						},
 					},
 					{
 						displayName: 'Value',
