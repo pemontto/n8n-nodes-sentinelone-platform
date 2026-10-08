@@ -17,9 +17,10 @@ const metadata = [
 ];
 let nextContextId = 0;
 
-function actionContext(parameters = {}, metadataResponse = metadata) {
+function actionContext(parameters = {}, metadataResponse = metadata, alertResponse) {
 	const contextId = nextContextId++;
 	const requests = [];
+	const logs = [];
 	const values = {
 		options: {},
 		filters: {},
@@ -31,7 +32,9 @@ function actionContext(parameters = {}, metadataResponse = metadata) {
 	};
 	return {
 		requests,
+		logs,
 		parameters: values,
+		getMode: () => values.mode ?? 'manual',
 		getNode: () => ({
 			id: 'action-node',
 			name: 'SentinelOne',
@@ -41,6 +44,11 @@ function actionContext(parameters = {}, metadataResponse = metadata) {
 		getCredentials: async () => ({ baseUrl: 'https://tenant.example', apiToken: 'test-token' }),
 		getNodeParameter: (name, _index, fallback) => values[name] ?? fallback,
 		getWorkflow: () => ({ id: 'workflow' }),
+		logger: {
+			debug: (...args) => logs.push(['debug', ...args]),
+			info: (...args) => logs.push(['info', ...args]),
+			warn: (...args) => logs.push(['warn', ...args]),
+		},
 		helpers: {
 			async httpRequestWithAuthentication(_credential, request) {
 				requests.push(request);
@@ -50,8 +58,13 @@ function actionContext(parameters = {}, metadataResponse = metadata) {
 							requests.filter((entry) => entry.body?.query?.includes('alertColumnMetadata')).length,
 							request,
 						);
-					return { data: { alertColumnMetadata: metadataResponse } };
+					return typeof metadataResponse === 'object' &&
+						metadataResponse !== null &&
+						!Array.isArray(metadataResponse)
+						? metadataResponse
+						: { data: { alertColumnMetadata: metadataResponse } };
 				}
+				if (typeof alertResponse === 'function') return alertResponse(request, requests);
 				return {
 					data: {
 						alerts: {
@@ -201,6 +214,285 @@ test('Get Many preserves metadata 401 status and does not issue an alert query',
 		1,
 	);
 	assert.equal(actionQuery(ctx), undefined);
+});
+
+test('Get Many fails a regular metadata error in manual mode', async () => {
+	const ctx = actionContext(
+		{
+			alertFilters: {
+				filter: [{ fieldId: 'alertName', comparator: 'contains', value: 'manual-marker' }],
+			},
+		},
+		() => {
+			const error = new Error('not found');
+			error.statusCode = 404;
+			throw error;
+		},
+	);
+
+	await assert.rejects(getManyUnifiedAlerts(ctx, 0), (error) => {
+		assert.equal(error.statusCode, 404);
+		return true;
+	});
+	assert.equal(actionQuery(ctx), undefined);
+});
+
+test('Get Many warns and uses the original Alert Filters in non-manual mode after metadata 503', async () => {
+	const row = { fieldId: 'alertName', comparator: 'contains', value: 'scheduled-marker' };
+	const ctx = actionContext({ mode: 'trigger', alertFilters: { filter: [row] } }, () => {
+		const error = new Error('temporary service unavailable');
+		error.statusCode = 503;
+		throw error;
+	});
+
+	await getManyUnifiedAlerts(ctx, 0);
+	assert.equal(actionQuery(ctx).body.variables.filters[0].fieldId, 'alertName');
+	assert.deepEqual(actionQuery(ctx).body.variables.filters[0].match, {
+		operator: 'contains',
+		values: ['scheduled-marker'],
+	});
+	assert.ok(ctx.logs.some(([level]) => level === 'warn'));
+});
+
+test('Get Many warns and continues after non-manual statusless metadata failures', async () => {
+	const row = { fieldId: 'alertName', comparator: 'contains', value: 'scheduled-timeout-marker' };
+	const ctx = actionContext({ mode: 'trigger', alertFilters: { filter: [row] } }, () => {
+		throw Object.assign(new Error('metadata connection timed out'), { code: 'ETIMEDOUT' });
+	});
+
+	await getManyUnifiedAlerts(ctx, 0);
+	assert.deepEqual(actionQuery(ctx).body.variables.filters[0].match, {
+		operator: 'contains',
+		values: ['scheduled-timeout-marker'],
+	});
+	assert.ok(ctx.logs.some(([level]) => level === 'warn'));
+});
+
+test('Get Many warns and continues after a non-manual GraphQL metadata error envelope', async () => {
+	const row = { fieldId: 'alertName', comparator: 'contains', value: 'metadata-envelope-marker' };
+	const ctx = actionContext(
+		{ mode: 'trigger', alertFilters: { filter: [row] } },
+		{ errors: [{ message: 'metadata lookup is unavailable' }] },
+	);
+
+	await getManyUnifiedAlerts(ctx, 0);
+	assert.deepEqual(actionQuery(ctx).body.variables.filters[0].match, {
+		operator: 'contains',
+		values: ['metadata-envelope-marker'],
+	});
+	assert.ok(ctx.logs.some(([level]) => level === 'warn'));
+});
+
+test('Get Many keeps non-manual metadata authentication failures fatal', async (t) => {
+	for (const status of [401, 403]) {
+		await t.test(`HTTP ${status}`, async () => {
+			const ctx = actionContext(
+				{
+					mode: 'trigger',
+					alertFilters: {
+						filter: [{ fieldId: 'alertName', comparator: 'contains', value: 'auth-marker' }],
+					},
+				},
+				() => {
+					const error = new Error('denied');
+					error.statusCode = status;
+					throw error;
+				},
+			);
+
+			await assert.rejects(getManyUnifiedAlerts(ctx, 0), (error) => {
+				assert.equal(error.statusCode, status);
+				assert.equal(error.httpCode, String(status));
+				return true;
+			});
+			assert.equal(actionQuery(ctx), undefined);
+		});
+	}
+});
+
+test('Get Many keeps metadata validation failures fatal in non-manual mode', async () => {
+	const ctx = actionContext(
+		{
+			mode: 'trigger',
+			alertFilters: {
+				filter: [{ fieldId: 'alertName', comparator: 'contains', value: 'invalid-field-marker' }],
+			},
+		},
+		[{ fieldId: 'alertName', filterTypes: ['STRING_IN'], enableNegation: true }],
+	);
+
+	await assert.rejects(getManyUnifiedAlerts(ctx, 0), /not available for this field/);
+	assert.equal(actionQuery(ctx), undefined);
+});
+
+test('Get Many preserves manual metadata timeout and DNS details and item pairing', async (t) => {
+	for (const [name, transportError, marker] of [
+		[
+			'timeout',
+			Object.assign(new Error('connect ETIMEDOUT tenant.example'), { code: 'ETIMEDOUT' }),
+			'timeout-marker',
+		],
+		[
+			'DNS failure',
+			Object.assign(new Error('getaddrinfo EAI_AGAIN tenant.example'), { code: 'EAI_AGAIN' }),
+			'dns-marker',
+		],
+	]) {
+		await t.test(name, async () => {
+			const ctx = actionContext(
+				{
+					alertFilters: {
+						filter: [{ fieldId: 'alertName', comparator: 'contains', value: marker }],
+					},
+				},
+				async () => {
+					throw transportError;
+				},
+			);
+
+			await assert.rejects(getManyUnifiedAlerts(ctx, 7), (error) => {
+				assert.equal(error.message, transportError.message);
+				assert.equal(error.errorCode, transportError.code);
+				assert.equal(error.cause, transportError);
+				assert.equal(error.httpCode, undefined);
+				assert.equal(error.context.itemIndex, 7);
+				return true;
+			});
+		});
+	}
+});
+
+test('Get Many includes the item index on metadata HTTP errors', async () => {
+	const ctx = actionContext(
+		{
+			alertFilters: {
+				filter: [{ fieldId: 'alertName', comparator: 'contains', value: 'http-marker' }],
+			},
+		},
+		() => {
+			const error = new Error('forbidden');
+			error.statusCode = 403;
+			throw error;
+		},
+	);
+
+	await assert.rejects(getManyUnifiedAlerts(ctx, 4), (error) => {
+		assert.equal(error.httpCode, '403');
+		assert.equal(error.context.itemIndex, 4);
+		return true;
+	});
+});
+
+test('Get Many logs a redacted metadata request when Debug is enabled', async () => {
+	const ctx = actionContext({
+		nodeDebug: true,
+		alertFilters: {
+			filter: [{ fieldId: 'alertName', comparator: 'contains', value: 'private-filter-marker' }],
+		},
+	});
+
+	await getManyUnifiedAlerts(ctx, 0);
+	const debugLogs = ctx.logs.map((entry) => entry.slice(1).join(' ')).join('\n');
+	assert.match(debugLogs, /SentinelOne GraphQL request/);
+	assert.match(debugLogs, /alertColumnMetadata/);
+	assert.doesNotMatch(debugLogs, /private-filter-marker/);
+});
+
+test('Get Many rejects an invalid saved Match Filters value', async () => {
+	const ctx = actionContext({
+		alertFilterMatch: 'first',
+		alertFilters: {
+			filter: [{ fieldId: 'alertName', comparator: 'contains', value: 'invalid-match-marker' }],
+		},
+	});
+
+	await assert.rejects(getManyUnifiedAlerts(ctx, 0), /Match Filters must be All or Any/);
+	assert.equal(hasMetadata(ctx), false);
+	assert.equal(actionQuery(ctx), undefined);
+});
+
+test('Get Many deduplicates overlapping pages, preserves the first match, and limits unique alerts', async () => {
+	const pages = [
+		{
+			data: {
+				alerts: {
+					edges: [
+						{ cursor: 'edge-1', node: { id: 'alert-a', severity: 'HIGH' } },
+						{ cursor: 'edge-2', node: { id: 'alert-a', severity: 'LOW' } },
+						{ cursor: 'edge-3', node: { id: 'alert-b', severity: 'MEDIUM' } },
+					],
+					pageInfo: { hasNextPage: true, endCursor: 'page-1' },
+				},
+			},
+		},
+		{
+			data: {
+				alerts: {
+					edges: [{ cursor: 'edge-4', node: { id: 'alert-a', severity: 'INFO' } }],
+					pageInfo: { hasNextPage: true, endCursor: 'page-2' },
+				},
+			},
+		},
+		{
+			data: {
+				alerts: {
+					edges: [{ cursor: 'edge-5', node: { id: 'alert-c', severity: 'LOW' } }],
+					pageInfo: { hasNextPage: false, endCursor: 'page-3' },
+				},
+			},
+		},
+	];
+	const ctx = actionContext(
+		{
+			limit: 3,
+			alertFilters: {
+				filter: [
+					{ fieldId: 'alertName', comparator: 'contains', value: 'first-or-branch' },
+					{ fieldId: 'ticketId', comparator: 'contains', value: 'second-or-branch' },
+				],
+			},
+			alertFilterMatch: 'any',
+		},
+		metadata,
+		() => pages.shift(),
+	);
+
+	const alerts = await getManyUnifiedAlerts(ctx, 0);
+	assert.deepEqual(
+		alerts.map(({ id }) => id),
+		['alert-a', 'alert-b', 'alert-c'],
+	);
+	assert.equal(alerts[0].severity, 'HIGH');
+	const alertRequests = ctx.requests.filter((request) =>
+		request.body?.query?.includes('SentinelOneGetManyAlerts'),
+	);
+	assert.equal(alertRequests.length, 3);
+	assert.equal(alertRequests[1].body.variables.after, 'page-1');
+	assert.equal(alertRequests[2].body.variables.after, 'page-2');
+	assert.ok(alertRequests[0].body.variables.orFilter);
+});
+
+test('Get Many Return All applies its safety cap to unique alert IDs', async () => {
+	const edges = [
+		{ cursor: 'duplicate-1', node: { id: 'alert-duplicate' } },
+		{ cursor: 'duplicate-2', node: { id: 'alert-duplicate' } },
+		...Array.from({ length: 9_999 }, (_, index) => ({
+			cursor: `edge-${index}`,
+			node: { id: `alert-${index}` },
+		})),
+	];
+	const ctx = actionContext({ returnAll: true }, metadata, () => ({
+		data: {
+			alerts: {
+				edges,
+				pageInfo: { hasNextPage: false, endCursor: null },
+			},
+		},
+	}));
+
+	const alerts = await getManyUnifiedAlerts(ctx, 0);
+	assert.equal(alerts.length, 10_000);
+	assert.equal(alerts[0].id, 'alert-duplicate');
 });
 
 test('Get Many combines legacy status, Alert Filters, and Advanced Filters with Match All', async () => {
@@ -416,6 +708,9 @@ test('Get Many exposes Alert Filters and Advanced Filters for the getAll operati
 	assert.ok(alertFilters);
 	assert.deepEqual(alertFilters.displayOptions.show.operation, ['getAll']);
 	assert.ok(advancedFilters);
+	assert.match(advancedFilters.description, /ANDed with Filters and Alert Filters/);
+	assert.match(advancedFilters.description, /docs\/actions\.md#get-many-filters/);
+	assert.doesNotMatch(advancedFilters.description, /docs\/trigger\.md/);
 	assert.deepEqual(options.displayOptions.show.operation, ['getAll']);
 });
 

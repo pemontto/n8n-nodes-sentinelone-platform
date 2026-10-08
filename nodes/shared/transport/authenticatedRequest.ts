@@ -5,7 +5,7 @@ import type {
 	ILoadOptionsFunctions,
 	IPollFunctions,
 } from 'n8n-workflow';
-import { NodeApiError } from 'n8n-workflow';
+import { NodeApiError, NodeOperationError } from 'n8n-workflow';
 import { logGraphqlRequest, logGraphqlResult } from '../Debug';
 import { PollBudgetError, requestWithRetry } from './request';
 import { responseStatus, responseHeader, isRetryableReadError, retryAfterMs } from './retry';
@@ -18,6 +18,7 @@ export function authenticatedRequest(
 	context: IPollFunctions | ILoadOptionsFunctions | IExecuteFunctions,
 	debug = false,
 	deadline?: number,
+	itemIndex?: number,
 ): AuthenticatedRequest {
 	return async (options, readerDeadline) =>
 		requestWithRetry(
@@ -31,7 +32,10 @@ export function authenticatedRequest(
 						: undefined;
 
 				if (document)
-					logGraphqlRequest(context.logger, debug, document, body?.variables, { attempt });
+					logGraphqlRequest(context.logger, debug, document, body?.variables, {
+						attempt,
+						itemIndex,
+					});
 				const startedAt = Date.now();
 				let received = false;
 
@@ -47,6 +51,7 @@ export function authenticatedRequest(
 					if (document)
 						logGraphqlResult(context.logger, debug, {
 							attempt,
+							itemIndex,
 							durationMs: Date.now() - startedAt,
 							outcome: 'received',
 							graphqlErrorCount: Array.isArray(response?.errors) ? response.errors.length : 0,
@@ -57,6 +62,7 @@ export function authenticatedRequest(
 					if (document && !received)
 						logGraphqlResult(context.logger, debug, {
 							attempt,
+							itemIndex,
 							durationMs: Date.now() - startedAt,
 							outcome: 'transportError',
 						});
@@ -77,6 +83,27 @@ export function authenticatedRequest(
 			const error = result.error;
 			const status = responseStatus(error);
 
+			// Action items retain the transport cause and code when no HTTP response exists.
+			if (itemIndex !== undefined && status === null) {
+				const message = error instanceof Error ? error.message : String(error);
+				const errorCode =
+					error !== null && typeof error === 'object' && 'code' in error ? error.code : undefined;
+				const transportError = new NodeOperationError(
+					context.getNode(),
+					error instanceof Error ? error : new Error(message),
+					{ itemIndex, message },
+				);
+				// n8n expands common socket codes; retain the original transport message.
+				transportError.message = message;
+				throw Object.assign(transportError, {
+					...(typeof errorCode === 'string' && /^[A-Z0-9_.-]{1,64}$/.test(errorCode)
+						? { errorCode }
+						: {}),
+					retryable: isRetryableReadError(error),
+					retryAfterMs: Math.max(retryAfterMs(error), result.retryDelayMs ?? 0),
+				});
+			}
+
 			const message =
 				status === 401
 					? 'SentinelOne authentication failed. Check the credential.'
@@ -91,6 +118,7 @@ export function authenticatedRequest(
 				{ message },
 				{
 					message,
+					itemIndex,
 					description: status ? `SentinelOne returned HTTP ${status}.` : undefined,
 					httpCode: status ? String(status) : undefined,
 				},

@@ -1,3 +1,4 @@
+import { responseStatus } from '../../../shared/transport/retry';
 import { authenticatedRequest } from '../../../shared/transport/authenticatedRequest';
 import {
 	alertFilterProperties,
@@ -100,13 +101,34 @@ export async function getManyUnifiedAlerts(
 			match,
 		);
 		if (rows.length) {
-			const credentials = await context.getCredentials('sentinelOnePlatformApi');
-			const metadata = await loadAlertFilterMetadata(
-				authenticatedRequest(context),
-				normalizeBaseUrl(credentials.baseUrl),
-				String(context.getNode().credentials?.sentinelOnePlatformApi?.id ?? ''),
-			);
-			validateAlertFilters(rows, metadata);
+			let metadata;
+			try {
+				const credentials = await context.getCredentials('sentinelOnePlatformApi');
+				metadata = await loadAlertFilterMetadata(
+					authenticatedRequest(
+						context,
+						context.getNodeParameter('nodeDebug', itemIndex, false) === true,
+						undefined,
+						itemIndex,
+					),
+					normalizeBaseUrl(credentials.baseUrl),
+					String(context.getNode().credentials?.sentinelOnePlatformApi?.id ?? ''),
+				);
+			} catch (error) {
+				// Metadata is advisory outside manual execution; authentication failures remain fatal.
+				if (
+					(context.getMode?.() ?? 'manual') === 'manual' ||
+					[401, 403].includes(responseStatus(error) ?? 0)
+				) {
+					// The outer boundary adds item context while preserving typed transport errors.
+					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+					throw error;
+				}
+				context.logger.warn(
+					`[SentinelOne Platform] Unable to validate Alert Filters against field metadata. ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			if (metadata) validateAlertFilters(rows, metadata);
 		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
@@ -121,6 +143,7 @@ export async function getManyUnifiedAlerts(
 
 	const alerts: IDataObject[] = [];
 	const seenCursors = new Set<string>();
+	const seenAlertIds = new Set<string>();
 	let after: string | undefined;
 
 	while (alerts.length < rawLimit) {
@@ -144,18 +167,6 @@ export async function getManyUnifiedAlerts(
 
 		const page = assertConnection(context, itemIndex, root);
 
-		if (
-			returnAll &&
-			(alerts.length + page.edges.length > MAX_RETURN_ALL_ALERTS ||
-				(alerts.length + page.edges.length === MAX_RETURN_ALL_ALERTS && page.hasNextPage))
-		) {
-			throw localError(
-				context,
-				itemIndex,
-				`Return All is limited to ${MAX_RETURN_ALL_ALERTS.toLocaleString('en-US')} alerts. Add filters or use a bounded Limit.`,
-			);
-		}
-
 		if (page.edges.length === 0 && page.hasNextPage) {
 			throw apiError(
 				context,
@@ -170,6 +181,16 @@ export async function getManyUnifiedAlerts(
 			}
 
 			assertAlert(context, itemIndex, edge.node, null, scope);
+			const id = String(edge.node.id);
+			if (seenAlertIds.has(id)) continue;
+			if (returnAll && alerts.length >= MAX_RETURN_ALL_ALERTS) {
+				throw localError(
+					context,
+					itemIndex,
+					`Return All is limited to ${MAX_RETURN_ALL_ALERTS.toLocaleString('en-US')} alerts. Add filters or use a bounded Limit.`,
+				);
+			}
+			seenAlertIds.add(id);
 			alerts.push(alertOutput(edge.node as IDataObject));
 
 			if (alerts.length >= rawLimit) break;
@@ -293,10 +314,10 @@ export const description: INodeProperties[] = [
 			additionalAlertFields('list'),
 			{
 				...advancedAlertFilters,
-				description: advancedAlertFilters.description?.replace(
-					'Severity, Status, Alert Name',
-					'Filters',
-				),
+				description: advancedAlertFilters.description
+					?.replace('Severity, Status, Alert Name', 'Filters')
+					.replace('docs/trigger.md#advanced-filters', 'docs/actions.md#get-many-filters')
+					.replace('Comparators, all fields and examples', 'Get Many filter rules'),
 			},
 			managementScopeOption(),
 		],
