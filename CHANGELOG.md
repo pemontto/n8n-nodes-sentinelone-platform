@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Alert Get Many adds top-level Alert Filters and Match Filters, plus Advanced Filters under Options. Legacy Filters remain in place and combine with the new controls using AND; filter rows are validated against SentinelOne alert-column metadata, and the combined server-side expression is limited to 20 groups and 100 filters per group.
+
 ## 0.2.0 (2026-10-07)
 
 - Alert triggers add repeatable GUI Alert Filters rows with Match All or Match Any behaviour and a reference for supported alert fields and comparators.

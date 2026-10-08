@@ -1,4 +1,16 @@
+import { responseStatus } from '../../../shared/transport/retry';
+import { authenticatedRequest } from '../../../shared/transport/authenticatedRequest';
+import {
+	alertFilterProperties,
+	parseAlertFilters,
+	validateAlertFilters,
+	loadAlertFilterMetadata,
+	TriggerFilterError,
+} from '../../../shared/AlertFilters';
+import { advancedFilterSelection } from '../../../shared/AlertFilterSelection';
+import { advancedAlertFilters } from '../../../shared/AlertFilterAdvanced';
 import type { INodeProperties, IDataObject, IExecuteFunctions } from 'n8n-workflow';
+import { NodeApiError, NodeOperationError } from 'n8n-workflow';
 import {
 	additionalAlertFields,
 	managementScopeOption,
@@ -9,7 +21,7 @@ import {
 import { isRecord, localError, apiError, assertAlert } from '../common';
 import { graphQlRequest } from '../../transport/graphql';
 import { getManyAlertsDocument } from '../documents';
-import { readListScope } from '../../../shared/Scopes';
+import { readListScope, normalizeBaseUrl } from '../../../shared/Scopes';
 import { buildFilters } from './filters';
 import { alertListSelection, alertOutput } from '../../../shared/AlertFields';
 
@@ -68,14 +80,70 @@ export async function getManyUnifiedAlerts(
 		throw localError(context, itemIndex, 'Limit must be a positive integer.');
 	}
 
-	const filters = buildFilters(
+	const legacyFilters = buildFilters(
 		context,
 		itemIndex,
 		context.getNodeParameter('filters', itemIndex, {}),
 	);
+	let selectionFilters;
+	try {
+		const rows = parseAlertFilters(
+			context.getNodeParameter('alertFilters', itemIndex, {}),
+			context.getTimezone?.(),
+		);
+		const match = context.getNodeParameter('alertFilterMatch', itemIndex, 'all');
+		if (match !== 'all' && match !== 'any') throw new Error('Match Filters must be All or Any.');
+		const options = context.getNodeParameter('options', itemIndex, {});
+		selectionFilters = advancedFilterSelection(
+			legacyFilters,
+			isRecord(options) ? options.advancedFilters : undefined,
+			rows,
+			match,
+		);
+		if (rows.length) {
+			let metadata;
+			try {
+				const credentials = await context.getCredentials('sentinelOnePlatformApi');
+				metadata = await loadAlertFilterMetadata(
+					authenticatedRequest(
+						context,
+						context.getNodeParameter('nodeDebug', itemIndex, false) === true,
+						undefined,
+						itemIndex,
+					),
+					normalizeBaseUrl(credentials.baseUrl),
+					String(context.getNode().credentials?.sentinelOnePlatformApi?.id ?? ''),
+				);
+			} catch (error) {
+				// Metadata is advisory outside manual execution; authentication failures remain fatal.
+				if (
+					(context.getMode?.() ?? 'manual') === 'manual' ||
+					[401, 403].includes(responseStatus(error) ?? 0)
+				) {
+					// The outer boundary adds item context while preserving typed transport errors.
+					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+					throw error;
+				}
+				context.logger.warn(
+					`[SentinelOne Platform] Unable to validate Alert Filters against field metadata. ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			if (metadata) validateAlertFilters(rows, metadata);
+		}
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		// Metadata transport errors already carry the HTTP status and retry details.
+		// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
+		if (error instanceof NodeOperationError || error instanceof NodeApiError) throw error;
+		throw new NodeOperationError(context.getNode(), message, {
+			itemIndex,
+			description: error instanceof TriggerFilterError ? error.description : undefined,
+		});
+	}
 
 	const alerts: IDataObject[] = [];
 	const seenCursors = new Set<string>();
+	const seenAlertIds = new Set<string>();
 	let after: string | undefined;
 
 	while (alerts.length < rawLimit) {
@@ -90,25 +158,14 @@ export async function getManyUnifiedAlerts(
 				...(after === undefined ? {} : { after }),
 				scope,
 				viewType: 'ALL',
-				filters,
+				filters: selectionFilters.filters,
+				...(selectionFilters.orFilter ? { orFilter: selectionFilters.orFilter } : {}),
 				sorts: [{ by: 'createdAt', order: 'DESC' }],
 			},
 			'alerts',
 		);
 
 		const page = assertConnection(context, itemIndex, root);
-
-		if (
-			returnAll &&
-			(alerts.length + page.edges.length > MAX_RETURN_ALL_ALERTS ||
-				(alerts.length + page.edges.length === MAX_RETURN_ALL_ALERTS && page.hasNextPage))
-		) {
-			throw localError(
-				context,
-				itemIndex,
-				`Return All is limited to ${MAX_RETURN_ALL_ALERTS.toLocaleString('en-US')} alerts. Add filters or use a bounded Limit.`,
-			);
-		}
 
 		if (page.edges.length === 0 && page.hasNextPage) {
 			throw apiError(
@@ -124,6 +181,16 @@ export async function getManyUnifiedAlerts(
 			}
 
 			assertAlert(context, itemIndex, edge.node, null, scope);
+			const id = String(edge.node.id);
+			if (seenAlertIds.has(id)) continue;
+			if (returnAll && alerts.length >= MAX_RETURN_ALL_ALERTS) {
+				throw localError(
+					context,
+					itemIndex,
+					`Return All is limited to ${MAX_RETURN_ALL_ALERTS.toLocaleString('en-US')} alerts. Add filters or use a bounded Limit.`,
+				);
+			}
+			seenAlertIds.add(id);
 			alerts.push(alertOutput(edge.node as IDataObject));
 
 			if (alerts.length >= rawLimit) break;
@@ -226,6 +293,16 @@ export const description: INodeProperties[] = [
 			},
 		],
 	},
+	...alertFilterProperties.map((property) => ({
+		...property,
+		displayOptions: { show: { resource: ['alert'], operation: ['getAll'] } },
+		...(property.name === 'alertFilterMatch'
+			? {
+					description:
+						'How to combine Alert Filters. With Match Any, Exclude is one alternative; use Match All for exclusions that must always hold. Filters and Advanced Filters must also match.',
+				}
+			: {}),
+	})),
 	{
 		displayName: 'Options',
 		name: 'options',
@@ -233,6 +310,16 @@ export const description: INodeProperties[] = [
 		placeholder: 'Add Option',
 		default: {},
 		displayOptions: { show: { resource: ['alert'], operation: ['getAll'] } },
-		options: [additionalAlertFields('list'), managementScopeOption()],
+		options: [
+			additionalAlertFields('list'),
+			{
+				...advancedAlertFilters,
+				description: advancedAlertFilters.description
+					?.replace('Severity, Status, Alert Name', 'Filters')
+					.replace('docs/trigger.md#advanced-filters', 'docs/actions.md#get-many-filters')
+					.replace('Comparators, all fields and examples', 'Get Many filter rules'),
+			},
+			managementScopeOption(),
+		],
 	},
 ];

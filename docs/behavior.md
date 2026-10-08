@@ -6,6 +6,14 @@ Alert Get and Update and Alert Note Get Many and Create target IDs and need no s
 
 When a scope is selected, omitted child selections mean all accessible children beneath it. Child selections retained in saved parameters are validated by Get Many and triggers. Clearing Accounts in the trigger editor removes hidden Sites and Groups values and includes everything the credential can see. A Groups selection without Sites is rejected rather than widened. Common alert fields remain present; Additional Alert Fields and Raw Data are opt-in. The common response intentionally exceeds the n8n ten-field simplification recommendation.
 
+## Get Many alert filters
+
+Alert Get Many ANDs the legacy Filters collection with Alert Filters and Advanced Filters. Match Filters combines the Alert Filters rows using `all` (AND) or `any` (OR); every resulting OR group retains the legacy and advanced conditions. The combined expression is limited to 20 groups and 100 filters per group. Get Many rejects Match Filters values other than `all` and `any`; the trigger treats any other value as `all`.
+
+Alert Filters rows are checked against SentinelOne alert-column metadata when it is available. A metadata lookup failure during a non-manual Get Many execution logs a warning and skips metadata validation, unless the HTTP status is 401 or 403. Manual executions and authentication or permission failures still fail with the originating item index. A successful lookup followed by invalid row metadata always fails. SentinelOne still validates fields and comparators in the alert query. Statusless metadata transport errors retain the original message, error code and cause; the metadata request honours Debug.
+
+Get Many keeps the first occurrence of each alert ID across pages and OR groups. Limit and the 10,000-alert Return All cap count unique alerts.
+
 ## Requests and outcomes
 
 Authenticated n8n request helpers handle network access. Reads retry transient network errors and selected server responses with bounded deadlines and backoff. A request timeout caused by the scheduled poll deadline is treated as a deadline stop. If a 429 or 5xx retry cannot fit the remaining deadline after the poll has made progress, the trigger returns the completed prefix, hands the unfinished range to the next poll, and logs the response status; without progress, the HTTP error is returned. Other HTTP errors, including 401, 403, and 404, fail the poll. Mutations are submitted once. Whole-node Retry On Fail is rejected for mutation operations because it can repeat writes. Debug uses redacted request details and cannot affect execution.
