@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Alert Get Many now stops with an error when SentinelOne returns a page containing only alerts it has already returned, instead of paging indefinitely.
+- Alert Get Many now stops with an error after three consecutive pages containing only alerts it has already returned, instead of paging indefinitely.
 
 ## 0.3.0 (2026-10-08)
 

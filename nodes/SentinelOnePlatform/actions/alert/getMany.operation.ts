@@ -28,6 +28,7 @@ import { alertListSelection, alertOutput } from '../../../shared/AlertFields';
 const MAX_PAGE_SIZE = 100;
 
 const MAX_RETURN_ALL_ALERTS = 10_000;
+const MAX_STALLED_ALERT_PAGES = 3;
 
 function assertConnection(
 	context: IExecuteFunctions,
@@ -145,6 +146,7 @@ export async function getManyUnifiedAlerts(
 	const seenCursors = new Set<string>();
 	const seenAlertIds = new Set<string>();
 	let after: string | undefined;
+	let stalledAlertPages = 0;
 
 	while (alerts.length < rawLimit) {
 		const first = returnAll ? MAX_PAGE_SIZE : Math.min(MAX_PAGE_SIZE, rawLimit - alerts.length);
@@ -198,7 +200,8 @@ export async function getManyUnifiedAlerts(
 		}
 
 		if (!page.hasNextPage || alerts.length >= rawLimit) break;
-		if (alerts.length === previousAlertCount)
+		stalledAlertPages = alerts.length === previousAlertCount ? stalledAlertPages + 1 : 0;
+		if (stalledAlertPages >= MAX_STALLED_ALERT_PAGES)
 			throw apiError(context, itemIndex, 'SentinelOne returned an alert page with no new alerts.');
 		const next = typeof page.endCursor === 'string' ? page.endCursor.trim() : '';
 
