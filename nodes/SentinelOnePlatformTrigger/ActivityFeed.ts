@@ -12,7 +12,8 @@ export const ACTIVITY_FEED_LIMIT = 1000;
 
 export const ACTIVITY_FEED_INLINE_BYTES = 5 * 1024 * 1024;
 
-export const ACTIVITY_FEED_ROUTING_HEADER = 'x-dataset-query-forward-tag';
+import { ACTIVITY_FEED_ROUTING_HEADER } from '../shared/transport/authenticatedRequest';
+export { ACTIVITY_FEED_ROUTING_HEADER } from '../shared/transport/authenticatedRequest';
 
 export const ACTIVITY_FEED_LOG_FILTER =
 	"dataSource.name='ActivityFeed' dataset='activityLog' data.alert.id=*";

@@ -1,3 +1,4 @@
+import { alertFilterLoadOptions } from '../shared/AlertFilterOptions';
 import type {
 	IDataObject,
 	IExecuteFunctions,
@@ -95,6 +96,7 @@ export class SentinelOnePlatform implements INodeType {
 
 	methods = {
 		loadOptions: {
+			...alertFilterLoadOptions,
 			async getAccounts(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				return await loadListScopeOptions(this, 'ACCOUNT');
 			},

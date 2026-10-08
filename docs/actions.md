@@ -12,6 +12,14 @@ The normal output item includes `alertId`, `requested`, `outcome`, `mutationAckn
 
 GraphQL errors return SentinelOne's own message text (up to five messages, each bounded) plus any error codes, so a failure says what went wrong. Values submitted by a mutation, such as note text, are masked if SentinelOne echoes them back. A missing alert is reported as `Alert <id> not found.` with HTTP 404.
 
+### Get Many filters
+
+The legacy Filters collection is unchanged. Its analyst verdict, created time, external ID, severity, status, and ticket ID conditions remain ANDed with each other and with the newer filter controls. Alert Filters and Match Filters are top-level parameters, and Advanced Filters is in Options. The shared controls use the same fields, comparators, row validation, and Match All or Match Any behavior as the Alert trigger; see [Alert filter fields](reference/alert-filter-fields.md) and [trigger filter semantics](trigger.md#alert-filters).
+
+Advanced Filters accepts either a JSON list of filter objects, where every filter must match, or one JSON object with an `or` array of groups containing `and` arrays. Get Many combines its existing Filters collection, Alert Filters, and Advanced Filters with AND. The final combined expression is limited to 20 groups and 100 filters in each group; invalid row fields and comparators are checked against SentinelOne alert-column metadata.
+
+For example, Match Filters set to All can select statuses `NEW` and `IN_PROGRESS`, while two Alert Filters rows exclude ticket IDs containing `automation_marker` and `triage_result`. These filters are combined and evaluated by SentinelOne as part of the Get Many request; no client-side filtering is applied.
+
 ## Alert Note
 
 Get Many takes an Alert ID and a Limit or Return All. Create takes an Alert ID, text, and Plain Text or Markdown format. Neither operation needs scope.

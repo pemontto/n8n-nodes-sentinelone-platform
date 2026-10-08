@@ -1,12 +1,12 @@
+import { advancedAlertFilters } from '../shared/AlertFilterAdvanced';
+import { alertFilterLoadOptions } from '../shared/AlertFilterOptions';
 import {
 	alertFilterProperties,
-	alertFilterComparators,
-	comparatorsForField,
 	loadAlertFilterMetadata,
 	parseAlertFilters,
 	TriggerFilterError,
 	validateAlertFilters,
-} from './AlertFilters';
+} from '../shared/AlertFilters';
 import {
 	additionalAlertFields,
 	analystVerdictOptions,
@@ -40,7 +40,6 @@ import {
 	pollSentinelOne,
 	fingerprintConfig,
 	TRIGGER_STATE_VERSION,
-	type AuthenticatedRequest,
 	type TriggerConfig,
 	type TriggerEvent,
 	type TriggerState,
@@ -49,7 +48,7 @@ import {
 import { DEFAULT_ADDITIONAL_ALERT_FIELDS } from '../shared/AlertFields';
 import { activityAccountIds } from '../shared/Scopes';
 import { pollAlertActivities } from './ActivityNotePoll';
-import { ACTIVITY_FEED_ROUTING_HEADER } from './ActivityFeed';
+import { authenticatedRequest } from '../shared/transport/authenticatedRequest';
 import {
 	parseActivitySelection,
 	parseExactValues,
@@ -57,14 +56,9 @@ import {
 	mitigationActionTypeOptions,
 	mitigationActivityStatusOptions,
 } from './ActivityConditions';
-import { debugSetting, logGraphqlRequest, logGraphqlResult } from '../shared/Debug';
-import { PollBudgetError, requestWithRetry } from '../shared/transport/request';
-import {
-	responseHeader,
-	responseStatus,
-	isRetryableReadError,
-	retryAfterMs,
-} from '../shared/transport/retry';
+import { debugSetting } from '../shared/Debug';
+import { PollBudgetError } from '../shared/transport/request';
+import { responseStatus, isRetryableReadError, retryAfterMs } from '../shared/transport/retry';
 
 const simplifyOption: INodeProperties = {
 	displayName: 'Simplify',
@@ -279,101 +273,6 @@ function credentialIdentity(context: IPollFunctions | ILoadOptionsFunctions): ID
 	};
 }
 
-function authenticatedRequest(
-	context: IPollFunctions | ILoadOptionsFunctions,
-	debug = false,
-	deadline?: number,
-): AuthenticatedRequest {
-	return async (options, readerDeadline) =>
-		requestWithRetry(
-			async (timeoutMs, attempt) => {
-				// SAFETY: request bodies passed to this helper are n8n JSON objects.
-				const body = options.body as IDataObject | undefined;
-
-				const document =
-					options.url.includes('/unifiedalerts/graphql') && typeof body?.query === 'string'
-						? body.query
-						: undefined;
-
-				if (document)
-					logGraphqlRequest(context.logger, debug, document, body?.variables, { attempt });
-				const startedAt = Date.now();
-				let received = false;
-
-				try {
-					const response = await context.helpers.httpRequestWithAuthentication.call(
-						context,
-						'sentinelOnePlatformApi',
-						{ ...options, timeout: timeoutMs, sendCredentialsOnCrossOriginRedirect: false },
-					);
-
-					received = true;
-
-					if (document)
-						logGraphqlResult(context.logger, debug, {
-							attempt,
-							durationMs: Date.now() - startedAt,
-							outcome: 'received',
-							graphqlErrorCount: Array.isArray(response?.errors) ? response.errors.length : 0,
-						});
-
-					return response;
-				} finally {
-					if (document && !received)
-						logGraphqlResult(context.logger, debug, {
-							attempt,
-							durationMs: Date.now() - startedAt,
-							outcome: 'transportError',
-						});
-				}
-			},
-			{
-				// Scope loading and SDL polling own their bounded retry loops.
-				attempts: options.url.includes('/unifiedalerts/graphql') ? 3 : 1,
-				timeoutMs: options.timeout,
-				deadline:
-					readerDeadline === undefined ? deadline : Math.min(deadline ?? Infinity, readerDeadline),
-			},
-		).then((result) => {
-			if (result.ok) return result.value;
-
-			// Poll helpers recognise this class to keep a completed prefix; poll() wraps it with node context.
-			if (result.error instanceof PollBudgetError) throw result.error;
-			const error = result.error;
-			const status = responseStatus(error);
-
-			const message =
-				status === 401
-					? 'SentinelOne authentication failed. Check the credential.'
-					: status === 403
-						? 'SentinelOne denied access. Check the credential permissions.'
-						: status === 429
-							? 'SentinelOne rate limit reached. Try again after the service delay.'
-							: `SentinelOne request failed${status ? ` (HTTP ${status})` : ''}. Check service availability.`;
-
-			const apiError = new NodeApiError(
-				context.getNode(),
-				{ message },
-				{
-					message,
-					description: status ? `SentinelOne returned HTTP ${status}.` : undefined,
-					httpCode: status ? String(status) : undefined,
-				},
-			);
-
-			const routingTag = responseHeader(error, ACTIVITY_FEED_ROUTING_HEADER);
-
-			throw Object.assign(apiError, {
-				...(routingTag !== undefined
-					? { headers: { [ACTIVITY_FEED_ROUTING_HEADER]: routingTag } }
-					: {}),
-				statusCode: status,
-				retryable: isRetryableReadError(error),
-				retryAfterMs: Math.max(retryAfterMs(error), result.retryDelayMs ?? 0),
-			});
-		});
-}
-
 async function scopeOptions(
 	context: IPollFunctions | ILoadOptionsFunctions,
 	scopeType: ScopeType,
@@ -564,16 +463,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 				displayOptions: { show: { resource: ['alert'] } },
 				options: [
 					additionalAlertFields('list'),
-					{
-						displayName: 'Advanced Filters',
-						name: 'advancedFilters',
-						type: 'json',
-						default: '[]',
-						placeholder:
-							'[{ "fieldId": "alertName", "match": { "operator": "contains", "values": ["CloudTrail"] }, "isNegated": true }]',
-						description:
-							'SentinelOne filters as JSON, always ANDed with Severity, Status, Alert Name and Alert Filters. A list [X, Y]: every filter must match. An or object {"or":[{"and":[X]},{"and":[Y]}]}: at least one group must match. Each filter has a fieldId (for example alertName, ticketId, status, severity, assetName), one comparator, and optional "isNegated": true to exclude. Comparators: match (text ignoring case; operator contains, startsWith, endsWith or exactMatch), stringIn (exact, any of values), stringEqual (exact, one value), dateTimeRange (epoch ms start/end), booleanEqual. Account, site and group are not filterable; use Scope. <a href="https://github.com/pemontto/n8n-nodes-sentinelone-platform/blob/main/docs/trigger.md#advanced-filters">Comparators, all fields and examples</a>.',
-					},
+					advancedAlertFilters,
 					{
 						displayName: 'Alert Name',
 						name: 'alertName',
@@ -738,83 +628,7 @@ export class SentinelOnePlatformTrigger implements INodeType {
 
 	methods = {
 		loadOptions: {
-			async getAlertFilterFields(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
-				try {
-					const credentials = await this.getCredentials('sentinelOnePlatformApi');
-
-					const fields = await loadAlertFilterMetadata(
-						authenticatedRequest(this),
-						normalizeBaseUrl(credentials.baseUrl),
-						String(credentialIdentity(this).id ?? ''),
-					);
-
-					return fields.map(({ fieldId }) => ({ name: fieldId, value: fieldId }));
-				} catch (error) {
-					// Preserve authentication, permission, rate limit and timeout errors.
-					// eslint-disable-next-line @n8n/community-nodes/require-node-api-error
-					if (error instanceof NodeApiError) throw error;
-					const status = responseStatus(error);
-
-					if (status !== null)
-						throw new NodeApiError(
-							this.getNode(),
-							{ message: errorMessage(error) },
-							{
-								httpCode: String(status),
-								message: 'Unable to load SentinelOne alert filter metadata.',
-								description: errorMessage(error),
-							},
-						);
-
-					throw new NodeOperationError(
-						this.getNode(),
-						'Unable to load SentinelOne alert filter fields. Check the credential and try again.',
-						{
-							description:
-								error instanceof TriggerFilterError ? error.description : errorMessage(error),
-						},
-					);
-				}
-			},
-			async getAlertFilterComparators(
-				this: ILoadOptionsFunctions,
-			): Promise<INodePropertyOptions[]> {
-				const fieldId = this.getCurrentNodeParameter('&fieldId');
-
-				if (typeof fieldId !== 'string' || !fieldId || fieldId.startsWith('='))
-					return alertFilterComparators;
-
-				try {
-					const credentials = await this.getCredentials('sentinelOnePlatformApi');
-
-					const fields = await loadAlertFilterMetadata(
-						authenticatedRequest(this),
-						normalizeBaseUrl(credentials.baseUrl),
-						String(credentialIdentity(this).id ?? ''),
-					);
-
-					const field = fields.find((entry) => entry.fieldId === fieldId);
-
-					if (!field) return alertFilterComparators;
-
-					return comparatorsForField(field);
-				} catch (error) {
-					const status = responseStatus(error);
-
-					if (status === 401 || status === 403)
-						throw new NodeApiError(
-							this.getNode(),
-							{ message: errorMessage(error) },
-							{
-								httpCode: String(status),
-								message: 'Unable to load SentinelOne alert filter metadata.',
-								description: errorMessage(error),
-							},
-						);
-
-					return alertFilterComparators;
-				}
-			},
+			...alertFilterLoadOptions,
 
 			async getAccounts(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
 				const credentials = await this.getCredentials('sentinelOnePlatformApi');

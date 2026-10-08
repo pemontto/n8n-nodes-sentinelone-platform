@@ -155,6 +155,7 @@ export function getManyAlertsDocument(selection = alertListSelection()): string 
 			$scope: ScopeSelectorInput
 			$viewType: ViewType!
 			$filters: [FilterInput!]
+			$orFilter: OrFilterSelectionInput
 			$sorts: [SortInput!]
 		) {
 			alerts(
@@ -163,6 +164,7 @@ export function getManyAlertsDocument(selection = alertListSelection()): string 
 				scope: $scope
 				viewType: $viewType
 				filters: $filters
+				orFilter: $orFilter
 				sorts: $sorts
 			) {
 				edges {
