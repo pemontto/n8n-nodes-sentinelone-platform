@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 (2026-10-08)
 
 - Alert Get Many now stops with an error after three consecutive pages containing only alerts it has already returned, instead of paging indefinitely.
 
