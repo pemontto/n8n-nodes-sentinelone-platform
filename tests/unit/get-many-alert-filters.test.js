@@ -428,7 +428,10 @@ test('Get Many deduplicates overlapping pages, preserves the first match, and li
 		{
 			data: {
 				alerts: {
-					edges: [{ cursor: 'edge-4', node: { id: 'alert-a', severity: 'INFO' } }],
+					edges: [
+						{ cursor: 'edge-4', node: { id: 'alert-a', severity: 'INFO' } },
+						{ cursor: 'edge-5', node: { id: 'alert-c', severity: 'LOW' } },
+					],
 					pageInfo: { hasNextPage: true, endCursor: 'page-2' },
 				},
 			},
@@ -436,7 +439,7 @@ test('Get Many deduplicates overlapping pages, preserves the first match, and li
 		{
 			data: {
 				alerts: {
-					edges: [{ cursor: 'edge-5', node: { id: 'alert-c', severity: 'LOW' } }],
+					edges: [{ cursor: 'edge-6', node: { id: 'alert-d', severity: 'LOW' } }],
 					pageInfo: { hasNextPage: false, endCursor: 'page-3' },
 				},
 			},
@@ -444,7 +447,7 @@ test('Get Many deduplicates overlapping pages, preserves the first match, and li
 	];
 	const ctx = actionContext(
 		{
-			limit: 3,
+			limit: 4,
 			alertFilters: {
 				filter: [
 					{ fieldId: 'alertName', comparator: 'contains', value: 'first-or-branch' },
@@ -460,7 +463,7 @@ test('Get Many deduplicates overlapping pages, preserves the first match, and li
 	const alerts = await getManyUnifiedAlerts(ctx, 0);
 	assert.deepEqual(
 		alerts.map(({ id }) => id),
-		['alert-a', 'alert-b', 'alert-c'],
+		['alert-a', 'alert-b', 'alert-c', 'alert-d'],
 	);
 	assert.equal(alerts[0].severity, 'HIGH');
 	const alertRequests = ctx.requests.filter((request) =>
@@ -470,6 +473,31 @@ test('Get Many deduplicates overlapping pages, preserves the first match, and li
 	assert.equal(alertRequests[1].body.variables.after, 'page-1');
 	assert.equal(alertRequests[2].body.variables.after, 'page-2');
 	assert.ok(alertRequests[0].body.variables.orFilter);
+});
+
+test('Get Many Return All fails when pages repeat alert IDs with fresh cursors', async () => {
+	let requestCount = 0;
+	const ctx = actionContext({ returnAll: true }, metadata, () => {
+		requestCount++;
+		if (requestCount > 3) throw new Error('Fake alert API request limit exceeded.');
+		return {
+			data: {
+				alerts: {
+					edges: [
+						{ cursor: `edge-${requestCount}-a`, node: { id: 'alert-a' } },
+						{ cursor: `edge-${requestCount}-b`, node: { id: 'alert-b' } },
+					],
+					pageInfo: { hasNextPage: true, endCursor: `page-${requestCount}` },
+				},
+			},
+		};
+	});
+
+	await assert.rejects(
+		getManyUnifiedAlerts(ctx, 0),
+		/SentinelOne returned an alert page with no new alerts\./,
+	);
+	assert.equal(requestCount, 2);
 });
 
 test('Get Many Return All applies its safety cap to unique alert IDs', async () => {

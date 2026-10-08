@@ -175,6 +175,7 @@ export async function getManyUnifiedAlerts(
 			);
 		}
 
+		const previousAlertCount = alerts.length;
 		for (const edge of page.edges) {
 			if (!isRecord(edge) || typeof edge.cursor !== 'string' || !edge.cursor.trim()) {
 				throw apiError(context, itemIndex, 'SentinelOne returned a malformed alert edge.');
@@ -197,6 +198,8 @@ export async function getManyUnifiedAlerts(
 		}
 
 		if (!page.hasNextPage || alerts.length >= rawLimit) break;
+		if (alerts.length === previousAlertCount)
+			throw apiError(context, itemIndex, 'SentinelOne returned an alert page with no new alerts.');
 		const next = typeof page.endCursor === 'string' ? page.endCursor.trim() : '';
 
 		if (!next)
